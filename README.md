@@ -8,6 +8,23 @@ After shipping [Echo](https://github.com/jephter-olamiposi/Echo), I wanted a tig
 
 `wsblast` is being built to make that workflow practical for Rust backend teams.
 
+## Architecture Sketch
+
+Planned v0.1 flow:
+
+```mermaid
+flowchart LR
+    A["CLI Input\n(target, concurrency, duration, thresholds)"] --> B["Config Parser"]
+    B --> C["Runner"]
+    C --> D["Worker Pool"]
+    D --> E["WebSocket Target"]
+    D --> F["Metrics Aggregator"]
+    F --> G["CLI Summary\n(p50/p95/p99, errors)"]
+    F --> H["JSON Report"]
+    G --> I["Threshold Gate\n(exit code)"]
+    H --> I
+```
+
 ## Quick Start
 
 ```bash
