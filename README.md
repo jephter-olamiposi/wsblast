@@ -14,15 +14,28 @@ Planned v0.1 flow:
 
 ```mermaid
 flowchart LR
-    A["CLI Input\n(target, concurrency, duration, thresholds)"] --> B["Config Parser"]
-    B --> C["Runner"]
-    C --> D["Worker Pool"]
-    D --> E["WebSocket Target"]
-    D --> F["Metrics Aggregator"]
-    F --> G["CLI Summary\n(p50/p95/p99, errors)"]
-    F --> H["JSON Report"]
-    G --> I["Threshold Gate\n(exit code)"]
-    H --> I
+    subgraph CP["Control Plane"]
+        A["CLI + Config"] --> B["Validator"]
+        B --> C["Orchestrator"]
+        C --> D["Load Controller\n(warmup/steady/cooldown)"]
+        C --> E["SLO Evaluator"]
+    end
+
+    subgraph DP["Data Plane"]
+        D --> F["Session Workers"]
+        F --> G["WebSocket Target"]
+        F --> H["Bounded Metrics Channel"]
+        H --> I["Metrics Pipeline\n(histograms + error taxonomy)"]
+    end
+
+    I --> J["Reporter"]
+    J --> K["CLI Summary\n(p50/p95/p99 + failures)"]
+    J --> L["JSON Report\n(schema versioned)"]
+    J --> M["Run Artifact\n(effective config + env)"]
+    K --> E
+    L --> E
+    M --> E
+    E --> N["Exit Code"]
 ```
 
 ## Quick Start
