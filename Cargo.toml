@@ -1,0 +1,14 @@
+[package]
+name = "wsblast"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Rust-focused WebSocket load testing CLI"
+
+[dependencies]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"
