@@ -1,10 +1,12 @@
 # wsblast
 
-`wsblast` is a Rust-native WebSocket load-testing CLI focused on CI-friendly results and clear latency/error reporting.
+`wsblast` is a high-performance, Rust-native WebSocket load testing CLI designed for reproducible local-to-CI benchmarking, microsecond-accurate percentile latency tracking (`p50`, `p90`, `p95`, `p99`, `p99.9`), granular failure taxonomy, interactive terminal dashboards (TUI), and automated Service Level Objective (SLO) gating.
 
-## Why
+---
 
-After shipping [Echo](https://github.com/jephter-olamiposi/Echo), I wanted a tighter way to stress-test real-time WebSocket paths and inspect failure patterns quickly while iterating.
+## Why wsblast
+
+While stress-testing real-time WebSocket infrastructures, standard HTTP load testers fail to capture persistent connection lifecycle dynamics, framing overhead, and bidirectional round-trip latency variations.
 
 `wsblast` is being built to make that workflow practical for Rust backend teams.
 
