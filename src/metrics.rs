@@ -54,6 +54,7 @@ pub struct LiveSnapshot {
 }
 
 /// Task-local metrics container owned by a single worker to eliminate mutex contention.
+#[derive(Clone)]
 pub struct WorkerMetrics {
     pub handshake_hist: Histogram<u64>,
     pub rtt_hist: Histogram<u64>,

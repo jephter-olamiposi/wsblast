@@ -24,6 +24,10 @@ colored = "3.0"
 tokio-util = "0.7"
 url = "2.5"
 http = "1.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full", "test-util"] }

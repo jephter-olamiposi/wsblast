@@ -1,0 +1,9 @@
+target/
+.git/
+.gitignore
+.env
+*.env
+explanation.md
+launch_content.md
+breakdown.md
+assets/

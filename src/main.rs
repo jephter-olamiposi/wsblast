@@ -12,6 +12,8 @@ use wsblast::tui::TuiApp;
 
 #[tokio::main]
 async fn main() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     if let Err(err) = run_app().await {
         eprintln!("\n{} {}", colored::Colorize::bold("Error:").red(), err);
         std::process::exit(1);

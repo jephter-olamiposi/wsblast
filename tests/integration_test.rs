@@ -66,10 +66,11 @@ async fn test_echo_mode_load_run() {
     let config = LoadTestConfig {
         target_url,
         connections: 10,
+        ramp_rate: 0,
         duration: Duration::from_millis(800),
         max_requests: None,
         rate_per_conn: 0,
-        payload: PayloadConfig::Text(r#"{"msg":"test","seq":{{seq}}}"#.to_string()),
+        payload: PayloadConfig::from_text(r#"{"msg":"test","seq":{{seq}}}"#.to_string()),
         headers: HeaderMap::new(),
         subprotocol: None,
         mode: TestMode::Echo,
@@ -106,10 +107,11 @@ async fn test_slo_evaluation_pass_and_fail() {
     let config = LoadTestConfig {
         target_url,
         connections: 5,
+        ramp_rate: 0,
         duration: Duration::from_millis(500),
         max_requests: None,
         rate_per_conn: 0,
-        payload: PayloadConfig::Text("ping".to_string()),
+        payload: PayloadConfig::from_text("ping".to_string()),
         headers: HeaderMap::new(),
         subprotocol: None,
         mode: TestMode::Echo,
@@ -154,10 +156,11 @@ async fn test_json_and_markdown_report_formatting() {
     let mut config = LoadTestConfig {
         target_url,
         connections: 2,
+        ramp_rate: 0,
         duration: Duration::from_millis(300),
         max_requests: None,
         rate_per_conn: 0,
-        payload: PayloadConfig::Text("hello".to_string()),
+        payload: PayloadConfig::from_text("hello".to_string()),
         headers: HeaderMap::new(),
         subprotocol: None,
         mode: TestMode::Echo,
@@ -200,10 +203,11 @@ async fn test_error_taxonomy_when_target_offline() {
     let config = LoadTestConfig {
         target_url: dead_url,
         connections: 4,
+        ramp_rate: 0,
         duration: Duration::from_millis(300),
         max_requests: None,
         rate_per_conn: 0,
-        payload: PayloadConfig::Text("test".to_string()),
+        payload: PayloadConfig::from_text("test".to_string()),
         headers: HeaderMap::new(),
         subprotocol: None,
         mode: TestMode::Echo,
@@ -282,10 +286,11 @@ async fn test_custom_headers_propagation() {
     let config = LoadTestConfig {
         target_url,
         connections: 1,
+        ramp_rate: 0,
         duration: Duration::from_millis(500),
         max_requests: None,
         rate_per_conn: 0,
-        payload: PayloadConfig::Text("auth-test".to_string()),
+        payload: PayloadConfig::from_text("auth-test".to_string()),
         headers,
         subprotocol: None,
         mode: TestMode::Echo,
@@ -307,4 +312,47 @@ async fn test_custom_headers_propagation() {
     assert!(metrics.total_messages_recv > 0);
 
     cancel.cancel();
+}
+
+#[tokio::test]
+async fn test_connection_ramp_rate() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    let config = LoadTestConfig {
+        target_url,
+        connections: 5,
+        ramp_rate: 20, // 20 conns/sec -> 50ms delay between worker spawns
+        duration: Duration::from_millis(600),
+        max_requests: None,
+        rate_per_conn: 0,
+        payload: PayloadConfig::from_text("static-frame".to_string()),
+        headers: HeaderMap::new(),
+        subprotocol: None,
+        mode: TestMode::Echo,
+        connect_timeout: Duration::from_secs(2),
+        message_timeout: Duration::from_secs(2),
+        ping_interval: Duration::ZERO,
+        slo: SloThresholds::default(),
+        output_format: OutputFormat::Text,
+        output_path: None,
+        tui: false,
+        no_progress: true,
+    };
+
+    let runner = Runner::new(config);
+    let metrics = runner.run().await;
+
+    assert_eq!(metrics.total_connections_established, 5);
+    assert!(metrics.total_messages_sent > 0);
+
+    cancel_server.cancel();
+}
+
+#[test]
+fn test_payload_config_classification() {
+    let static_p = PayloadConfig::from_text("plain text without macros".to_string());
+    assert!(matches!(static_p, PayloadConfig::StaticText(_)));
+
+    let dynamic_p = PayloadConfig::from_text(r#"{"seq": {{seq}}}"#.to_string());
+    assert!(matches!(dynamic_p, PayloadConfig::DynamicText(_)));
 }
