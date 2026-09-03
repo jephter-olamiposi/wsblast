@@ -34,6 +34,14 @@ pub struct Cli {
     )]
     pub connections: usize,
 
+    /// Connection ramp rate in workers per second (0 = spawn all connections immediately)
+    #[arg(
+        long = "ramp-rate",
+        default_value = "0",
+        value_name = "WORKERS_PER_SEC"
+    )]
+    pub ramp_rate: u64,
+
     /// Test duration (e.g., '10s', '30s', '2m', '500ms')
     #[arg(
         short = 'd',

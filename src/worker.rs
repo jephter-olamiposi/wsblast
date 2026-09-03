@@ -138,24 +138,37 @@ impl WorkerSession {
                 break;
             }
 
+            let has_ping = ping_ticker.is_some();
             if let Some(ref mut t) = ticker {
                 tokio::select! {
                     _ = t.tick() => {}
+                    _ = async {
+                        match ping_ticker.as_mut() {
+                            Some(pt) => { pt.tick().await; }
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        let _ = sink.send(Message::Ping(Bytes::from_static(b"hb"))).await;
+                    }
                     _ = self.cancel_token.cancelled() => {
                         let _ = sink.send(Message::Close(None)).await;
                         break;
                     }
                 }
-            }
-
-            if let Some(ref mut pt) = ping_ticker {
-                if pt
-                    .poll_tick(&mut std::task::Context::from_waker(
-                        futures_util::task::noop_waker_ref(),
-                    ))
-                    .is_ready()
-                {
-                    let _ = sink.send(Message::Ping(Bytes::from_static(b"hb"))).await;
+            } else if has_ping {
+                tokio::select! {
+                    _ = async {
+                        match ping_ticker.as_mut() {
+                            Some(pt) => { pt.tick().await; }
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        let _ = sink.send(Message::Ping(Bytes::from_static(b"hb"))).await;
+                    }
+                    _ = self.cancel_token.cancelled() => {
+                        let _ = sink.send(Message::Close(None)).await;
+                        break;
+                    }
                 }
             }
 
@@ -297,8 +310,9 @@ impl WorkerSession {
 
     fn render_payload(&self, seq: u64) -> Message {
         match &self.config.payload {
-            PayloadConfig::Binary(bytes) => Message::Binary(Bytes::copy_from_slice(bytes)),
-            PayloadConfig::Text(template) => {
+            PayloadConfig::Binary(bytes) => Message::Binary(bytes.clone()),
+            PayloadConfig::StaticText(utf8) => Message::Text(utf8.clone()),
+            PayloadConfig::DynamicText(template) => {
                 let now_ms = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_millis())

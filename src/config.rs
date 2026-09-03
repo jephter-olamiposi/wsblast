@@ -2,11 +2,13 @@
 
 use crate::cli::{Cli, OutputFormat, TestMode};
 use crate::error::{ConfigError, Result, WsBlastError};
+use bytes::Bytes;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
+use tokio_tungstenite::tungstenite::protocol::frame::Utf8Bytes;
 use url::Url;
 
 /// Fully validated, immutable configuration for load test execution.
@@ -14,6 +16,7 @@ use url::Url;
 pub struct LoadTestConfig {
     pub target_url: Url,
     pub connections: usize,
+    pub ramp_rate: u64,
     pub duration: Duration,
     pub max_requests: Option<u64>,
     pub rate_per_conn: u64,
@@ -31,13 +34,26 @@ pub struct LoadTestConfig {
     pub no_progress: bool,
 }
 
-/// Payload specification supporting dynamic templating or raw binary streams.
+/// Payload specification supporting zero-allocation cached frames or dynamic templating.
 #[derive(Debug, Clone)]
 pub enum PayloadConfig {
-    /// UTF-8 text template supporting `{{timestamp}}`, `{{worker_id}}`, and `{{seq}}` substitutions.
-    Text(String),
-    /// Raw binary frame payload.
-    Binary(Vec<u8>),
+    /// Static UTF-8 text cached as Utf8Bytes for O(1) zero-allocation cloning.
+    StaticText(Utf8Bytes),
+    /// Dynamic text template requiring macro substitutions on each frame dispatch.
+    DynamicText(String),
+    /// Binary frame payload cached as Bytes for O(1) zero-allocation cloning.
+    Binary(Bytes),
+}
+
+impl PayloadConfig {
+    /// Classifies text payload into either a pre-allocated static frame or a dynamic template.
+    pub fn from_text(text: String) -> Self {
+        if text.contains("{{") {
+            Self::DynamicText(text)
+        } else {
+            Self::StaticText(Utf8Bytes::from(text))
+        }
+    }
 }
 
 /// Service Level Objective thresholds for automated CI/CD pass/fail gating.
@@ -94,24 +110,24 @@ impl LoadTestConfig {
                 source: e,
             })?;
             if cli.binary {
-                PayloadConfig::Binary(bytes)
+                PayloadConfig::Binary(Bytes::from(bytes))
             } else {
                 let text = String::from_utf8(bytes).map_err(|e| ConfigError::PayloadFile {
                     path: path.display().to_string(),
                     source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
                 })?;
-                PayloadConfig::Text(text)
+                PayloadConfig::from_text(text)
             }
         } else if let Some(text) = cli.payload {
             if cli.binary {
-                PayloadConfig::Binary(text.into_bytes())
+                PayloadConfig::Binary(Bytes::from(text.into_bytes()))
             } else {
-                PayloadConfig::Text(text)
+                PayloadConfig::from_text(text)
             }
         } else if cli.binary {
-            PayloadConfig::Binary(b"wsblast-payload".to_vec())
+            PayloadConfig::Binary(Bytes::from_static(b"wsblast-payload"))
         } else {
-            PayloadConfig::Text(
+            PayloadConfig::from_text(
                 r#"{"source":"wsblast","ts":"{{timestamp}}","seq":{{seq}}}"#.to_string(),
             )
         };
@@ -159,6 +175,7 @@ impl LoadTestConfig {
         Ok(Self {
             target_url,
             connections: cli.connections,
+            ramp_rate: cli.ramp_rate,
             duration,
             max_requests: cli.requests,
             rate_per_conn: cli.rate,
