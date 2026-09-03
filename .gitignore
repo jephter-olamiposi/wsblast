@@ -14,4 +14,8 @@ launch_content.md
 .agents/
 .claude/
 .gemini/
-.codex
+.codex/
+AGENTS.md
+CLAUDE.md
+CODEX.md
+GEMINI.md
