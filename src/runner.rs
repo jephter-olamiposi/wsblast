@@ -3,6 +3,7 @@
 use crate::config::LoadTestConfig;
 use crate::metrics::{AggregatedMetrics, LiveMetrics, WorkerMetrics};
 use crate::worker::WorkerSession;
+#[cfg(unix)]
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::Arc;
