@@ -54,5 +54,13 @@ async fn run_app() -> Result<()> {
         std::process::exit(2);
     }
 
+    if metrics.total_connections_attempted > 0 && metrics.total_connections_established == 0 {
+        eprintln!(
+            "{} All connection attempts failed. Target may be unreachable.",
+            colored::Colorize::bold("Failure:").red()
+        );
+        std::process::exit(1);
+    }
+
     Ok(())
 }
