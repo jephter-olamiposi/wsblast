@@ -1,5 +1,10 @@
 # wsblast
 
+[![Crates.io](https://img.shields.io/crates/v/wsblast.svg)](https://crates.io/crates/wsblast)
+[![CI](https://github.com/jephter-olamiposi/wsblast/actions/workflows/ci.yml/badge.svg)](https://github.com/jephter-olamiposi/wsblast/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Downloads](https://img.shields.io/crates/d/wsblast.svg)](https://crates.io/crates/wsblast)
+
 `wsblast` is a high-performance, Rust-native WebSocket load testing CLI designed for reproducible local-to-CI benchmarking, microsecond-accurate percentile latency tracking (`p50`, `p90`, `p95`, `p99`, `p99.9`), granular failure taxonomy, interactive terminal dashboards (TUI), and automated Service Level Objective (SLO) gating.
 
 ---
@@ -49,6 +54,12 @@ flowchart LR
 
 ## Installation
 
+### Cargo (Rust Developers)
+Install directly from crates.io:
+```bash
+cargo install wsblast
+```
+
 ### One-Line Install (macOS & Linux)
 No Rust required. Installs the pre-compiled binary for your CPU and OS into `/usr/local/bin`:
 ```bash
@@ -60,11 +71,6 @@ Run via Docker without installing anything on your host system:
 ```bash
 docker build -t wsblast .
 docker run --rm -it wsblast wss://echo.websocket.org -c 20 -d 10s
-```
-
-### Cargo (Rust Developers)
-```bash
-cargo install --git https://github.com/jephter-olamiposi/wsblast.git
 ```
 
 ### Pre-Built Binaries
@@ -114,6 +120,7 @@ wsblast [OPTIONS] [URL]
 | `-c, --connections` | `50` | Number of concurrent WebSocket connection workers |
 | `--ramp-rate` | `0` | Connection ramp rate in workers/sec (`0` = unthrottled burst) |
 | `-d, --duration` | `10s` | Test duration (e.g. `10s`, `30s`, `2m`, `500ms`) |
+| `-n, --requests` | `None` | Total message request limit across all workers |
 | `-r, --rate` | `0` | Message rate per connection per sec (`0` = unthrottled blast) |
 | `-p, --payload` | JSON payload | Inline text payload (supports `{{timestamp}}`, `{{worker_id}}`, `{{seq}}`) |
 | `--payload-file` | `None` | Path to file containing payload data |
