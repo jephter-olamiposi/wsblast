@@ -7,6 +7,7 @@ use crate::metrics::WorkerMetrics;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_tungstenite::tungstenite::Error as TungsteniteError;
@@ -94,7 +95,10 @@ impl WorkerSession {
 
         if let Some(subproto) = &self.config.subprotocol {
             if let Ok(val) = http::HeaderValue::from_str(subproto) {
-                req.headers_mut().insert("Sec-WebSocket-Protocol", val);
+                req.headers_mut().insert(
+                    http::header::HeaderName::from_static("sec-websocket-protocol"),
+                    val,
+                );
             }
         }
 
@@ -138,7 +142,14 @@ impl WorkerSession {
                 break;
             }
 
-            let has_ping = ping_ticker.is_some();
+            if let Some(max_reqs) = self.config.max_requests {
+                if self.metrics.live.messages_sent.load(Ordering::Relaxed) >= max_reqs {
+                    self.cancel_token.cancel();
+                    let _ = sink.send(Message::Close(None)).await;
+                    break;
+                }
+            }
+
             if let Some(ref mut t) = ticker {
                 tokio::select! {
                     _ = t.tick() => {}
@@ -155,20 +166,13 @@ impl WorkerSession {
                         break;
                     }
                 }
-            } else if has_ping {
+            } else if let Some(ref mut pt) = ping_ticker {
                 tokio::select! {
-                    _ = async {
-                        match ping_ticker.as_mut() {
-                            Some(pt) => { pt.tick().await; }
-                            None => std::future::pending().await,
-                        }
-                    } => {
+                    biased;
+                    _ = pt.tick() => {
                         let _ = sink.send(Message::Ping(Bytes::from_static(b"hb"))).await;
                     }
-                    _ = self.cancel_token.cancelled() => {
-                        let _ = sink.send(Message::Close(None)).await;
-                        break;
-                    }
+                    else => {}
                 }
             }
 
@@ -250,6 +254,14 @@ impl WorkerSession {
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
+            if let Some(max_reqs) = self.config.max_requests {
+                if self.metrics.live.messages_sent.load(Ordering::Relaxed) >= max_reqs {
+                    self.cancel_token.cancel();
+                    let _ = sink.send(Message::Close(None)).await;
+                    break;
+                }
+            }
+
             tokio::select! {
                 _ = ticker.tick() => {
                     let msg = self.render_payload(seq);
@@ -265,6 +277,9 @@ impl WorkerSession {
                     match msg_opt {
                         Some(Ok(Message::Text(t))) => self.metrics.record_message_recv(t.len(), None),
                         Some(Ok(Message::Binary(b))) => self.metrics.record_message_recv(b.len(), None),
+                        Some(Ok(Message::Ping(p))) => {
+                            let _ = sink.send(Message::Pong(p)).await;
+                        }
                         Some(Ok(Message::Close(_))) | None => break,
                         Some(Err(e)) => {
                             self.metrics.record_error(categorize_tungstenite_error(&e));
@@ -283,9 +298,11 @@ impl WorkerSession {
 
     async fn run_listen_loop<S>(&mut self, ws_stream: S)
     where
-        S: futures_util::Stream<Item = std::result::Result<Message, TungsteniteError>> + Unpin,
+        S: futures_util::Sink<Message, Error = TungsteniteError>
+            + futures_util::Stream<Item = std::result::Result<Message, TungsteniteError>>
+            + Unpin,
     {
-        let mut stream = ws_stream;
+        let (mut sink, mut stream) = ws_stream.split();
 
         loop {
             tokio::select! {
@@ -293,6 +310,9 @@ impl WorkerSession {
                     match msg_opt {
                         Some(Ok(Message::Text(t))) => self.metrics.record_message_recv(t.len(), None),
                         Some(Ok(Message::Binary(b))) => self.metrics.record_message_recv(b.len(), None),
+                        Some(Ok(Message::Ping(p))) => {
+                            let _ = sink.send(Message::Pong(p)).await;
+                        }
                         Some(Ok(Message::Close(_))) | None => break,
                         Some(Err(e)) => {
                             self.metrics.record_error(categorize_tungstenite_error(&e));
@@ -302,6 +322,7 @@ impl WorkerSession {
                     }
                 }
                 _ = self.cancel_token.cancelled() => {
+                    let _ = sink.send(Message::Close(None)).await;
                     break;
                 }
             }

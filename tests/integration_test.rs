@@ -356,3 +356,183 @@ fn test_payload_config_classification() {
     let dynamic_p = PayloadConfig::from_text(r#"{"seq": {{seq}}}"#.to_string());
     assert!(matches!(dynamic_p, PayloadConfig::DynamicText(_)));
 }
+
+#[tokio::test]
+async fn test_requests_limit_enforcement() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    // Set duration to 30 seconds, but cap requests at 30
+    let config = LoadTestConfig {
+        target_url,
+        connections: 3,
+        ramp_rate: 0,
+        duration: Duration::from_secs(30),
+        max_requests: Some(30),
+        rate_per_conn: 0,
+        payload: PayloadConfig::from_text("req-limit-test".to_string()),
+        headers: HeaderMap::new(),
+        subprotocol: None,
+        mode: TestMode::Echo,
+        connect_timeout: Duration::from_secs(2),
+        message_timeout: Duration::from_secs(2),
+        ping_interval: Duration::ZERO,
+        slo: SloThresholds::default(),
+        output_format: OutputFormat::Text,
+        output_path: None,
+        tui: false,
+        no_progress: true,
+    };
+
+    let start = std::time::Instant::now();
+    let runner = Runner::new(config);
+    let metrics = runner.run().await;
+    let elapsed = start.elapsed();
+
+    // Must finish well under the 30s configured duration
+    assert!(elapsed < Duration::from_secs(5));
+    assert!(metrics.total_messages_sent >= 30);
+    assert_eq!(metrics.error_rate, 0.0);
+
+    cancel_server.cancel();
+}
+
+#[tokio::test]
+async fn test_stream_mode_load_run() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    let config = LoadTestConfig {
+        target_url,
+        connections: 4,
+        ramp_rate: 0,
+        duration: Duration::from_millis(500),
+        max_requests: None,
+        rate_per_conn: 200,
+        payload: PayloadConfig::from_text("stream-data".to_string()),
+        headers: HeaderMap::new(),
+        subprotocol: None,
+        mode: TestMode::Stream,
+        connect_timeout: Duration::from_secs(2),
+        message_timeout: Duration::from_secs(2),
+        ping_interval: Duration::ZERO,
+        slo: SloThresholds::default(),
+        output_format: OutputFormat::Text,
+        output_path: None,
+        tui: false,
+        no_progress: true,
+    };
+
+    let runner = Runner::new(config);
+    let metrics = runner.run().await;
+
+    assert_eq!(metrics.total_connections_established, 4);
+    assert!(metrics.total_messages_sent > 10);
+    assert_eq!(metrics.total_connections_failed, 0);
+
+    cancel_server.cancel();
+}
+
+#[tokio::test]
+async fn test_binary_payload_dispatch() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    let config = LoadTestConfig {
+        target_url,
+        connections: 2,
+        ramp_rate: 0,
+        duration: Duration::from_millis(400),
+        max_requests: None,
+        rate_per_conn: 0,
+        payload: PayloadConfig::Binary(bytes::Bytes::from_static(b"\x00\x01\x02\x03\x04\x05")),
+        headers: HeaderMap::new(),
+        subprotocol: None,
+        mode: TestMode::Echo,
+        connect_timeout: Duration::from_secs(2),
+        message_timeout: Duration::from_secs(2),
+        ping_interval: Duration::ZERO,
+        slo: SloThresholds::default(),
+        output_format: OutputFormat::Text,
+        output_path: None,
+        tui: false,
+        no_progress: true,
+    };
+
+    let runner = Runner::new(config);
+    let metrics = runner.run().await;
+
+    assert_eq!(metrics.total_connections_established, 2);
+    assert!(metrics.total_messages_sent > 10);
+    assert_eq!(metrics.total_messages_recv, metrics.total_messages_sent);
+    assert!(metrics.total_bytes_sent > 0);
+    assert_eq!(metrics.error_rate, 0.0);
+
+    cancel_server.cancel();
+}
+
+#[tokio::test]
+async fn test_listen_mode_with_server_broadcast_and_ping() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let target_url = Url::parse(&format!("ws://127.0.0.1:{}", addr.port())).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_server = cancel.clone();
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Ok((stream, _)) = listener.accept() => {
+                    tokio::spawn(async move {
+                        if let Ok(ws_stream) = tokio_tungstenite::accept_async(stream).await {
+                            let (mut sink, mut reader) = ws_stream.split();
+                            // Push 3 broadcast messages
+                            for i in 0..3 {
+                                let _ = sink.send(Message::Text(format!("broadcast-{i}").into())).await;
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                            }
+                            // Send Ping to verify client responds with Pong per RFC 6455
+                            let _ = sink.send(Message::Ping(bytes::Bytes::from_static(b"keepalive"))).await;
+                            // Await Pong or client close
+                            while let Some(Ok(msg)) = reader.next().await {
+                                if let Message::Pong(_) = msg {
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                }
+                _ = cancel_server.cancelled() => {
+                    break;
+                }
+            }
+        }
+    });
+
+    let config = LoadTestConfig {
+        target_url,
+        connections: 1,
+        ramp_rate: 0,
+        duration: Duration::from_millis(500),
+        max_requests: None,
+        rate_per_conn: 0,
+        payload: PayloadConfig::from_text("unused".to_string()),
+        headers: HeaderMap::new(),
+        subprotocol: None,
+        mode: TestMode::Listen,
+        connect_timeout: Duration::from_secs(2),
+        message_timeout: Duration::from_secs(2),
+        ping_interval: Duration::ZERO,
+        slo: SloThresholds::default(),
+        output_format: OutputFormat::Text,
+        output_path: None,
+        tui: false,
+        no_progress: true,
+    };
+
+    let runner = Runner::new(config);
+    let metrics = runner.run().await;
+
+    assert_eq!(metrics.total_connections_established, 1);
+    assert!(metrics.total_messages_recv >= 3);
+    assert_eq!(metrics.total_messages_sent, 0);
+
+    cancel.cancel();
+}

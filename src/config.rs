@@ -99,6 +99,13 @@ impl LoadTestConfig {
             return Err(ConfigError::ZeroConcurrency(0).into());
         }
 
+        if let Some(0) = cli.requests {
+            return Err(ConfigError::InvalidThreshold(
+                "requests limit (-n) must be greater than zero".to_string(),
+            )
+            .into());
+        }
+
         let duration = parse_human_duration(&cli.duration)?;
         let connect_timeout = parse_human_duration(&cli.connect_timeout)?;
         let message_timeout = parse_human_duration(&cli.message_timeout)?;

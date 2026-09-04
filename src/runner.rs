@@ -79,10 +79,50 @@ impl Runner {
             duration_token.cancel();
         });
 
+        if let Some(max_reqs) = self.config.max_requests {
+            let req_token = self.cancel_token.clone();
+            let live = Arc::clone(&self.live_metrics);
+            tokio::spawn(async move {
+                while !req_token.is_cancelled() {
+                    if live
+                        .messages_sent
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        >= max_reqs
+                    {
+                        req_token.cancel();
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            });
+        }
+
         let sig_token = self.cancel_token.clone();
         tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                sig_token.cancel();
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{SignalKind, signal};
+                let mut sigterm = signal(SignalKind::terminate()).ok();
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        sig_token.cancel();
+                    }
+                    _ = async {
+                        if let Some(ref mut st) = sigterm {
+                            st.recv().await;
+                        } else {
+                            std::future::pending().await
+                        }
+                    } => {
+                        sig_token.cancel();
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    sig_token.cancel();
+                }
             }
         });
 
