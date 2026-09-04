@@ -4,7 +4,19 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-description = "Rust-focused WebSocket load testing CLI"
+description = "High-performance WebSocket load testing CLI with percentile latency & CI gating"
+repository = "https://github.com/jephter-olamiposi/wsblast"
+homepage = "https://github.com/jephter-olamiposi/wsblast"
+readme = "README.md"
+keywords = ["websocket", "load-testing", "benchmark", "tui", "hdrhistogram"]
+categories = ["command-line-utilities", "development-tools::profiling", "network-programming"]
+exclude = [
+    "assets/*",
+    "Dockerfile",
+    ".dockerignore",
+    "install.sh",
+    ".github/*",
+]
 
 [dependencies]
 tokio = { version = "1.43", features = ["full"] }
