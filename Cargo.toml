@@ -8,15 +8,33 @@ description = "High-performance WebSocket load testing CLI with percentile laten
 repository = "https://github.com/jephter-olamiposi/wsblast"
 homepage = "https://github.com/jephter-olamiposi/wsblast"
 readme = "README.md"
-keywords = ["websocket", "load-testing", "benchmark", "tui", "hdrhistogram"]
-categories = ["command-line-utilities", "development-tools::profiling", "network-programming"]
-exclude = [
-    "assets/*",
-    "Dockerfile",
-    ".dockerignore",
-    "install.sh",
-    ".github/*",
+keywords = ["websocket", "load-testing", "benchmark", "latency", "performance"]
+categories = [
+    "command-line-utilities",
+    "development-tools::testing",
+    "development-tools::profiling",
+    "network-programming",
+    "web-programming::websocket",
 ]
+# Publish an explicit file list so new repository files never leak into the
+# crate. The bench target is listed in this manifest, so its source ships too.
+include = [
+    "/src/**",
+    "/benches/**",
+    "/examples/**",
+    "/schema/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/METHODOLOGY.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 # `cargo binstall wsblast` downloads the archives dist publishes to GitHub
 # Releases: wsblast-<target>.tar.gz with the binary under wsblast-<target>/,
