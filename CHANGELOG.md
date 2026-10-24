@@ -7,23 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+v0.2.0 ships a smaller crate in which every feature works end to end. Several features that were developed on `main` after 0.1.1 were removed before release; their code is preserved on the [`archive/v0.1-full-features`](https://github.com/jephter-olamiposi/wsblast/tree/archive/v0.1-full-features) branch, and several of them will return, rebuilt, in later releases.
+
+### Migrating from 0.1
+
+- Every 0.1.1 flag still works. Two behaviours changed: `--duration` now includes the `--ramp-rate` ramp, and workers reconnect after a timeout, I/O error or server close. Pass `--no-reconnect` to end a worker on its first connection loss, as 0.1 did.
+- New capabilities are opt-in Cargo features (`scenario`, `auth`, `graphql-ws`, `compare`); `cargo install wsblast --features full` installs all of them.
+- Library users: `WorkerMetrics::new` and `AggregatedMetrics::merge` now return `Result`, `LoadTestConfig` has new fields (`no_reconnect`, `reply_match`, plus `auth` and `graphql_ws` behind their features), `ConfigError::ZeroRate`, `WsBlastError::SloBreach` and `WorkerError::ChannelClosed` are gone, and a zero `--requests` limit is reported as `ConfigError::InvalidOption` instead of `ConfigError::InvalidThreshold`.
+- If you built from `main` after 0.1.1 and enabled a removed feature (`distributed`, `otel`, `prometheus`, `capture`, `chaos`, `mock`, `compression`, `tracing-subscriber`), drop it from `--features` and remove its flags. Build the archive branch if you still need one of them.
+
 ### Added
 - Scenario DSL with YAML multi-phase definitions, per-phase targets, actions (`Send`, `Wait`, `Ping`, `Close`), think time, and CLI URL precedence.
-- OpenTelemetry OTLP export and Prometheus `/metrics` endpoint, opt-in via `--otel` and `--prometheus`.
-- Handshake authentication helpers for static bearer tokens, API keys, HS256 JWTs, and OAuth2 client-credentials exchanges.
+- Handshake authentication (`auth` feature) for static bearer tokens and API keys (`--auth-type static|apikey`).
 - Apollo GraphQL WS subscription mode (`--mode graphql-ws`) with `connection_init` / `subscribe` lifecycle handling and legacy `graphql-ws` (`start` / `data`) support.
-- Frame capture to PCAP-NG and JSON Lines, shared across workers and scenario phases.
-- Non-blocking chaos injection for latency, frame loss, corruption, and forced connection closes.
-- Distributed coordinator/worker execution over gRPC with work splitting, failed-range requeueing, staged metrics, histogram aggregation, and SLO gating.
 - Baseline comparison (`--compare`) with regression thresholds and `--fail-on-regression`.
-- Record/replay mock server subcommands (`wsblast mock record`, `wsblast mock replay`) with delay and error injection.
-- Wire-config propagation of GraphQL and chaos settings in distributed mode.
 - `--match <first|exact|json:POINTER>` selects how echo mode recognises the reply to a request so unsolicited server pushes no longer skew RTT; skipped frames are reported as `total_unsolicited_frames`.
 
 ### Changed
 - Metric constructors and aggregation are fallible (`WorkerMetrics::new`, `AggregatedMetrics::merge`); runner and executor APIs propagate metrics errors.
-- `--compression` now fails fast with `CompressionUnsupported` instead of silently running uncompressed.
-- README documents feature flags, scenario targets, auth lifetime behavior, observability, chaos, capture, GraphQL, distributed limits, and mock/comparison workflows.
+- Configuration errors that are not thresholds have accurate variants: `ConfigError::InvalidAuth` for authentication options, and `ConfigError::InvalidOption` for a zero `--requests` limit, a missing `--graphql-ws-operation`, GraphQL WS variables or extensions that are not a JSON object, and `--compare` without exactly two files. `ConfigError::InvalidThreshold` now only covers `--max-error-rate` and `--compare-threshold`.
+- README documents feature flags, scenario targets, authentication lifetime, GraphQL WS and comparison workflows.
+
+### Removed
+- Distributed coordinator/worker execution over gRPC (`distributed` feature, `--distributed-mode` and the coordinator and worker flags), with its protobuf definitions and build script. Building the crate no longer needs `protoc`.
+- OpenTelemetry OTLP export (`otel` feature, `--otel*` flags) and the Prometheus `/metrics` endpoint (`prometheus` feature, `--prometheus*` flags).
+- Frame capture to PCAP-NG and JSON Lines (`capture` feature, `--capture*` flags).
+- Chaos injection of latency, frame loss, corruption and forced closes (`chaos` feature, `--chaos*` flags).
+- The record/replay mock server (`mock` feature, `wsblast mock` subcommands).
+- JWT and OAuth2 authentication (`--auth-type jwt|oauth2`, `--auth-jwt-*` and `--auth-oauth2-*` flags), the unused `Authenticator` trait and authenticator structs, and `AuthConfig::Custom`.
+- The `compression` feature and `--compression` flags, which never compressed anything because the transport does not implement RFC 7692.
+- The `tracing-subscriber` feature.
+- `ConfigError::ZeroRate`, `WsBlastError::SloBreach` and `WorkerError::ChannelClosed`, which were never constructed.
+- The unused `base64`, `rand` and `sha2` dependencies.
 
 ### Fixed
 - GraphQL WS mode no longer records an `UnexpectedClose` error when the run ends before the server completes the subscription, and now sends the stop/complete message before the Close frame.
@@ -36,20 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ctrl+C and SIGTERM during a `--ramp-rate` connection ramp now stop the run and print the report instead of killing the process; `Runner::run` and `Runner::run_and_collect_worker_metrics` share one code path.
 - Latency SLOs (`--max-p50/p95/p99/p999`) no longer pass when no round trip was measured: the check fails with "no RTT samples", and latency SLOs are rejected at startup outside `--mode echo`.
 - Single-phase runs no longer execute the load test twice.
-- Frame capture now writes output at the end of a run and supports unlimited capture (`--capture-max-frames 0`).
-- Capture is shared across scenario phases instead of creating per-phase buffers.
-- Chaos latency no longer blocks the Tokio runtime; loss percentages use the documented 0–100 scale.
-- Mock replay consumes only recorded server-to-client frames.
-- Distributed mode rejects unsupported scenario/capture/TUI/observability combinations instead of ignoring them.
 - Remaining runtime `.unwrap()`/`.expect()` calls in metric initialization were replaced with typed errors.
 - GraphQL WS now emits protocol-correct wire names (`connection_init`, `subscribe`, `next`, `complete`) instead of Rust variant names, and handles modern keepalives.
-- Prometheus counters now export with a single `_total` suffix instead of `_total_total`.
 - Duration flags no longer panic on negative, NaN, infinite or overflowing values (`-d infs`, `--duration=-1s`); they fail with `InvalidDuration`, and the parser now accepts `ns` and fractional values for every unit (`1.5ms`, `0.5us`).
 - Repeated `-H` flags with the same header name now send every value instead of keeping only the last one; a `-H` header still replaces a default handshake header of the same name (such as `Host`).
 - Comparison reports print improvements with their real sign (throughput 100 to 150 shows `+50.00%`, not `-50.00%`); `improvements[].pct_change` in comparison JSON is now the signed change instead of its absolute value.
-- `cargo clippy --all-targets --features full -- -D warnings` passes again: the distributed worker boxes the `LoadTestConfig` carried by a work claim (`clippy::large_enum_variant`).
 - `install.sh` downloads the release assets that are actually published (`wsblast-<target>.tar.gz`), verifies their `.sha256` checksum before installing, and fails with a clear message when the GitHub API lookup fails instead of assuming `v0.1.0`; releases now build `x86_64-apple-darwin` on `macos-latest` and add `aarch64-unknown-linux-gnu`.
-- The Docker image builds again: the Dockerfile copies the whole crate (the manifest's `[[bench]]` target and build script were missing), installs the OpenSSL headers `native-tls` needs, and builds only `--bin wsblast`; `.dockerignore` now excludes build output, VCS, CI, assets and local agent files.
+- The Docker image builds again: the Dockerfile copies the whole crate (the manifest's `[[bench]]` target was missing), installs the OpenSSL headers `native-tls` needs, and builds only `--bin wsblast`; `.dockerignore` now excludes build output, VCS, CI, assets and local agent files.
 
 ## [0.1.1] - 2026-09-04
 
