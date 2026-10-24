@@ -411,7 +411,9 @@ fn render_markdown_comparison(comparison: &BaselineComparison, threshold: f64) -
 /// # Examples
 ///
 /// Nothing listens on port 1, so this run measures no round trip and the
-/// latency check fails along with the error budget:
+/// latency check fails along with the error budget. The short connect
+/// timeout makes the attempt fail inside the run on every platform; Windows
+/// otherwise retries a refused connection for about two seconds.
 ///
 /// ```
 /// use std::time::Duration;
@@ -422,6 +424,7 @@ fn render_markdown_comparison(comparison: &BaselineComparison, threshold: f64) -
 /// let config = LoadTestConfig::builder("ws://127.0.0.1:1")
 ///     .connections(1)
 ///     .duration(Duration::from_millis(200))
+///     .connect_timeout(Duration::from_millis(100))
 ///     .build()?;
 /// let metrics = Runner::new(config).with_signal_handling(false).run().await?;
 ///
