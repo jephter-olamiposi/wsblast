@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README documents feature flags, scenario targets, auth lifetime behavior, observability, chaos, capture, GraphQL, distributed limits, and mock/comparison workflows.
 
 ### Fixed
+- Latency SLOs (`--max-p50/p95/p99/p999`) no longer pass when no round trip was measured: the check fails with "no RTT samples", and latency SLOs are rejected at startup outside `--mode echo`.
 - Single-phase runs no longer execute the load test twice.
 - Frame capture now writes output at the end of a run and supports unlimited capture (`--capture-max-frames 0`).
 - Capture is shared across scenario phases instead of creating per-phase buffers.
