@@ -65,6 +65,7 @@ v0.2.0 ships a smaller crate in which every feature works end to end. Several fe
 - `error_rate` no longer counts a failed echo request twice: it is now failed operations over attempted operations, so a run where every request times out reports 1.0 instead of 0.5; errors that end an already-sent message (reply timeout, read error or close while the reply is awaited) are classified when recorded and add no second attempt.
 - A scenario phase without a `target` no longer silently reuses the first phase's endpoint when neither `--url` nor a scenario-level `target` is set: validation rejects it and names the phase, the CLI > phase > scenario precedence is resolved for every phase, and text and Markdown reports list every executed phase's target (JSON adds an optional `phase_targets` array).
 - Scenario files now reject unknown keys at the top level and in `metadata`, phases and actions, naming the misspelled key (`conections:` used to fall back silently to a default), and `Close` actions only accept the close codes an endpoint may send (1000-1003, 1007-1014, 3000-4999) instead of also accepting the reserved 1016-2999 range.
+- Connection slots the ramp never reached before `--duration` ended are no longer reported as failed with no error recorded; they are counted in the new `total_connections_not_started` field, shown in text and Markdown reports when non-zero.
 
 ## [0.1.1] - 2026-09-04
 

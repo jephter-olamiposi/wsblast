@@ -286,7 +286,11 @@ impl LatencyStats {
 /// total even when workers reconnect:
 /// - `total_connections_attempted`: worker slots the run tried to open.
 /// - `total_connections_established`: slots that completed at least one handshake.
-/// - `total_connections_failed`: slots that never completed a handshake.
+/// - `total_connections_failed`: started slots that never completed a handshake.
+/// - `total_connections_not_started`: slots the ramp had not reached when the
+///   run ended, so `total_connections_attempted` equals
+///   `total_connections_established + total_connections_failed +
+///   total_connections_not_started`.
 /// - `total_reconnects`: extra handshakes that re-established a slot after its
 ///   connection was lost, so `handshake_latency.count` equals
 ///   `total_connections_established + total_reconnects`.
@@ -295,6 +299,8 @@ pub struct AggregatedMetrics {
     pub total_connections_attempted: u64,
     pub total_connections_established: u64,
     pub total_connections_failed: u64,
+    #[serde(default)]
+    pub total_connections_not_started: u64,
     #[serde(default)]
     pub total_reconnects: u64,
     /// Data frames that did not match `--match` while an echo reply was awaited.
@@ -382,6 +388,7 @@ impl AggregatedMetrics {
             total_connections_attempted: attempted_conns,
             total_connections_established,
             total_connections_failed,
+            total_connections_not_started: 0,
             total_reconnects,
             total_unsolicited_frames,
             total_messages_sent,
@@ -396,6 +403,17 @@ impl AggregatedMetrics {
             message_rtt: LatencyStats::from_histogram(&combined_rtt),
             error_breakdown,
         })
+    }
+
+    /// Reclassifies `not_started` slots, which have no worker metrics, from
+    /// failed to not started. [`AggregatedMetrics::merge`] counts every slot
+    /// without a handshake as failed because it only sees started workers.
+    #[must_use]
+    pub fn with_not_started(mut self, not_started: u64) -> Self {
+        let not_started = not_started.min(self.total_connections_failed);
+        self.total_connections_failed -= not_started;
+        self.total_connections_not_started = not_started;
+        self
     }
 }
 

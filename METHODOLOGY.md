@@ -183,12 +183,13 @@ Connection counts are per worker slot, not per handshake:
 | :--- | :--- |
 | `total_connections_attempted` | Worker slots the run was configured to open: `-c`, or the sum over scenario phases. |
 | `total_connections_established` | Slots that completed at least one handshake. |
-| `total_connections_failed` | `attempted - established`: slots that never completed a handshake. |
+| `total_connections_failed` | Started slots that never completed a handshake. |
+| `total_connections_not_started` | Slots the ramp had not reached when the run ended. |
 | `total_reconnects` | Extra handshakes that re-established a slot after it lost its connection. |
 
-`handshake_latency.count = total_connections_established + total_reconnects`.
+`total_connections_attempted = total_connections_established + total_connections_failed + total_connections_not_started`, and `handshake_latency.count = total_connections_established + total_reconnects`.
 
-A slot that was never started, because the ramp could not reach it or a request cap ended the run first, counts as failed even though no error was recorded for it. A local run with `-c 10 --ramp-rate 2 -d 2s` reported 10 attempted, 4 established, 6 failed and an empty `error_breakdown`.
+A slot is not started when the run ends before the ramp reaches it, usually because `--duration` is shorter than `-c / --ramp-rate` (wsblast warns about this at start) or because the run was interrupted. Such a slot never tried to connect, so it is not a failure and has no entry in `error_breakdown`. A local run with `-c 10 --ramp-rate 5 -d 600ms` reports 10 attempted, 3 established, 0 failed and 7 not started. The text and Markdown reports show the not-started count only when it is non-zero.
 
 ### 7.1 Reconnect policy
 
@@ -278,5 +279,4 @@ SLOs are checked before the "all connections failed" condition. A run where ever
 - **Timer resolution.** Per-connection rates above about 1000 msg/s are approximate (see [section 8.3](#83-timer-resolution)).
 - **Payload bytes only.** Byte counts exclude framing, TLS and handshake traffic, so they understate wire bandwidth.
 - **Request cap overshoot.** `--requests` can be exceeded by up to about one message per connection.
-- **Slot-based failure count.** `total_connections_failed` includes slots that were never started. Read it together with the ramp warning and `error_breakdown`.
 - **Scenario report header.** In a scenario, the JSON report's `target_url` is the first executed phase's target. `phase_targets` lists the target of every executed phase.

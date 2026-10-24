@@ -177,7 +177,8 @@ async fn run_app() -> Result<()> {
                 outcome.worker_metrics,
                 outcome.elapsed,
                 outcome.connections,
-            )?;
+            )?
+            .with_not_started(outcome.not_started);
             (metrics, outcome.phase_targets)
         }
         #[cfg(not(feature = "scenario"))]

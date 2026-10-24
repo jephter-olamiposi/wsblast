@@ -698,6 +698,38 @@ async fn test_duration_includes_connection_ramp() {
     cancel_server.cancel();
 }
 
+#[tokio::test]
+async fn test_slots_the_ramp_never_reaches_are_not_failures() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    let mut config = echo_test_config(target_url);
+    config.connections = 10;
+    config.ramp_rate = 5;
+    config.duration = Duration::from_millis(600);
+    let metrics = Runner::new(config).run().await.unwrap();
+
+    assert_eq!(metrics.total_connections_attempted, 10);
+    assert!(
+        (1..=4).contains(&metrics.total_connections_established),
+        "established {}",
+        metrics.total_connections_established
+    );
+    assert_eq!(
+        metrics.total_connections_failed, 0,
+        "slots the ramp never reached were reported as failed"
+    );
+    assert_eq!(
+        metrics.total_connections_established
+            + metrics.total_connections_failed
+            + metrics.total_connections_not_started,
+        metrics.total_connections_attempted
+    );
+    assert!(metrics.total_connections_not_started >= 6);
+    assert!(metrics.error_breakdown.is_empty());
+
+    cancel_server.cancel();
+}
+
 #[test]
 fn test_payload_config_classification() {
     let static_p = PayloadConfig::from_text("plain text without macros".to_string());

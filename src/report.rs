@@ -564,6 +564,12 @@ fn render_text_report(
             metrics.total_connections_established, metrics.total_connections_failed
         ),
     ]);
+    if metrics.total_connections_not_started > 0 {
+        tput_table.add_row(vec![
+            "Connections Not Started (ramp cut short by --duration)",
+            &metrics.total_connections_not_started.to_string(),
+        ]);
+    }
     tput_table.add_row(vec!["Reconnects", &metrics.total_reconnects.to_string()]);
     if metrics.total_unsolicited_frames > 0 {
         tput_table.add_row(vec![
@@ -779,6 +785,12 @@ fn render_markdown_report(
         metrics.total_connections_failed,
         metrics.total_reconnects
     ));
+    if metrics.total_connections_not_started > 0 {
+        md.push_str(&format!(
+            "- **Connections Not Started:** `{}` (ramp cut short by `--duration`)\n",
+            metrics.total_connections_not_started
+        ));
+    }
     if metrics.total_unsolicited_frames > 0 {
         md.push_str(&format!(
             "- **Unsolicited Frames:** `{}` skipped by `--match`\n",
@@ -884,6 +896,7 @@ mod tests {
             total_connections_attempted: 10,
             total_connections_established: 10,
             total_connections_failed: 0,
+            total_connections_not_started: 0,
             total_reconnects: 0,
             total_unsolicited_frames: 0,
             total_messages_sent: 100,
@@ -1167,6 +1180,28 @@ mod tests {
     }
 
     #[test]
+    fn not_started_connections_are_reported_only_when_present() {
+        let slo = evaluate_slos(&SloThresholds::default(), &sample_metrics());
+        let mut metrics = sample_metrics();
+
+        for format in ["text", "markdown"] {
+            let rendered = render_report(&report_config(format), &metrics, &slo);
+            assert!(!rendered.contains("Not Started"), "{format}: {rendered}");
+        }
+
+        metrics.total_connections_established = 3;
+        metrics.total_connections_not_started = 7;
+        for format in ["text", "markdown"] {
+            let rendered = render_report(&report_config(format), &metrics, &slo);
+            let line = rendered
+                .lines()
+                .find(|line| line.contains("Not Started"))
+                .unwrap_or_else(|| panic!("{format}: {rendered}"));
+            assert!(line.contains('7'), "{format}: {line}");
+        }
+    }
+
+    #[test]
     fn scenario_reports_list_every_phase_target() {
         let slo = evaluate_slos(&SloThresholds::default(), &sample_metrics());
         let phases = [
@@ -1218,5 +1253,17 @@ mod tests {
 
         let parsed = parse_report_metrics(&legacy.to_string()).expect("legacy report must parse");
         assert_eq!(parsed.total_unsolicited_frames, 0);
+    }
+
+    #[test]
+    fn reports_without_not_started_counter_still_parse() {
+        let mut legacy = serde_json::to_value(sample_metrics()).expect("serialize");
+        legacy
+            .as_object_mut()
+            .expect("metrics object")
+            .remove("total_connections_not_started");
+
+        let parsed = parse_report_metrics(&legacy.to_string()).expect("legacy report must parse");
+        assert_eq!(parsed.total_connections_not_started, 0);
     }
 }

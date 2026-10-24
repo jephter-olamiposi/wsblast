@@ -168,7 +168,11 @@
           "$ref": "#/$defs/count"
         },
         "total_connections_failed": {
-          "description": "total_connections_attempted minus total_connections_established: slots that never completed a handshake, including slots that were never started.",
+          "description": "Started worker slots that never completed a handshake. total_connections_attempted equals total_connections_established + total_connections_failed + total_connections_not_started.",
+          "$ref": "#/$defs/count"
+        },
+        "total_connections_not_started": {
+          "description": "Worker slots the ramp had not reached when the run ended, so they never tried to connect and have no error recorded. Absent from reports written before this field was added; readers should treat a missing value as 0.",
           "$ref": "#/$defs/count"
         },
         "total_reconnects": {
