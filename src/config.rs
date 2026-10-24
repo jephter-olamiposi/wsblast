@@ -597,12 +597,11 @@ fn parse_graphql_json_object(flag: &str, raw: Option<&str>) -> Result<Option<ser
     let Some(raw) = raw else {
         return Ok(None);
     };
-    let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
-        ConfigError::InvalidThreshold(format!("{flag} must contain valid JSON: {e}"))
-    })?;
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|e| ConfigError::InvalidOption(format!("{flag} must contain valid JSON: {e}")))?;
     if !value.is_object() {
         return Err(
-            ConfigError::InvalidThreshold(format!("{flag} must contain a JSON object")).into(),
+            ConfigError::InvalidOption(format!("{flag} must contain a JSON object")).into(),
         );
     }
     Ok(Some(value))
@@ -634,7 +633,7 @@ fn build_graphql_config(cli: &Cli) -> Result<Option<GraphQLWSConfig>> {
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| {
-            ConfigError::InvalidThreshold(
+            ConfigError::InvalidOption(
                 "--mode graphql-ws requires --graphql-ws-operation <QUERY>".to_string(),
             )
         })?;
@@ -694,7 +693,7 @@ impl LoadTestConfig {
         }
 
         if let Some(0) = cli.requests {
-            return Err(ConfigError::InvalidThreshold(
+            return Err(ConfigError::InvalidOption(
                 "requests limit (-n) must be greater than zero".to_string(),
             )
             .into());
@@ -798,7 +797,7 @@ impl LoadTestConfig {
             match cli.auth_type {
                 AuthType::None => {
                     if cli.auth_token.is_some() || cli.auth_apikey.is_some() {
-                        return Err(ConfigError::InvalidThreshold(
+                        return Err(ConfigError::InvalidAuth(
                             "authentication options require an explicit --auth-type".to_string(),
                         )
                         .into());
@@ -811,7 +810,7 @@ impl LoadTestConfig {
                         .as_deref()
                         .filter(|value| !value.is_empty())
                         .ok_or_else(|| {
-                            ConfigError::InvalidThreshold(
+                            ConfigError::InvalidAuth(
                                 "--auth-type static requires a non-empty --auth-token".to_string(),
                             )
                         })?;
@@ -826,7 +825,7 @@ impl LoadTestConfig {
                         .as_deref()
                         .filter(|value| !value.is_empty())
                         .ok_or_else(|| {
-                            ConfigError::InvalidThreshold(
+                            ConfigError::InvalidAuth(
                                 "--auth-type apikey requires a non-empty --auth-apikey".to_string(),
                             )
                         })?;

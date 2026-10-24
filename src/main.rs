@@ -42,7 +42,7 @@ async fn run_app() -> Result<()> {
     if !cli.compare.is_empty() {
         if cli.compare.len() != 2 {
             return Err(wsblast::error::WsBlastError::Config(
-                wsblast::error::ConfigError::InvalidThreshold(
+                wsblast::error::ConfigError::InvalidOption(
                     "Compare requires exactly 2 files: --compare <baseline.json> <current.json>"
                         .into(),
                 ),
