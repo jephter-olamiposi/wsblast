@@ -1,9 +1,35 @@
+# Build output and VCS metadata
 target/
 .git/
 .gitignore
-.env
-*.env
+.github/
+
+# Not needed to build the binary
+assets/
+docs/
+Dockerfile
+.dockerignore
+install.sh
+proptest-regressions/
+**/mutants.out*/
+**/*.rs.bk
+**/.DS_Store
+
+# Local agent and editor state
+.agents/
+.claude/
+.gemini/
+.codex/
+.vscode/
+.idea/
+AGENTS.md
+CLAUDE.md
+CODEX.md
+GEMINI.md
 explanation.md
 launch_content.md
 breakdown.md
-assets/
+
+# Secrets
+.env
+*.env
