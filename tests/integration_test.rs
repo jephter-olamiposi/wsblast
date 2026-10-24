@@ -203,14 +203,6 @@ async fn test_echo_mode_load_run() {
             format: wsblast::config::CaptureFormat::PcapNg,
             max_frames: 0,
         },
-        #[cfg(feature = "chaos")]
-        chaos: wsblast::config::ChaosConfig {
-            enabled: false,
-            latency_ms: None,
-            loss_percent: None,
-            corrupt_percent: None,
-            close_percent: None,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,
@@ -264,14 +256,6 @@ async fn test_slo_evaluation_pass_and_fail() {
             output_path: std::path::PathBuf::from("capture.pcapng"),
             format: wsblast::config::CaptureFormat::PcapNg,
             max_frames: 0,
-        },
-        #[cfg(feature = "chaos")]
-        chaos: wsblast::config::ChaosConfig {
-            enabled: false,
-            latency_ms: None,
-            loss_percent: None,
-            corrupt_percent: None,
-            close_percent: None,
         },
         slo: SloThresholds {
             max_p50: Some(Duration::from_secs(1)),
@@ -335,14 +319,6 @@ async fn test_json_and_markdown_report_formatting() {
             format: wsblast::config::CaptureFormat::PcapNg,
             max_frames: 0,
         },
-        #[cfg(feature = "chaos")]
-        chaos: wsblast::config::ChaosConfig {
-            enabled: false,
-            latency_ms: None,
-            loss_percent: None,
-            corrupt_percent: None,
-            close_percent: None,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Json,
         output_path: None,
@@ -402,14 +378,6 @@ async fn test_error_taxonomy_when_target_offline() {
             output_path: std::path::PathBuf::from("capture.pcapng"),
             format: wsblast::config::CaptureFormat::PcapNg,
             max_frames: 0,
-        },
-        #[cfg(feature = "chaos")]
-        chaos: wsblast::config::ChaosConfig {
-            enabled: false,
-            latency_ms: None,
-            loss_percent: None,
-            corrupt_percent: None,
-            close_percent: None,
         },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
@@ -532,14 +500,6 @@ async fn test_custom_headers_propagation() {
             output_path: std::path::PathBuf::from("capture.pcapng"),
             format: wsblast::config::CaptureFormat::PcapNg,
             max_frames: 0,
-        },
-        #[cfg(feature = "chaos")]
-        chaos: wsblast::config::ChaosConfig {
-            enabled: false,
-            latency_ms: None,
-            loss_percent: None,
-            corrupt_percent: None,
-            close_percent: None,
         },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
@@ -664,14 +624,6 @@ async fn test_graphql_ws_subscription_lifecycle() {
             format: wsblast::config::CaptureFormat::PcapNg,
             max_frames: 0,
         },
-        #[cfg(feature = "chaos")]
-        chaos: wsblast::config::ChaosConfig {
-            enabled: false,
-            latency_ms: None,
-            loss_percent: None,
-            corrupt_percent: None,
-            close_percent: None,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,
@@ -727,14 +679,6 @@ async fn test_connection_ramp_rate() {
             format: wsblast::config::CaptureFormat::PcapNg,
             max_frames: 0,
         },
-        #[cfg(feature = "chaos")]
-        chaos: wsblast::config::ChaosConfig {
-            enabled: false,
-            latency_ms: None,
-            loss_percent: None,
-            corrupt_percent: None,
-            close_percent: None,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,
@@ -781,14 +725,6 @@ async fn test_duration_includes_connection_ramp() {
             output_path: std::path::PathBuf::from("capture.pcapng"),
             format: wsblast::config::CaptureFormat::PcapNg,
             max_frames: 0,
-        },
-        #[cfg(feature = "chaos")]
-        chaos: wsblast::config::ChaosConfig {
-            enabled: false,
-            latency_ms: None,
-            loss_percent: None,
-            corrupt_percent: None,
-            close_percent: None,
         },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
@@ -857,14 +793,6 @@ async fn test_requests_limit_enforcement() {
             format: wsblast::config::CaptureFormat::PcapNg,
             max_frames: 0,
         },
-        #[cfg(feature = "chaos")]
-        chaos: wsblast::config::ChaosConfig {
-            enabled: false,
-            latency_ms: None,
-            loss_percent: None,
-            corrupt_percent: None,
-            close_percent: None,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,
@@ -916,14 +844,6 @@ async fn test_stream_mode_load_run() {
             format: wsblast::config::CaptureFormat::PcapNg,
             max_frames: 0,
         },
-        #[cfg(feature = "chaos")]
-        chaos: wsblast::config::ChaosConfig {
-            enabled: false,
-            latency_ms: None,
-            loss_percent: None,
-            corrupt_percent: None,
-            close_percent: None,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,
@@ -971,14 +891,6 @@ async fn test_binary_payload_dispatch() {
             output_path: std::path::PathBuf::from("capture.pcapng"),
             format: wsblast::config::CaptureFormat::PcapNg,
             max_frames: 0,
-        },
-        #[cfg(feature = "chaos")]
-        chaos: wsblast::config::ChaosConfig {
-            enabled: false,
-            latency_ms: None,
-            loss_percent: None,
-            corrupt_percent: None,
-            close_percent: None,
         },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
@@ -1064,14 +976,6 @@ async fn test_listen_mode_with_server_broadcast_and_ping() {
             format: wsblast::config::CaptureFormat::PcapNg,
             max_frames: 0,
         },
-        #[cfg(feature = "chaos")]
-        chaos: wsblast::config::ChaosConfig {
-            enabled: false,
-            latency_ms: None,
-            loss_percent: None,
-            corrupt_percent: None,
-            close_percent: None,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,
@@ -1117,14 +1021,6 @@ fn scenario_base_config(target_url: Url) -> LoadTestConfig {
             output_path: std::path::PathBuf::from("capture.pcapng"),
             format: wsblast::config::CaptureFormat::PcapNg,
             max_frames: 0,
-        },
-        #[cfg(feature = "chaos")]
-        chaos: wsblast::config::ChaosConfig {
-            enabled: false,
-            latency_ms: None,
-            loss_percent: None,
-            corrupt_percent: None,
-            close_percent: None,
         },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
@@ -1257,14 +1153,6 @@ fn echo_test_config(target_url: Url) -> LoadTestConfig {
             output_path: std::path::PathBuf::from("capture.pcapng"),
             format: wsblast::config::CaptureFormat::PcapNg,
             max_frames: 0,
-        },
-        #[cfg(feature = "chaos")]
-        chaos: wsblast::config::ChaosConfig {
-            enabled: false,
-            latency_ms: None,
-            loss_percent: None,
-            corrupt_percent: None,
-            close_percent: None,
         },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
@@ -1559,43 +1447,6 @@ async fn test_no_reconnect_keeps_single_session_per_worker() {
     assert_eq!(metrics.total_reconnects, 0);
     assert_eq!(metrics.total_connections_established, 2);
     assert_eq!(metrics.handshake_latency.count, 2);
-    assert_eq!(live.snapshot().active_connections, 0);
-
-    cancel_server.cancel();
-}
-
-#[cfg(feature = "chaos")]
-#[tokio::test]
-async fn test_chaos_loss_reconnects_instead_of_killing_workers() {
-    let (target_url, cancel_server) = spawn_echo_server().await;
-
-    let mut config = echo_test_config(target_url);
-    config.connections = 4;
-    config.duration = Duration::from_secs(1);
-    config.message_timeout = Duration::from_millis(50);
-    config.chaos = wsblast::config::ChaosConfig {
-        enabled: true,
-        latency_ms: None,
-        loss_percent: Some(20.0),
-        corrupt_percent: None,
-        close_percent: None,
-    };
-
-    let runner = Runner::new(config);
-    let live = runner.live_metrics();
-    let metrics = runner.run().await.unwrap();
-
-    let timeouts = metrics
-        .error_breakdown
-        .get(&ErrorCategory::Timeout)
-        .copied()
-        .unwrap_or(0);
-    assert!(
-        timeouts > 4,
-        "every worker should survive several losses: {metrics:?}"
-    );
-    assert!(metrics.total_reconnects >= timeouts - 4);
-    assert_eq!(metrics.total_connections_established, 4);
     assert_eq!(live.snapshot().active_connections, 0);
 
     cancel_server.cancel();

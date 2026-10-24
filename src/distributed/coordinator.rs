@@ -625,29 +625,6 @@ impl TryFrom<LoadTestConfig> for ProtoLoadTestConfig {
         let (graphql_operation, graphql_operation_name, graphql_variables, graphql_extensions) =
             (String::new(), String::new(), String::new(), String::new());
 
-        #[cfg(feature = "chaos")]
-        let (
-            chaos_enabled,
-            chaos_latency_ms,
-            chaos_loss_percent,
-            chaos_corrupt_percent,
-            chaos_close_percent,
-        ) = (
-            config.chaos.enabled,
-            config.chaos.latency_ms.unwrap_or(0),
-            config.chaos.loss_percent.unwrap_or(0.0),
-            config.chaos.corrupt_percent.unwrap_or(0.0),
-            config.chaos.close_percent.unwrap_or(0.0),
-        );
-        #[cfg(not(feature = "chaos"))]
-        let (
-            chaos_enabled,
-            chaos_latency_ms,
-            chaos_loss_percent,
-            chaos_corrupt_percent,
-            chaos_close_percent,
-        ) = (false, 0, 0.0, 0.0, 0.0);
-
         let mode = match config.mode {
             TestMode::Echo => ProtoTestMode::Echo,
             TestMode::Stream => ProtoTestMode::Stream,
@@ -674,11 +651,11 @@ impl TryFrom<LoadTestConfig> for ProtoLoadTestConfig {
             graphql_operation_name,
             graphql_variables,
             graphql_extensions,
-            chaos_enabled,
-            chaos_latency_ms,
-            chaos_loss_percent,
-            chaos_corrupt_percent,
-            chaos_close_percent,
+            chaos_enabled: false,
+            chaos_latency_ms: 0,
+            chaos_loss_percent: 0.0,
+            chaos_corrupt_percent: 0.0,
+            chaos_close_percent: 0.0,
             no_reconnect: config.no_reconnect,
         })
     }
@@ -911,30 +888,6 @@ mod tests {
             graphql.variables,
             Some(serde_json::json!({"symbol": "BTC"}))
         );
-    }
-
-    #[cfg(feature = "chaos")]
-    #[test]
-    fn wire_config_round_trips_chaos_options() {
-        let mut config = base_config(1);
-        config.chaos = crate::config::ChaosConfig {
-            enabled: true,
-            latency_ms: Some(25),
-            loss_percent: Some(1.5),
-            corrupt_percent: Some(2.0),
-            close_percent: Some(0.5),
-        };
-
-        let proto = ProtoLoadTestConfig::try_from(config.clone()).expect("encodable config");
-        assert!(proto.chaos_enabled);
-        assert_eq!(proto.chaos_latency_ms, 25);
-
-        let restored = LoadTestConfig::try_from(proto).expect("decodable config");
-        assert!(restored.chaos.enabled);
-        assert_eq!(restored.chaos.latency_ms, Some(25));
-        assert_eq!(restored.chaos.loss_percent, Some(1.5));
-        assert_eq!(restored.chaos.corrupt_percent, Some(2.0));
-        assert_eq!(restored.chaos.close_percent, Some(0.5));
     }
 
     #[tokio::test]

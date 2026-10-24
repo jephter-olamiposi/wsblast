@@ -293,16 +293,6 @@ impl TryFrom<ProtoLoadTestConfig> for LoadTestConfig {
             None
         };
 
-        #[cfg(feature = "chaos")]
-        let chaos = crate::config::ChaosConfig {
-            enabled: proto.chaos_enabled,
-            latency_ms: (proto.chaos_latency_ms > 0).then_some(proto.chaos_latency_ms),
-            loss_percent: (proto.chaos_loss_percent > 0.0).then_some(proto.chaos_loss_percent),
-            corrupt_percent: (proto.chaos_corrupt_percent > 0.0)
-                .then_some(proto.chaos_corrupt_percent),
-            close_percent: (proto.chaos_close_percent > 0.0).then_some(proto.chaos_close_percent),
-        };
-
         Ok(Self {
             target_url,
             connections: proto.connections as usize,
@@ -328,8 +318,6 @@ impl TryFrom<ProtoLoadTestConfig> for LoadTestConfig {
                 format: crate::config::CaptureFormat::PcapNg,
                 max_frames: 0,
             },
-            #[cfg(feature = "chaos")]
-            chaos,
             slo: crate::config::SloThresholds::default(),
             output_format: crate::cli::OutputFormat::Text,
             output_path: None,
