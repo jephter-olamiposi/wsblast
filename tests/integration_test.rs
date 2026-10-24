@@ -1512,3 +1512,65 @@ async fn test_chaos_loss_reconnects_instead_of_killing_workers() {
 
     cancel_server.cancel();
 }
+
+#[tokio::test]
+async fn test_echo_server_close_is_not_counted_as_reply() {
+    let (target_url, cancel_server) = spawn_closing_echo_server(3).await;
+
+    let mut config = echo_test_config(target_url);
+    config.duration = Duration::from_millis(500);
+    config.no_reconnect = true;
+
+    let metrics = Runner::new(config).run().await.unwrap();
+
+    // Three echoes, then the fourth request is answered by a Close frame.
+    assert_eq!(
+        metrics.total_messages_sent, 4,
+        "unexpected metrics: {metrics:?}"
+    );
+    assert_eq!(
+        metrics.total_messages_recv, 3,
+        "a Close frame was counted as a reply: {metrics:?}"
+    );
+    assert_eq!(metrics.message_rtt.count, 3);
+
+    cancel_server.cancel();
+}
+
+#[cfg(feature = "scenario")]
+#[tokio::test]
+async fn test_scenario_echo_server_close_is_not_counted_as_reply() {
+    let (target_url, cancel_server) = spawn_closing_echo_server(3).await;
+
+    let phase = ScenarioPhase {
+        name: "closing".to_string(),
+        target: Some(target_url.clone()),
+        duration: Duration::from_millis(500),
+        connections: 1,
+        ramp_rate: 0,
+        rate_per_conn: 0,
+        payload: None,
+        think_time: Duration::ZERO,
+        actions: vec![ScenarioAction::Send {
+            payload: None,
+            count: 10,
+        }],
+    };
+
+    let mut base = scenario_base_config(target_url);
+    base.no_reconnect = true;
+
+    let metrics = Runner::with_scenario(base, phase).run().await.unwrap();
+
+    assert_eq!(
+        metrics.total_messages_sent, 4,
+        "unexpected metrics: {metrics:?}"
+    );
+    assert_eq!(
+        metrics.total_messages_recv, 3,
+        "a Close frame was counted as a reply: {metrics:?}"
+    );
+    assert_eq!(metrics.message_rtt.count, 3);
+
+    cancel_server.cancel();
+}
