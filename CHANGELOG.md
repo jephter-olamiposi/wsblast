@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Scenario DSL with YAML multi-phase definitions, per-phase targets, actions (`Send`, `Wait`, `Ping`, `Close`), think time, and CLI URL precedence.
+- OpenTelemetry OTLP export and Prometheus `/metrics` endpoint, opt-in via `--otel` and `--prometheus`.
+- Handshake authentication helpers for static bearer tokens, API keys, HS256 JWTs, and OAuth2 client-credentials exchanges.
+- Apollo GraphQL WS subscription mode (`--mode graphql-ws`) with `connection_init` / `subscribe` lifecycle handling and legacy `graphql-ws` (`start` / `data`) support.
+- Frame capture to PCAP-NG and JSON Lines, shared across workers and scenario phases.
+- Non-blocking chaos injection for latency, frame loss, corruption, and forced connection closes.
+- Distributed coordinator/worker execution over gRPC with work splitting, failed-range requeueing, staged metrics, histogram aggregation, and SLO gating.
+- Baseline comparison (`--compare`) with regression thresholds and `--fail-on-regression`.
+- Record/replay mock server subcommands (`wsblast mock record`, `wsblast mock replay`) with delay and error injection.
+- Wire-config propagation of GraphQL and chaos settings in distributed mode.
+
+### Changed
+- Metric constructors and aggregation are fallible (`WorkerMetrics::new`, `AggregatedMetrics::merge`); runner and executor APIs propagate metrics errors.
+- `--compression` now fails fast with `CompressionUnsupported` instead of silently running uncompressed.
+- README documents feature flags, scenario targets, auth lifetime behavior, observability, chaos, capture, GraphQL, distributed limits, and mock/comparison workflows.
+
+### Fixed
+- Single-phase runs no longer execute the load test twice.
+- Frame capture now writes output at the end of a run and supports unlimited capture (`--capture-max-frames 0`).
+- Capture is shared across scenario phases instead of creating per-phase buffers.
+- Chaos latency no longer blocks the Tokio runtime; loss percentages use the documented 0–100 scale.
+- Mock replay consumes only recorded server-to-client frames.
+- Distributed mode rejects unsupported scenario/capture/TUI/observability combinations instead of ignoring them.
+- Remaining runtime `.unwrap()`/`.expect()` calls in metric initialization were replaced with typed errors.
+- GraphQL WS now emits protocol-correct wire names (`connection_init`, `subscribe`, `next`, `complete`) instead of Rust variant names, and handles modern keepalives.
+- Prometheus counters now export with a single `_total` suffix instead of `_total_total`.
+
 ## [0.1.1] - 2026-09-04
 
 ### Changed

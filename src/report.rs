@@ -6,21 +6,361 @@ use crate::metrics::AggregatedMetrics;
 use colored::Colorize;
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, Color, Row, Table};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 
 /// Result of evaluating configured SLO thresholds against aggregated test metrics.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SloEvaluation {
     pub passed: bool,
     pub checks: Vec<SloCheck>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SloCheck {
     pub name: String,
     pub target: String,
     pub actual: String,
     pub passed: bool,
+}
+
+/// Baseline comparison for regression detection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BaselineComparison {
+    pub baseline: AggregatedMetrics,
+    pub current: AggregatedMetrics,
+    pub regressions: Vec<Regression>,
+    pub improvements: Vec<Improvement>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Regression {
+    pub metric: String,
+    pub baseline: f64,
+    pub current: f64,
+    pub pct_change: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Improvement {
+    pub metric: String,
+    pub baseline: f64,
+    pub current: f64,
+    pub pct_change: f64,
+}
+
+/// Report payloads are either the schema envelope (`{ "metrics": ... }`) or a
+/// bare aggregated-metrics object produced by earlier versions.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ReportDocument {
+    Envelope { metrics: AggregatedMetrics },
+    Bare(AggregatedMetrics),
+}
+
+/// Extracts aggregated metrics from a schema v1.0 report or a bare metrics object.
+///
+/// # Errors
+///
+/// Returns a [`serde_json::Error`] when the document matches neither shape.
+pub fn parse_report_metrics(json: &str) -> serde_json::Result<AggregatedMetrics> {
+    match serde_json::from_str::<ReportDocument>(json)? {
+        ReportDocument::Envelope { metrics } | ReportDocument::Bare(metrics) => Ok(metrics),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MetricDirection {
+    HigherIsBetter,
+    LowerIsBetter,
+    Neutral,
+}
+
+/// Classifies a metric by the direction that constitutes an improvement.
+fn metric_direction(metric: &str) -> MetricDirection {
+    match metric {
+        // Input sizing, not an outcome: comparing it would flag intentional reconfiguration.
+        "total_connections_attempted" => MetricDirection::Neutral,
+        "total_connections_failed" | "error_rate" => MetricDirection::LowerIsBetter,
+        _ if metric.starts_with("errors.") => MetricDirection::LowerIsBetter,
+        _ if metric.starts_with("handshake_latency.") || metric.starts_with("message_rtt.") => {
+            MetricDirection::LowerIsBetter
+        }
+        _ => MetricDirection::HigherIsBetter,
+    }
+}
+
+/// Compares two metric snapshots and detects regressions/improvements.
+///
+/// Each metric is scored by its own direction: throughput and delivery counts
+/// higher is better, while errors and latency percentiles lower is better. A
+/// metric that appears from a zero baseline is reported as a full 100% move so
+/// new error categories cannot be silently skipped.
+pub fn compare_metrics(
+    baseline: &AggregatedMetrics,
+    current: &AggregatedMetrics,
+    threshold: f64,
+) -> BaselineComparison {
+    let mut regressions = Vec::new();
+    let mut improvements = Vec::new();
+
+    let baseline_map = metrics_to_map(baseline);
+    let current_map = metrics_to_map(current);
+    let metric_names: std::collections::BTreeSet<&String> =
+        baseline_map.keys().chain(current_map.keys()).collect();
+
+    for metric_name in metric_names {
+        let direction = metric_direction(metric_name);
+        if direction == MetricDirection::Neutral {
+            continue;
+        }
+
+        let baseline_val = baseline_map.get(metric_name).copied().unwrap_or(0.0);
+        let current_val = current_map.get(metric_name).copied().unwrap_or(0.0);
+        if baseline_val == 0.0 && current_val == 0.0 {
+            continue;
+        }
+
+        // A non-zero value against a zero baseline has no finite relative change;
+        // use a full move so the direction still classifies it.
+        let pct_change = if baseline_val == 0.0 {
+            100.0
+        } else {
+            (current_val - baseline_val) / baseline_val * 100.0
+        };
+
+        let (regressed, improved) = match direction {
+            MetricDirection::HigherIsBetter => (pct_change < -threshold, pct_change > threshold),
+            MetricDirection::LowerIsBetter => (pct_change > threshold, pct_change < -threshold),
+            MetricDirection::Neutral => (false, false),
+        };
+
+        if regressed {
+            regressions.push(Regression {
+                metric: metric_name.clone(),
+                baseline: baseline_val,
+                current: current_val,
+                pct_change,
+            });
+        } else if improved {
+            improvements.push(Improvement {
+                metric: metric_name.clone(),
+                baseline: baseline_val,
+                current: current_val,
+                pct_change: pct_change.abs(),
+            });
+        }
+    }
+
+    BaselineComparison {
+        baseline: baseline.clone(),
+        current: current.clone(),
+        regressions,
+        improvements,
+    }
+}
+
+fn metrics_to_map(metrics: &AggregatedMetrics) -> BTreeMap<String, f64> {
+    let mut map = BTreeMap::new();
+
+    map.insert(
+        "total_connections_attempted".into(),
+        metrics.total_connections_attempted as f64,
+    );
+    map.insert(
+        "total_connections_established".into(),
+        metrics.total_connections_established as f64,
+    );
+    map.insert(
+        "total_connections_failed".into(),
+        metrics.total_connections_failed as f64,
+    );
+    map.insert(
+        "total_messages_sent".into(),
+        metrics.total_messages_sent as f64,
+    );
+    map.insert(
+        "total_messages_recv".into(),
+        metrics.total_messages_recv as f64,
+    );
+    map.insert("total_bytes_sent".into(), metrics.total_bytes_sent as f64);
+    map.insert("total_bytes_recv".into(), metrics.total_bytes_recv as f64);
+    map.insert(
+        "throughput_msg_per_sec".into(),
+        metrics.throughput_msg_per_sec,
+    );
+    map.insert(
+        "throughput_bytes_per_sec".into(),
+        metrics.throughput_bytes_per_sec,
+    );
+    map.insert("error_rate".into(), metrics.error_rate);
+    for (category, count) in &metrics.error_breakdown {
+        let name = serde_json::to_string(category)
+            .unwrap_or_else(|_| "\"other\"".to_string())
+            .trim_matches('"')
+            .to_string();
+        map.insert(format!("errors.{name}"), *count as f64);
+    }
+    map.insert(
+        "handshake_latency.p50_us".into(),
+        metrics.handshake_latency.p50_us as f64,
+    );
+    map.insert(
+        "handshake_latency.p95_us".into(),
+        metrics.handshake_latency.p95_us as f64,
+    );
+    map.insert(
+        "handshake_latency.p99_us".into(),
+        metrics.handshake_latency.p99_us as f64,
+    );
+    map.insert(
+        "handshake_latency.p999_us".into(),
+        metrics.handshake_latency.p999_us as f64,
+    );
+    map.insert(
+        "message_rtt.p50_us".into(),
+        metrics.message_rtt.p50_us as f64,
+    );
+    map.insert(
+        "message_rtt.p95_us".into(),
+        metrics.message_rtt.p95_us as f64,
+    );
+    map.insert(
+        "message_rtt.p99_us".into(),
+        metrics.message_rtt.p99_us as f64,
+    );
+    map.insert(
+        "message_rtt.p999_us".into(),
+        metrics.message_rtt.p999_us as f64,
+    );
+
+    map
+}
+
+/// Renders a comparison report in the specified format.
+pub fn render_comparison_report(
+    comparison: &BaselineComparison,
+    format: OutputFormat,
+    threshold: f64,
+) -> String {
+    match format {
+        OutputFormat::Text => render_text_comparison(comparison, threshold),
+        OutputFormat::Json => render_json_comparison(comparison, threshold),
+        OutputFormat::Markdown => render_markdown_comparison(comparison, threshold),
+    }
+}
+
+fn render_text_comparison(comparison: &BaselineComparison, threshold: f64) -> String {
+    let mut out = String::new();
+
+    out.push('\n');
+    out.push_str(&format!(
+        "{} {}\n\n",
+        "wsblast".bold().cyan(),
+        "Baseline Comparison Report".bold()
+    ));
+
+    out.push_str(&format!("Threshold: ±{:.1}%\n\n", threshold));
+
+    if !comparison.regressions.is_empty() {
+        let mut reg_table = Table::new();
+        reg_table.load_preset(UTF8_FULL);
+        reg_table.set_header(vec!["Metric", "Baseline", "Current", "Change", "Status"]);
+
+        for r in &comparison.regressions {
+            reg_table.add_row(vec![
+                &r.metric,
+                &format!("{:.3}", r.baseline),
+                &format!("{:.3}", r.current),
+                &format!("{:+.2}%", r.pct_change),
+                "⚠ REGRESSION",
+            ]);
+        }
+        out.push_str(&reg_table.to_string());
+        out.push_str("\n\n");
+    }
+
+    if !comparison.improvements.is_empty() {
+        let mut imp_table = Table::new();
+        imp_table.load_preset(UTF8_FULL);
+        imp_table.set_header(vec!["Metric", "Baseline", "Current", "Change", "Status"]);
+
+        for i in &comparison.improvements {
+            imp_table.add_row(vec![
+                &i.metric,
+                &format!("{:.3}", i.baseline),
+                &format!("{:.3}", i.current),
+                &format!("-{:.2}%", i.pct_change),
+                "✓ IMPROVEMENT",
+            ]);
+        }
+        out.push_str(&imp_table.to_string());
+        out.push_str("\n\n");
+    }
+
+    if comparison.regressions.is_empty() && comparison.improvements.is_empty() {
+        out.push_str("No significant changes detected beyond threshold.\n\n");
+    }
+
+    out
+}
+
+fn render_json_comparison(comparison: &BaselineComparison, threshold: f64) -> String {
+    #[derive(serde::Serialize)]
+    struct JsonComparison<'a> {
+        schema_version: &'static str,
+        threshold: f64,
+        regressions: &'a Vec<Regression>,
+        improvements: &'a Vec<Improvement>,
+    }
+
+    let report = JsonComparison {
+        schema_version: "1.1.0",
+        threshold,
+        regressions: &comparison.regressions,
+        improvements: &comparison.improvements,
+    };
+
+    serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into())
+}
+
+fn render_markdown_comparison(comparison: &BaselineComparison, threshold: f64) -> String {
+    let mut md = String::new();
+    md.push_str("# `wsblast` Baseline Comparison Report\n\n");
+    md.push_str(&format!("- **Threshold:** `±{:.1}%`\n\n", threshold));
+
+    if !comparison.regressions.is_empty() {
+        md.push_str("## ⚠ Regressions Detected\n\n");
+        md.push_str("| Metric | Baseline | Current | Change |\n");
+        md.push_str("| :--- | ---: | ---: | ---: |\n");
+        for r in &comparison.regressions {
+            md.push_str(&format!(
+                "| {} | {:.3} | {:.3} | {:+.2}% |\n",
+                r.metric, r.baseline, r.current, r.pct_change
+            ));
+        }
+        md.push('\n');
+    }
+
+    if !comparison.improvements.is_empty() {
+        md.push_str("## ✓ Improvements Detected\n\n");
+        md.push_str("| Metric | Baseline | Current | Change |\n");
+        md.push_str("| :--- | ---: | ---: | ---: |\n");
+        for i in &comparison.improvements {
+            md.push_str(&format!(
+                "| {} | {:.3} | {:.3} | -{:.2}% |\n",
+                i.metric, i.baseline, i.current, i.pct_change
+            ));
+        }
+        md.push('\n');
+    }
+
+    if comparison.regressions.is_empty() && comparison.improvements.is_empty() {
+        md.push_str("No significant changes detected beyond threshold.\n");
+    }
+
+    md
 }
 
 /// Evaluates configured SLO criteria against aggregated test metrics.
@@ -450,5 +790,167 @@ fn format_us(us: u64) -> String {
         format!("{:.2} ms", us as f64 / 1_000.0)
     } else {
         format!("{:.3} s", us as f64 / 1_000_000.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ErrorCategory;
+    use crate::metrics::LatencyStats;
+    use std::collections::HashMap;
+
+    fn latency(value: u64) -> LatencyStats {
+        LatencyStats {
+            count: 1,
+            min_us: value,
+            mean_us: value as f64,
+            max_us: value,
+            std_dev_us: 0.0,
+            p50_us: value,
+            p75_us: value,
+            p90_us: value,
+            p95_us: value,
+            p99_us: value,
+            p999_us: value,
+            p9999_us: value,
+        }
+    }
+
+    fn sample_metrics() -> AggregatedMetrics {
+        AggregatedMetrics {
+            total_connections_attempted: 10,
+            total_connections_established: 10,
+            total_connections_failed: 0,
+            total_messages_sent: 100,
+            total_messages_recv: 100,
+            total_bytes_sent: 1_000,
+            total_bytes_recv: 1_000,
+            elapsed: std::time::Duration::from_secs(1),
+            throughput_msg_per_sec: 100.0,
+            throughput_bytes_per_sec: 2_000.0,
+            error_rate: 0.0,
+            handshake_latency: latency(500),
+            message_rtt: latency(250),
+            error_breakdown: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn higher_throughput_is_an_improvement_and_lower_is_a_regression() {
+        let baseline = sample_metrics();
+
+        let mut faster = sample_metrics();
+        faster.throughput_msg_per_sec = 150.0;
+        let comparison = compare_metrics(&baseline, &faster, 10.0);
+        assert!(comparison.regressions.is_empty());
+        assert!(
+            comparison
+                .improvements
+                .iter()
+                .any(|item| item.metric == "throughput_msg_per_sec")
+        );
+
+        let mut slower = sample_metrics();
+        slower.throughput_msg_per_sec = 50.0;
+        let comparison = compare_metrics(&baseline, &slower, 10.0);
+        assert!(
+            comparison
+                .regressions
+                .iter()
+                .any(|item| item.metric == "throughput_msg_per_sec")
+        );
+        assert!(
+            comparison
+                .improvements
+                .iter()
+                .all(|item| item.metric != "throughput_msg_per_sec")
+        );
+    }
+
+    #[test]
+    fn higher_latency_is_a_regression_and_lower_is_an_improvement() {
+        let mut baseline = sample_metrics();
+        baseline.message_rtt = latency(1_000);
+
+        let mut faster = sample_metrics();
+        faster.message_rtt = latency(500);
+        let comparison = compare_metrics(&baseline, &faster, 10.0);
+        assert!(
+            comparison
+                .improvements
+                .iter()
+                .any(|item| item.metric == "message_rtt.p50_us")
+        );
+
+        let mut slower = sample_metrics();
+        slower.message_rtt = latency(2_000);
+        let comparison = compare_metrics(&baseline, &slower, 10.0);
+        assert!(
+            comparison
+                .regressions
+                .iter()
+                .any(|item| item.metric == "message_rtt.p50_us")
+        );
+    }
+
+    #[test]
+    fn new_errors_from_a_zero_baseline_are_regressions() {
+        let baseline = sample_metrics();
+
+        let mut current = sample_metrics();
+        current.total_connections_failed = 2;
+        current.error_rate = 0.2;
+        current
+            .error_breakdown
+            .insert(ErrorCategory::DnsResolution, 2);
+
+        let comparison = compare_metrics(&baseline, &current, 10.0);
+        assert!(
+            comparison
+                .regressions
+                .iter()
+                .any(|item| item.metric == "total_connections_failed")
+        );
+        assert!(
+            comparison
+                .regressions
+                .iter()
+                .any(|item| item.metric == "error_rate")
+        );
+        assert!(
+            comparison
+                .regressions
+                .iter()
+                .any(|item| item.metric == "errors.dns_resolution")
+        );
+    }
+
+    #[test]
+    fn parses_schema_envelopes_and_bare_metrics() {
+        let metrics = sample_metrics();
+        let envelope = serde_json::json!({
+            "schema_version": "1.0.0",
+            "metrics": metrics,
+        });
+
+        let parsed = parse_report_metrics(&envelope.to_string()).expect("envelope must parse");
+        assert_eq!(parsed.total_messages_sent, metrics.total_messages_sent);
+
+        let parsed = parse_report_metrics(&serde_json::to_string(&metrics).expect("serialize"))
+            .expect("bare metrics must parse");
+        assert_eq!(
+            parsed.throughput_msg_per_sec,
+            metrics.throughput_msg_per_sec
+        );
+    }
+
+    #[test]
+    fn comparison_json_carries_schema_version() {
+        let comparison = compare_metrics(&sample_metrics(), &sample_metrics(), 10.0);
+        let rendered = render_comparison_report(&comparison, OutputFormat::Json, 10.0);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).expect("comparison JSON must parse");
+        assert_eq!(parsed["schema_version"], "1.1.0");
     }
 }
