@@ -314,7 +314,17 @@ impl WorkerSession {
                 Err(ErrorCategory::UnexpectedClose)
             };
 
-            let response = tokio::time::timeout(self.config.message_timeout, recv_fut).await;
+            // Cancellation wins over a simultaneously ready reply so nothing
+            // after the test window is recorded.
+            let response = tokio::select! {
+                biased;
+                _ = self.cancel_token.cancelled() => None,
+                res = tokio::time::timeout(self.config.message_timeout, recv_fut) => Some(res),
+            };
+            let Some(response) = response else {
+                let _ = sink.send(Message::Close(None)).await;
+                break;
+            };
 
             match response {
                 Ok(Ok((bytes_recv, is_alive))) => {
@@ -656,9 +666,20 @@ impl WorkerSession {
                                     Err(ErrorCategory::UnexpectedClose)
                                 };
 
-                                match tokio::time::timeout(self.config.message_timeout, recv_fut)
-                                    .await
-                                {
+                                let response = tokio::select! {
+                                    biased;
+                                    _ = self.cancel_token.cancelled() => None,
+                                    res = tokio::time::timeout(
+                                        self.config.message_timeout,
+                                        recv_fut,
+                                    ) => Some(res),
+                                };
+                                let Some(response) = response else {
+                                    let _ = sink.send(Message::Close(None)).await;
+                                    break 'script;
+                                };
+
+                                match response {
                                     Ok(Ok((bytes_recv, is_alive))) => {
                                         self.metrics.record_message_recv(
                                             bytes_recv,
