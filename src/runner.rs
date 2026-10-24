@@ -223,7 +223,17 @@ impl Runner {
                     .progress_chars("#>-"),
             );
 
-            while !self.cancel_token.is_cancelled() {
+            // The refresh tick races cancellation so the run ends, and
+            // `elapsed` is taken, when the token fires rather than at the
+            // next refresh.
+            let mut refresh = tokio::time::interval(Duration::from_millis(100));
+            refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = self.cancel_token.cancelled() => break,
+                    _ = refresh.tick() => {}
+                }
                 let snap = self.live_metrics.snapshot();
                 let elapsed = start_time.elapsed();
                 let elapsed_ms = elapsed.as_millis() as u64;
@@ -239,8 +249,6 @@ impl Runner {
                     "Active: {} | Msg/s: {:.1} | Recv: {} | Err: {}",
                     snap.active_connections, rps, snap.messages_received, snap.total_errors
                 ));
-
-                tokio::time::sleep(Duration::from_millis(100)).await;
             }
 
             pb.finish_and_clear();

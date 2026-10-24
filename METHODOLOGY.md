@@ -218,7 +218,7 @@ The run is cancelled by the first of:
 - Ctrl+C or SIGTERM (Ctrl+C only on Windows),
 - `q`, `Esc` or Ctrl+C in the TUI.
 
-`elapsed` is read when the runner sees the cancellation. With `--no-progress` (or `--tui`) that is immediate. With the progress bar, the runner polls every 100 ms, so `elapsed` can exceed `--duration` by up to about 100 ms; local runs with `-d 1s` reported 1.011 to 1.012 s with the progress bar and 2.0007 s for `-d 2s` with `--no-progress`.
+`elapsed` is read as soon as the runner sees the cancellation, with or without the progress bar: the progress bar refreshes every 100 ms, but its loop also wakes on cancellation. Local runs with `-c 2 -d 250ms` reported 250.7 ms with the progress bar and 251.5 ms with `--no-progress`.
 
 In a scenario each phase has its own duration and `elapsed`. The report's `elapsed` is the sum of the phases' values; the 500 ms pause between phases is not included.
 

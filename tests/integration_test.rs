@@ -730,6 +730,34 @@ async fn test_slots_the_ramp_never_reaches_are_not_failures() {
     cancel_server.cancel();
 }
 
+#[tokio::test]
+async fn test_progress_bar_does_not_extend_elapsed() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    // 250ms sits between two progress refreshes, where a fixed sleep in the
+    // progress loop would overshoot by about 50ms.
+    let duration = Duration::from_millis(250);
+    for no_progress in [true, false] {
+        let mut config = echo_test_config(target_url.clone());
+        config.duration = duration;
+        config.no_progress = no_progress;
+        let metrics = Runner::new(config)
+            .with_signal_handling(false)
+            .run()
+            .await
+            .unwrap();
+
+        let overshoot = metrics.elapsed.saturating_sub(duration);
+        assert!(
+            metrics.elapsed >= duration && overshoot < Duration::from_millis(20),
+            "no_progress={no_progress}: elapsed {:?} for a {duration:?} run",
+            metrics.elapsed
+        );
+    }
+
+    cancel_server.cancel();
+}
+
 #[test]
 fn test_payload_config_classification() {
     let static_p = PayloadConfig::from_text("plain text without macros".to_string());
