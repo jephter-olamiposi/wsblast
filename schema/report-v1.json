@@ -1,0 +1,250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/jephter-olamiposi/wsblast/main/schema/report-v1.json",
+  "title": "wsblast run report (schema 1.x)",
+  "description": "Output of `wsblast --format json` (also written by `-o FILE`). Derived from `JsonReport` in src/report.rs, `AggregatedMetrics` and `LatencyStats` in src/metrics.rs, and `ErrorCategory` in src/error.rs. Readers must ignore properties they do not know: fields may be added within schema 1.x without changing the major version.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "target_url",
+    "connections",
+    "duration_secs",
+    "mode",
+    "metrics",
+    "slo"
+  ],
+  "properties": {
+    "schema_version": {
+      "description": "Report schema version. wsblast 0.1.x and 0.2.0 write \"1.0.0\".",
+      "type": "string",
+      "pattern": "^1\\.[0-9]+\\.[0-9]+$",
+      "examples": ["1.0.0"]
+    },
+    "target_url": {
+      "description": "Target URL after parsing, so a bare host gains a trailing slash (ws://127.0.0.1:9001 is written as ws://127.0.0.1:9001/). For a scenario this is the URL of the first phase that ran (or of the --phase phase), even when later phases used other targets.",
+      "type": "string",
+      "pattern": "^wss?://"
+    },
+    "connections": {
+      "description": "Configured connection count (-c). For a scenario, the sum of every executed phase's connections, which equals metrics.total_connections_attempted.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "duration_secs": {
+      "description": "Measured elapsed time in seconds (metrics.elapsed as a float), not the configured --duration. For a scenario, the sum of each phase's elapsed time; the 500 ms pause between phases is not included.",
+      "type": "number",
+      "minimum": 0
+    },
+    "mode": {
+      "description": "Session mode, printed with Rust Debug formatting.",
+      "type": "string",
+      "enum": ["Echo", "Stream", "Listen", "GraphQLWS"]
+    },
+    "metrics": {
+      "$ref": "#/$defs/aggregated_metrics"
+    },
+    "slo": {
+      "$ref": "#/$defs/slo_evaluation"
+    }
+  },
+  "$defs": {
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "duration": {
+      "description": "A Rust std::time::Duration as serialized by serde.",
+      "type": "object",
+      "required": ["secs", "nanos"],
+      "properties": {
+        "secs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nanos": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999999999
+        }
+      }
+    },
+    "error_category": {
+      "type": "string",
+      "enum": [
+        "dns_resolution",
+        "tcp_connect",
+        "tls_handshake",
+        "http_upgrade_rejected",
+        "protocol_error",
+        "write_error",
+        "read_error",
+        "timeout",
+        "unexpected_close",
+        "other"
+      ]
+    },
+    "latency_stats": {
+      "description": "Summary of an HDR histogram with 1 us to 60 s bounds and 3 significant figures. All values are microseconds. Percentiles and max are the upper edge of the bucket that holds the value, so they can exceed the true sample by up to 0.1 %. When count is 0 every field is 0.",
+      "type": "object",
+      "required": [
+        "count",
+        "min_us",
+        "mean_us",
+        "max_us",
+        "std_dev_us",
+        "p50_us",
+        "p75_us",
+        "p90_us",
+        "p95_us",
+        "p99_us",
+        "p999_us",
+        "p9999_us"
+      ],
+      "properties": {
+        "count": {
+          "description": "Number of recorded samples.",
+          "$ref": "#/$defs/count"
+        },
+        "min_us": { "$ref": "#/$defs/count" },
+        "mean_us": { "type": "number", "minimum": 0 },
+        "max_us": { "$ref": "#/$defs/count" },
+        "std_dev_us": { "type": "number", "minimum": 0 },
+        "p50_us": { "$ref": "#/$defs/count" },
+        "p75_us": { "$ref": "#/$defs/count" },
+        "p90_us": { "$ref": "#/$defs/count" },
+        "p95_us": { "$ref": "#/$defs/count" },
+        "p99_us": { "$ref": "#/$defs/count" },
+        "p999_us": { "$ref": "#/$defs/count" },
+        "p9999_us": { "$ref": "#/$defs/count" }
+      }
+    },
+    "aggregated_metrics": {
+      "description": "Merged result of every worker. See METHODOLOGY.md for how each value is measured.",
+      "type": "object",
+      "required": [
+        "total_connections_attempted",
+        "total_connections_established",
+        "total_connections_failed",
+        "total_messages_sent",
+        "total_messages_recv",
+        "total_bytes_sent",
+        "total_bytes_recv",
+        "elapsed",
+        "throughput_msg_per_sec",
+        "throughput_bytes_per_sec",
+        "error_rate",
+        "handshake_latency",
+        "message_rtt",
+        "error_breakdown"
+      ],
+      "properties": {
+        "total_connections_attempted": {
+          "description": "Worker slots the run was configured to open (the -c value, or the sum over scenario phases). Slots that were never started because the run ended first are included.",
+          "$ref": "#/$defs/count"
+        },
+        "total_connections_established": {
+          "description": "Worker slots that completed at least one handshake. Never larger than total_connections_attempted.",
+          "$ref": "#/$defs/count"
+        },
+        "total_connections_failed": {
+          "description": "total_connections_attempted minus total_connections_established: slots that never completed a handshake, including slots that were never started.",
+          "$ref": "#/$defs/count"
+        },
+        "total_reconnects": {
+          "description": "Handshakes that re-established a slot after its connection was lost. handshake_latency.count equals total_connections_established + total_reconnects. Absent from reports written before reconnects were added; readers should treat a missing value as 0.",
+          "$ref": "#/$defs/count"
+        },
+        "total_messages_sent": {
+          "description": "Data frames written successfully. Keepalive pings, pongs and Close frames are not counted.",
+          "$ref": "#/$defs/count"
+        },
+        "total_messages_recv": {
+          "description": "Data frames counted as received. In echo mode, replies recorded within the test window; in stream and listen mode, every text or binary frame read; in graphql-ws mode, next/data messages.",
+          "$ref": "#/$defs/count"
+        },
+        "total_bytes_sent": {
+          "description": "Payload bytes of the counted sent frames. WebSocket framing, TLS and the HTTP upgrade are not included.",
+          "$ref": "#/$defs/count"
+        },
+        "total_bytes_recv": {
+          "description": "Payload bytes of the counted received frames.",
+          "$ref": "#/$defs/count"
+        },
+        "elapsed": {
+          "description": "Wall-clock time from the start of the run (before the first connection is spawned) to cancellation.",
+          "$ref": "#/$defs/duration"
+        },
+        "throughput_msg_per_sec": {
+          "description": "max(total_messages_sent, total_messages_recv) / elapsed seconds.",
+          "type": "number",
+          "minimum": 0
+        },
+        "throughput_bytes_per_sec": {
+          "description": "(total_bytes_sent + total_bytes_recv) / elapsed seconds.",
+          "type": "number",
+          "minimum": 0
+        },
+        "error_rate": {
+          "description": "errors / (total_messages_sent + errors), where errors is the sum of error_breakdown. 0 when the denominator is 0.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "handshake_latency": {
+          "description": "Time from starting the connect (DNS, TCP, TLS and HTTP upgrade) to a completed WebSocket handshake. One sample per successful handshake, reconnects included.",
+          "$ref": "#/$defs/latency_stats"
+        },
+        "message_rtt": {
+          "description": "Request to reply round-trip time. Only echo mode records samples; in every other mode count is 0.",
+          "$ref": "#/$defs/latency_stats"
+        },
+        "error_breakdown": {
+          "description": "Error count per category. Categories with no errors are omitted, so the object is empty on a clean run. Every failed handshake attempt, including failed reconnect attempts, adds one error.",
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/error_category" },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "slo_check": {
+      "type": "object",
+      "required": ["name", "target", "actual", "passed"],
+      "properties": {
+        "name": {
+          "description": "Check name. Current values: \"Latency p50\", \"Latency p95\", \"Latency p99\", \"Latency p99.9\", \"Error Rate\", \"Throughput (msg/s)\".",
+          "type": "string",
+          "examples": ["Latency p99", "Error Rate", "Throughput (msg/s)"]
+        },
+        "target": {
+          "description": "Human-readable threshold, for example \"<= 25ms\", \"<= 1.00%\" or \">= 100.0\". Not intended for parsing.",
+          "type": "string"
+        },
+        "actual": {
+          "description": "Human-readable measured value, for example \"219µs\", \"0.00%\" or \"74250.3\". A latency check with no RTT samples reads \"no RTT samples\" and fails.",
+          "type": "string"
+        },
+        "passed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "slo_evaluation": {
+      "type": "object",
+      "required": ["passed", "checks"],
+      "properties": {
+        "passed": {
+          "description": "True when every check passed, including when no SLO flags were given (checks is then empty). When false the process exits with code 2.",
+          "type": "boolean"
+        },
+        "checks": {
+          "description": "One entry per configured SLO flag, in the order p50, p95, p99, p99.9, error rate, throughput.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/slo_check" }
+        }
+      }
+    }
+  }
+}
