@@ -3743,7 +3743,6 @@ dependencies = [
  "crossbeam",
  "crossterm 0.28.1",
  "fastrand",
- "flate2",
  "futures-util",
  "hdrhistogram",
  "http",
