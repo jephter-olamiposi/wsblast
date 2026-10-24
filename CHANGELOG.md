@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README documents feature flags, scenario targets, auth lifetime behavior, observability, chaos, capture, GraphQL, distributed limits, and mock/comparison workflows.
 
 ### Fixed
+- Echo-mode shutdown no longer waits up to `--message-timeout` for an in-flight reply: the receive wait races cancellation, and replies arriving after the test window are no longer recorded.
 - Echo mode with `--ping-interval` no longer throttles unpaced load to one message per keepalive tick, and keepalive ticks no longer add extra data sends when `--rate` is set.
 - Latency SLOs (`--max-p50/p95/p99/p999`) no longer pass when no round trip was measured: the check fails with "no RTT samples", and latency SLOs are rejected at startup outside `--mode echo`.
 - Single-phase runs no longer execute the load test twice.

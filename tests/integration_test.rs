@@ -69,6 +69,18 @@ async fn spawn_echo_server() -> (Url, tokio_util::sync::CancellationToken) {
     (target_url, cancel)
 }
 
+/// Asserts every reply was matched to a request, allowing one unanswered
+/// request per connection that was still in flight when the run was cancelled.
+fn assert_in_flight_at_most(metrics: &wsblast::metrics::AggregatedMetrics, connections: u64) {
+    assert!(
+        metrics.total_messages_recv <= metrics.total_messages_sent
+            && metrics.total_messages_sent - metrics.total_messages_recv <= connections,
+        "sent {} / received {} exceeds {connections} in-flight requests",
+        metrics.total_messages_sent,
+        metrics.total_messages_recv
+    );
+}
+
 /// Echoes the client's requested WebSocket subprotocol during the handshake.
 #[cfg(feature = "graphql-ws")]
 #[allow(clippy::result_large_err)]
@@ -213,7 +225,7 @@ async fn test_echo_mode_load_run() {
     assert_eq!(metrics.total_connections_established, 10);
     assert_eq!(metrics.total_connections_failed, 0);
     assert!(metrics.total_messages_sent > 50);
-    assert_eq!(metrics.total_messages_recv, metrics.total_messages_sent);
+    assert_in_flight_at_most(&metrics, 10);
     assert_eq!(metrics.error_rate, 0.0);
     assert!(metrics.throughput_msg_per_sec > 10.0);
     assert!(metrics.message_rtt.p50_us > 0);
@@ -856,7 +868,7 @@ async fn test_binary_payload_dispatch() {
 
     assert_eq!(metrics.total_connections_established, 2);
     assert!(metrics.total_messages_sent > 10);
-    assert_eq!(metrics.total_messages_recv, metrics.total_messages_sent);
+    assert_in_flight_at_most(&metrics, 2);
     assert!(metrics.total_bytes_sent > 0);
     assert_eq!(metrics.error_rate, 0.0);
 
@@ -1172,7 +1184,7 @@ async fn test_echo_ping_interval_does_not_throttle_unpaced_load() {
         with_ping.total_messages_sent,
         baseline.total_messages_sent
     );
-    assert_eq!(with_ping.total_messages_recv, with_ping.total_messages_sent);
+    assert_in_flight_at_most(&with_ping, 2);
     assert_eq!(with_ping.error_rate, 0.0);
 
     cancel_server.cancel();
@@ -1223,6 +1235,113 @@ async fn test_stream_and_listen_modes_with_ping_interval() {
     assert_eq!(listen.total_connections_established, 1);
     assert_eq!(listen.total_messages_sent, 0);
     assert_eq!(listen.error_rate, 0.0);
+
+    cancel_server.cancel();
+}
+
+/// Spawns a WebSocket server that completes handshakes and then reads frames
+/// without ever replying, so echo requests stay in flight.
+async fn spawn_silent_server() -> (Url, tokio_util::sync::CancellationToken) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let target_url = Url::parse(&format!("ws://127.0.0.1:{}", addr.port())).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_server = cancel.clone();
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Ok((stream, _)) = listener.accept() => {
+                    tokio::spawn(async move {
+                        if let Ok(mut ws_stream) = tokio_tungstenite::accept_async(stream).await {
+                            while let Some(Ok(_)) = ws_stream.next().await {}
+                        }
+                    });
+                }
+                _ = cancel_server.cancelled() => break,
+            }
+        }
+    });
+
+    (target_url, cancel)
+}
+
+#[tokio::test]
+async fn test_echo_cancellation_interrupts_pending_reply() {
+    let (target_url, cancel_server) = spawn_silent_server().await;
+
+    let mut config = echo_test_config(target_url);
+    config.connections = 2;
+    config.duration = Duration::from_millis(300);
+    config.message_timeout = Duration::from_secs(10);
+
+    let start = std::time::Instant::now();
+    let metrics = tokio::time::timeout(Duration::from_secs(15), Runner::new(config).run())
+        .await
+        .expect("runner hung past the message timeout")
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "shutdown waited for the message timeout: run took {elapsed:?}"
+    );
+    assert_eq!(metrics.total_connections_established, 2);
+    assert_eq!(metrics.total_messages_sent, 2);
+    assert_eq!(metrics.total_messages_recv, 0);
+    assert!(
+        metrics.error_breakdown.is_empty(),
+        "cancelled in-flight requests must not count as errors: {:?}",
+        metrics.error_breakdown
+    );
+
+    cancel_server.cancel();
+}
+
+#[cfg(feature = "scenario")]
+#[tokio::test]
+async fn test_scenario_echo_cancellation_interrupts_pending_reply() {
+    let (target_url, cancel_server) = spawn_silent_server().await;
+
+    let phase = ScenarioPhase {
+        name: "silent".to_string(),
+        target: Some(target_url.clone()),
+        duration: Duration::from_millis(300),
+        connections: 2,
+        ramp_rate: 0,
+        rate_per_conn: 0,
+        payload: None,
+        think_time: Duration::ZERO,
+        actions: vec![ScenarioAction::Send {
+            payload: None,
+            count: 1,
+        }],
+    };
+
+    let mut base = scenario_base_config(target_url);
+    base.message_timeout = Duration::from_secs(10);
+
+    let start = std::time::Instant::now();
+    let metrics = tokio::time::timeout(
+        Duration::from_secs(15),
+        Runner::with_scenario(base, phase).run(),
+    )
+    .await
+    .expect("runner hung past the message timeout")
+    .unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "shutdown waited for the message timeout: run took {elapsed:?}"
+    );
+    assert_eq!(metrics.total_messages_sent, 2);
+    assert_eq!(metrics.total_messages_recv, 0);
+    assert!(
+        metrics.error_breakdown.is_empty(),
+        "cancelled in-flight requests must not count as errors: {:?}",
+        metrics.error_breakdown
+    );
 
     cancel_server.cancel();
 }
