@@ -77,7 +77,7 @@ impl WorkerNode {
                     );
 
                     let live_metrics = Arc::new(LiveMetrics::new());
-                    let runner = Runner::new(config).with_live_metrics(Arc::clone(&live_metrics));
+                    let runner = Runner::new(*config).with_live_metrics(Arc::clone(&live_metrics));
 
                     // Long ranges must report progress while they run; otherwise
                     // the coordinator would treat a healthy worker as stale.
@@ -168,7 +168,7 @@ impl WorkerNode {
 
 /// Outcome of asking the coordinator for work.
 enum WorkClaim {
-    Work(u32, u32, LoadTestConfig),
+    Work(u32, u32, Box<LoadTestConfig>),
     Idle,
     Shutdown,
 }
@@ -201,7 +201,7 @@ async fn claim_work(
     Ok(WorkClaim::Work(
         response.start_connection,
         response.end_connection,
-        config,
+        Box::new(config),
     ))
 }
 
