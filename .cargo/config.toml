@@ -1,0 +1,6 @@
+# Release builds made by dist use the `dist` profile. It is defined here
+# rather than in Cargo.toml and simply reuses [profile.release] (fat LTO,
+# one codegen unit, stripped symbols, panic = "abort"), so the published
+# binaries match a local `cargo build --release`.
+[profile.dist]
+inherits = "release"
