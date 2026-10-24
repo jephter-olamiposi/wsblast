@@ -393,8 +393,8 @@ wsblast [OPTIONS] [URL] [COMMAND]
 | :--- | :--- | :--- |
 | `URL`, `-u, --url` | *Required* | Target WebSocket endpoint (`ws://` or `wss://`) |
 | `-c, --connections` | `50` | Number of concurrent WebSocket connection workers |
-| `--ramp-rate` | `0` | Connection ramp rate in workers/sec (`0` = unthrottled burst) |
-| `-d, --duration` | `10s` | Test duration (e.g. `10s`, `30s`, `2m`, `500ms`) |
+| `--ramp-rate` | `0` | Connection ramp rate in workers/sec (`0` = unthrottled burst). The ramp counts toward `--duration`; if it needs longer than the duration, a warning is printed and not every connection opens |
+| `-d, --duration` | `10s` | Total wall-clock test duration including the ramp-up (e.g. `10s`, `30s`, `2m`, `500ms`) |
 | `-n, --requests` | `None` | Total message limit across all workers |
 | `-r, --rate` | `0` | Message rate per connection per second (`0` = unthrottled) |
 | `-p, --payload` | JSON payload | Inline text payload (supports `{{timestamp}}`, `{{worker_id}}`, `{{seq}}`) |

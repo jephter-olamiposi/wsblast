@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A message timeout, I/O error or server close no longer ends a worker for the rest of the run: workers reconnect with exponential backoff (100ms doubling to 5s) and report `total_reconnects`; `--no-reconnect` restores the old behaviour.
 - Echo-mode shutdown no longer waits up to `--message-timeout` for an in-flight reply: the receive wait races cancellation, and replies arriving after the test window are no longer recorded.
 - Echo mode with `--ping-interval` no longer throttles unpaced load to one message per keepalive tick, and keepalive ticks no longer add extra data sends when `--rate` is set.
+- `--duration` is now the total wall-clock run including the `--ramp-rate` ramp, so runs no longer last ramp plus duration and throughput is no longer diluted by ramp time; a warning is printed when the ramp cannot finish within the duration.
 - Ctrl+C or SIGTERM during a scenario now stops the whole scenario and prints the report instead of only ending the current phase and starting the next one.
 - Ctrl+C and SIGTERM during a `--ramp-rate` connection ramp now stop the run and print the report instead of killing the process; `Runner::run` and `Runner::run_and_collect_worker_metrics` share one code path.
 - Latency SLOs (`--max-p50/p95/p99/p999`) no longer pass when no round trip was measured: the check fails with "no RTT samples", and latency SLOs are rejected at startup outside `--mode echo`.

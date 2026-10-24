@@ -45,7 +45,7 @@ pub struct Cli {
     )]
     pub ramp_rate: u64,
 
-    /// Test duration (e.g., '10s', '30s', '2m', '500ms')
+    /// Total test duration including the connection ramp (e.g., '10s', '30s', '2m', '500ms')
     #[arg(
         short = 'd',
         long = "duration",
