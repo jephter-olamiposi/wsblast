@@ -40,6 +40,9 @@ v0.2.0 ships a smaller crate in which every feature works end to end. Several fe
 - The `tracing-subscriber` feature.
 - `ConfigError::ZeroRate`, `WsBlastError::SloBreach` and `WorkerError::ChannelClosed`, which were never constructed.
 - The unused `base64`, `rand` and `sha2` dependencies.
+- `--compression` now fails fast with `CompressionUnsupported` instead of silently running uncompressed.
+- README documents feature flags, scenario targets, auth lifetime behavior, observability, chaos, capture, GraphQL, distributed limits, and mock/comparison workflows.
+- Command-line usage errors (unknown flag, missing value, conflicting flags) now exit with code 1 instead of clap's default 2, so exit code 2 always means an SLO breach or a `--fail-on-regression` regression; `--help` and `--version` still exit with 0.
 
 ### Fixed
 - GraphQL WS mode no longer records an `UnexpectedClose` error when the run ends before the server completes the subscription, and now sends the stop/complete message before the Close frame.

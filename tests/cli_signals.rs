@@ -1,4 +1,5 @@
-//! Process-level signal handling tests that drive the compiled `wsblast` binary.
+//! Process-level tests that drive the compiled `wsblast` binary: signal
+//! handling and exit codes.
 #![cfg(unix)]
 
 use futures_util::{SinkExt, StreamExt};
@@ -205,6 +206,77 @@ async fn sigint_during_scenario_stops_remaining_phases() {
         finished.stdout,
         finished.stderr
     );
+
+    cancel_server.cancel();
+}
+
+/// Runs wsblast to completion and returns its exit code and output.
+async fn run_wsblast(args: &[&str]) -> Finished {
+    wait_with_limit(spawn_wsblast(args), Duration::from_secs(10)).await
+}
+
+#[tokio::test]
+async fn unknown_flag_is_a_usage_error_with_exit_code_1() {
+    let finished = run_wsblast(&["ws://127.0.0.1:9", "--no-such-flag"]).await;
+
+    assert_eq!(
+        finished.code,
+        Some(1),
+        "a usage error must not look like an SLO breach\nstderr:\n{}",
+        finished.stderr
+    );
+    assert!(
+        finished.stderr.contains("--no-such-flag"),
+        "clap's message is missing\nstderr:\n{}",
+        finished.stderr
+    );
+}
+
+#[tokio::test]
+async fn conflicting_flags_exit_with_code_1() {
+    let finished = run_wsblast(&["ws://127.0.0.1:9", "--url", "ws://127.0.0.1:10"]).await;
+    assert_eq!(finished.code, Some(1), "stderr:\n{}", finished.stderr);
+}
+
+#[tokio::test]
+async fn help_and_version_exit_with_code_0() {
+    let help = run_wsblast(&["--help"]).await;
+    assert_eq!(help.code, Some(0), "stderr:\n{}", help.stderr);
+    assert!(help.stdout.contains("Usage:"), "stdout:\n{}", help.stdout);
+
+    let version = run_wsblast(&["--version"]).await;
+    assert_eq!(version.code, Some(0), "stderr:\n{}", version.stderr);
+    assert!(
+        version.stdout.contains(env!("CARGO_PKG_VERSION")),
+        "stdout:\n{}",
+        version.stdout
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn impossible_slo_exits_with_code_2() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    let finished = run_wsblast(&[
+        &target_url,
+        "-c",
+        "1",
+        "-d",
+        "300ms",
+        "--no-progress",
+        "--max-p50",
+        "1ns",
+    ])
+    .await;
+
+    assert_eq!(
+        finished.code,
+        Some(2),
+        "stdout:\n{}\nstderr:\n{}",
+        finished.stdout,
+        finished.stderr
+    );
+    assert!(finished.stdout.contains(SUMMARY_HEADER));
 
     cancel_server.cancel();
 }
