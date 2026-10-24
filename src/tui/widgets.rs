@@ -121,7 +121,7 @@ fn render_metric_cards(
         .split(area);
 
     let rps = if elapsed > 0.0 {
-        snap.messages_received as f64 / elapsed
+        snap.messages_sent.max(snap.messages_received) as f64 / elapsed
     } else {
         0.0
     };
@@ -159,13 +159,16 @@ fn render_metric_cards(
             ),
             Span::raw(" msg/s"),
         ]),
-        Line::from(format!("Total: {}", snap.messages_received)),
+        Line::from(format!(
+            "Sent / Recv: {} / {}",
+            snap.messages_sent, snap.messages_received
+        )),
     ])
     .block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .title(" Inbound Throughput ")
+            .title(" Message Throughput ")
             .border_style(Style::default().fg(Color::Cyan)),
     );
     f.render_widget(tput_p, cards[1]);

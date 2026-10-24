@@ -1,0 +1,38 @@
+version: "1.0"
+target: "ws://127.0.0.1:9001"
+metadata:
+  name: "Basic Echo Test"
+  description: "Simple multi-phase echo test with ramp-up and sustain"
+  tags: ["echo", "baseline"]
+phases:
+  - name: "warmup"
+    duration: "5s"
+    connections: 10
+    ramp_rate: 5
+    rate_per_conn: 100
+    payload: '{"type":"ping","seq":{{seq}}}'
+    think_time: "10ms"
+
+  - name: "sustain"
+    duration: "30s"
+    connections: 50
+    ramp_rate: 10
+    rate_per_conn: 200
+    payload: '{"type":"data","size":512,"seq":{{seq}}}'
+    think_time: "5ms"
+
+  - name: "spike"
+    duration: "10s"
+    connections: 100
+    ramp_rate: 50
+    rate_per_conn: 500
+    payload: '{"type":"spike","seq":{{seq}}}'
+    think_time: "1ms"
+
+  - name: "cooldown"
+    duration: "5s"
+    connections: 10
+    ramp_rate: 0
+    rate_per_conn: 50
+    payload: '{"type":"ping","seq":{{seq}}}'
+    think_time: "100ms"

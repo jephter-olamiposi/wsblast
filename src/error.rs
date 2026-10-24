@@ -1,5 +1,6 @@
 //! Typed domain error hierarchy and error classification for WebSocket load testing.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Primary error type encompassing configuration, transport, I/O, and SLO evaluation failures.
@@ -19,6 +20,12 @@ pub enum WsBlastError {
 
     #[error("SLO threshold breached: {0}")]
     SloBreach(String),
+
+    #[error("Distributed coordination error: {0}")]
+    Distributed(String),
+
+    #[error("Metrics initialization failed: {0}")]
+    Metrics(String),
 }
 
 /// Configuration validation errors encountered before initiating load generation.
@@ -44,6 +51,20 @@ pub enum ConfigError {
 
     #[error("Invalid threshold specification: {0}")]
     InvalidThreshold(String),
+
+    #[error("Invalid scenario: {0}")]
+    InvalidScenario(String),
+
+    #[error("Invalid mock server configuration: {0}")]
+    InvalidMock(String),
+
+    #[error("Unsupported option combination: {0}")]
+    UnsupportedOption(String),
+
+    #[error(
+        "permessage-deflate is unavailable: tungstenite 0.26 does not implement RFC 7692 extensions"
+    )]
+    CompressionUnsupported,
 
     #[error("Payload file error at '{path}': {source}")]
     PayloadFile {
@@ -92,7 +113,7 @@ pub enum WorkerError {
 }
 
 /// Error category taxonomy for metric aggregation and CI/CD diagnostic reporting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCategory {
     DnsResolution,

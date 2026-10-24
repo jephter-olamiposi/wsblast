@@ -3,6 +3,7 @@
 use crate::config::LoadTestConfig;
 use crate::metrics::LiveMetrics;
 use crate::tui::widgets::render_dashboard;
+use crossterm::cursor::Show;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -16,12 +17,26 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
+/// Restores the terminal even when the dashboard panics mid-render.
+struct TerminalGuard {
+    active: bool,
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
+        }
+    }
+}
+
 pub struct TuiApp {
     config: Arc<LoadTestConfig>,
     live_metrics: Arc<LiveMetrics>,
     cancel_token: CancellationToken,
     history: VecDeque<u64>,
-    last_recv_count: u64,
+    last_message_count: u64,
     last_tick: Instant,
 }
 
@@ -36,7 +51,7 @@ impl TuiApp {
             live_metrics,
             cancel_token,
             history: VecDeque::with_capacity(120),
-            last_recv_count: 0,
+            last_message_count: 0,
             last_tick: Instant::now(),
         }
     }
@@ -50,11 +65,13 @@ impl TuiApp {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;
+        let mut guard = TerminalGuard { active: true };
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
         let res = self.event_loop(&mut terminal).await;
 
+        guard.active = false;
         disable_raw_mode()?;
         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
         terminal.show_cursor()?;
@@ -82,15 +99,15 @@ impl TuiApp {
             let snap = self.live_metrics.snapshot();
 
             if tick_delta >= 0.5 {
-                let current_recv = snap.messages_received;
-                let delta_msgs = current_recv.saturating_sub(self.last_recv_count);
+                let current_messages = snap.messages_sent.max(snap.messages_received);
+                let delta_msgs = current_messages.saturating_sub(self.last_message_count);
                 let instant_rps = (delta_msgs as f64 / tick_delta) as u64;
 
                 if self.history.len() >= 100 {
                     self.history.pop_front();
                 }
                 self.history.push_back(instant_rps);
-                self.last_recv_count = current_recv;
+                self.last_message_count = current_messages;
                 self.last_tick = now;
             }
 

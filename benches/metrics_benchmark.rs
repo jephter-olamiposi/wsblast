@@ -8,7 +8,7 @@ use wsblast::metrics::{AggregatedMetrics, LiveMetrics, WorkerMetrics};
 
 fn bench_histogram_recording(c: &mut Criterion) {
     let live = LiveMetrics::new();
-    let mut worker_metrics = WorkerMetrics::new(live);
+    let mut worker_metrics = WorkerMetrics::new(live).unwrap();
 
     c.bench_function("hdr_histogram_record_rtt", |b| {
         let dur = Duration::from_micros(250);
@@ -49,7 +49,7 @@ fn bench_histogram_merge(c: &mut Criterion) {
     let live = LiveMetrics::new();
     let mut workers = Vec::with_capacity(50);
     for _ in 0..50 {
-        let mut w = WorkerMetrics::new(live.clone());
+        let mut w = WorkerMetrics::new(live.clone()).unwrap();
         for i in 1..=500 {
             w.record_handshake(Duration::from_micros(i * 10));
             w.record_message_recv(128, Some(Duration::from_micros(i * 5)));
