@@ -729,7 +729,7 @@ impl LoadTestConfig {
         let mut headers = HeaderMap::new();
         for h in &cli.headers {
             let (name, value) = parse_header_pair(h)?;
-            headers.insert(name, value);
+            headers.append(name, value);
         }
 
         let slo = SloThresholds {
@@ -1165,6 +1165,28 @@ mod tests {
         let (name, value) = parse_header_pair("Authorization: Bearer mytoken123").unwrap();
         assert_eq!(name.as_str(), "authorization");
         assert_eq!(value.to_str().unwrap(), "Bearer mytoken123");
+    }
+
+    #[test]
+    fn repeated_header_flags_keep_every_value() {
+        use clap::Parser;
+
+        let cli = Cli::parse_from([
+            "wsblast",
+            "ws://127.0.0.1:9001",
+            "-H",
+            "X-Test: a",
+            "-H",
+            "X-Test: b",
+        ]);
+        let config = LoadTestConfig::from_cli(cli).unwrap();
+        let values: Vec<_> = config
+            .headers
+            .get_all("x-test")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(values, ["a", "b"]);
     }
 
     #[test]

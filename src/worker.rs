@@ -198,9 +198,7 @@ impl WorkerSession {
             .into_client_request()
             .map_err(|_| ErrorCategory::Other)?;
 
-        for (name, value) in &self.config.headers {
-            req.headers_mut().insert(name.clone(), value.clone());
-        }
+        req.headers_mut().extend(self.config.headers.clone());
 
         if let Some(subproto) = &self.config.subprotocol {
             if let Ok(val) = http::HeaderValue::from_str(subproto) {
