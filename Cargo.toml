@@ -18,6 +18,18 @@ exclude = [
     ".github/*",
 ]
 
+# `cargo binstall wsblast` downloads the archives dist publishes to GitHub
+# Releases: wsblast-<target>.tar.gz with the binary under wsblast-<target>/,
+# and a flat wsblast-<target>.zip on Windows.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+bin-dir = "{ bin }{ binary-ext }"
+
 [dependencies]
 tokio = { version = "1.43", features = ["full"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots", "native-tls"] }

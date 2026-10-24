@@ -3,6 +3,11 @@
 # Installs the pre-compiled wsblast binary for macOS or Linux.
 # Usage: curl -fsSL https://raw.githubusercontent.com/jephter-olamiposi/wsblast/main/install.sh | sh
 # Set WSBLAST_VERSION (e.g. v0.1.1) to install a specific release without querying the GitHub API.
+#
+# Release archives are built by dist (see dist-workspace.toml). Each release
+# also ships dist's own installers, which install into $CARGO_HOME/bin:
+#   curl -fsSL https://github.com/jephter-olamiposi/wsblast/releases/latest/download/wsblast-installer.sh | sh
+# This script keeps the /usr/local/bin install and the explicit SHA-256 check.
 
 set -e
 
@@ -109,22 +114,33 @@ echo "Checksum verified (SHA-256 ${ACTUAL_SHA})."
 
 tar -xzf "${TMP_DIR}/${TARBALL}" -C "$TMP_DIR"
 
+# dist archives hold the binary under wsblast-<target>/; releases up to
+# v0.1.1 put it at the archive root.
+BIN_PATH="${TMP_DIR}/${BIN_NAME}-${TARGET}/${BIN_NAME}"
+if [ ! -f "$BIN_PATH" ]; then
+    BIN_PATH="${TMP_DIR}/${BIN_NAME}"
+fi
+if [ ! -f "$BIN_PATH" ]; then
+    echo "Error: ${TARBALL} does not contain a ${BIN_NAME} binary; refusing to install."
+    exit 1
+fi
+
 # Determine target installation directory
 INSTALL_DIR="/usr/local/bin"
 if [ ! -w "$INSTALL_DIR" ]; then
     if command -v sudo >/dev/null 2>&1; then
         echo "Elevating permissions with sudo to install to ${INSTALL_DIR}..."
-        sudo mv "${TMP_DIR}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
+        sudo mv "$BIN_PATH" "${INSTALL_DIR}/${BIN_NAME}"
         sudo chmod +x "${INSTALL_DIR}/${BIN_NAME}"
     else
         INSTALL_DIR="${HOME}/.local/bin"
         mkdir -p "$INSTALL_DIR"
-        mv "${TMP_DIR}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
+        mv "$BIN_PATH" "${INSTALL_DIR}/${BIN_NAME}"
         chmod +x "${INSTALL_DIR}/${BIN_NAME}"
         echo "Note: Installed to ${INSTALL_DIR}. Ensure this directory is in your PATH."
     fi
 else
-    mv "${TMP_DIR}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
+    mv "$BIN_PATH" "${INSTALL_DIR}/${BIN_NAME}"
     chmod +x "${INSTALL_DIR}/${BIN_NAME}"
 fi
 

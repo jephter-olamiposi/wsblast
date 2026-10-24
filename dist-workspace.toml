@@ -1,0 +1,53 @@
+[workspace]
+members = ["cargo:."]
+
+# Release configuration for dist (https://opensource.axo.dev/cargo-dist/).
+# After editing this file run `dist generate` to refresh
+# .github/workflows/release.yml, then commit both. CI fails the release plan
+# when the workflow is out of date.
+[dist]
+# The dist version CI installs (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+ci = "github"
+hosting = "github"
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+installers = ["shell", "powershell"]
+# The shell and PowerShell installers place the binary in $CARGO_HOME/bin.
+install-path = "CARGO_HOME"
+install-updater = false
+# Keep the archive names install.sh and cargo-binstall expect:
+# wsblast-<target>.tar.gz on Unix and wsblast-<target>.zip on Windows.
+unix-archive = ".tar.gz"
+windows-archive = ".zip"
+# Publish to crates.io with trusted publishing once the GitHub Release exists.
+# dist skips publish jobs for prerelease tags such as v0.2.0-rc.1, so release
+# candidates only produce a GitHub prerelease.
+publish-jobs = ["./publish-crates"]
+publish-prereleases = false
+# The publish job needs an OIDC token for trusted publishing and read access
+# to check out the tagged source.
+github-custom-job-permissions = { "publish-crates" = { contents = "read", id-token = "write" } }
+# Optional Homebrew tap, off until the owner creates the tap repository.
+# To enable it:
+#   1. create github.com/jephter-olamiposi/homebrew-tap,
+#   2. add a HOMEBREW_TAP_TOKEN repository secret that can push to it,
+#   3. add "homebrew" to installers, uncomment the two lines below and
+#      change publish-jobs to ["homebrew", "./publish-crates"],
+#   4. run `dist generate` and commit the result.
+# tap = "jephter-olamiposi/homebrew-tap"
+# formula = "wsblast"
+
+# native-tls links OpenSSL, so aarch64 Linux is built on a native arm64
+# runner instead of being cross-compiled from x86_64.
+[dist.github-custom-runners]
+aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+
+[dist.dependencies.apt]
+libssl-dev = "*"
+pkg-config = "*"
