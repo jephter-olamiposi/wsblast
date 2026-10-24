@@ -21,6 +21,10 @@ installers = ["shell", "powershell"]
 # Release archives are built with the crate's default features, which include
 # every feature, so they match `cargo install wsblast`.
 default-features = true
+# Ship the man page and shell completions next to the binary. They are
+# generated from the CLI by `wsblast man` and `wsblast completions <shell>`
+# and committed; tests/generated_assets.rs fails when they are out of date.
+include = ["contrib/man/wsblast.1", "contrib/completions"]
 # The shell and PowerShell installers place the binary in $CARGO_HOME/bin.
 install-path = "CARGO_HOME"
 install-updater = false

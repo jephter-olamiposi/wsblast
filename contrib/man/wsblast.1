@@ -1,0 +1,190 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH wsblast 1  "wsblast 0.1.1" 
+.SH NAME
+wsblast \- High\-performance WebSocket load\-testing CLI with percentile latency & CI gating
+.SH SYNOPSIS
+\fBwsblast\fR [\fB\-u\fR|\fB\-\-url\fR] [\fB\-c\fR|\fB\-\-connections\fR] [\fB\-\-ramp\-rate\fR] [\fB\-d\fR|\fB\-\-duration\fR] [\fB\-n\fR|\fB\-\-requests\fR] [\fB\-r\fR|\fB\-\-rate\fR] [\fB\-p\fR|\fB\-\-payload\fR] [\fB\-\-payload\-file\fR] [\fB\-\-binary\fR] [\fB\-H\fR|\fB\-\-header\fR] [\fB\-\-subprotocol\fR] [\fB\-\-mode\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-message\-timeout\fR] [\fB\-\-match\fR] [\fB\-\-ping\-interval\fR] [\fB\-\-max\-p50\fR] [\fB\-\-max\-p95\fR] [\fB\-\-max\-p99\fR] [\fB\-\-max\-p999\fR] [\fB\-\-max\-error\-rate\fR] [\fB\-\-min\-throughput\fR] [\fB\-\-auth\-type\fR] [\fB\-\-auth\-token\fR] [\fB\-\-auth\-header\fR] [\fB\-\-auth\-apikey\fR] [\fB\-\-auth\-apikey\-header\fR] [\fB\-\-graphql\-ws\-operation\-name\fR] [\fB\-\-graphql\-ws\-operation\fR] [\fB\-\-graphql\-ws\-variables\fR] [\fB\-\-graphql\-ws\-extensions\fR] [\fB\-\-format\fR] [\fB\-\-compare\fR] [\fB\-\-compare\-threshold\fR] [\fB\-\-fail\-on\-regression\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-tui\fR] [\fB\-\-no\-progress\fR] [\fB\-\-no\-reconnect\fR] [\fB\-\-scenario\fR] [\fB\-\-phase\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIURL\fR] 
+.SH DESCRIPTION
+wsblast stresses WebSocket targets, computes high\-resolution latency percentiles (p50/p95/p99/p99.9), maps failure taxonomy, and gates CI pipelines via SLO thresholds.
+.SH OPTIONS
+.TP
+\fB\-u\fR, \fB\-\-url\fR \fI<URL>\fR
+Target WebSocket endpoint flag (alternative to positional argument)
+.TP
+\fB\-c\fR, \fB\-\-connections\fR \fI<NUM>\fR [default: 50]
+Number of concurrent WebSocket connection workers
+.TP
+\fB\-\-ramp\-rate\fR \fI<WORKERS_PER_SEC>\fR [default: 0]
+Connection ramp rate in workers per second (0 = spawn all connections immediately)
+.TP
+\fB\-d\fR, \fB\-\-duration\fR \fI<DURATION>\fR [default: 10s]
+Total test duration including the connection ramp (e.g., \*(Aq10s\*(Aq, \*(Aq30s\*(Aq, \*(Aq2m\*(Aq, \*(Aq500ms\*(Aq)
+.TP
+\fB\-n\fR, \fB\-\-requests\fR \fI<NUM>\fR
+Maximum total messages to send across all workers (optional limit)
+.TP
+\fB\-r\fR, \fB\-\-rate\fR \fI<MSG_PER_SEC>\fR [default: 0]
+Message rate per connection per second (0 = unthrottled / maximum possible)
+.TP
+\fB\-p\fR, \fB\-\-payload\fR \fI<TEXT>\fR
+Inline message payload to send (supports {{timestamp}}, {{worker_id}}, {{seq}})
+.TP
+\fB\-\-payload\-file\fR \fI<FILE>\fR
+Path to a file containing the message payload
+.TP
+\fB\-\-binary\fR
+Send payload as WebSocket binary frames instead of text frames
+.TP
+\fB\-H\fR, \fB\-\-header\fR \fI<HEADER:VALUE>\fR
+Custom HTTP header to include in the WebSocket handshake (can be specified multiple times)
+.TP
+\fB\-\-subprotocol\fR \fI<NAME>\fR
+Optional WebSocket subprotocol to request during handshake
+.TP
+\fB\-\-mode\fR \fI<MODE>\fR [default: echo]
+Load testing execution mode
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+echo: Send request frame, await response, and record round\-trip latency (RTT)
+.IP \(bu 2
+stream: Continuously stream frames without awaiting per\-frame acknowledgments
+.IP \(bu 2
+listen: Connect workers and passively record incoming server\-pushed broadcast messages
+.IP \(bu 2
+graphql\-ws: Apollo GraphQL WS protocol (subscriptions)
+.RE
+.TP
+\fB\-\-connect\-timeout\fR \fI<DURATION>\fR [default: 5s]
+Connection handshake timeout (e.g., \*(Aq5s\*(Aq, \*(Aq2000ms\*(Aq)
+.TP
+\fB\-\-message\-timeout\fR \fI<DURATION>\fR [default: 5s]
+Per\-message response timeout in echo mode (e.g., \*(Aq5s\*(Aq, \*(Aq1000ms\*(Aq)
+.TP
+\fB\-\-match\fR \fI<MODE>\fR [default: first]
+Echo reply matching: first (default: the first data frame after a send is the reply), exact, or json:POINTER (an RFC 6901 pointer such as json:/seq)
+
+first: the first text or binary frame received after a send is taken as the reply, even when it is an unrelated server push such as a broadcast or heartbeat, which then records a wrong RTT.
+
+exact: the reply must be byte\-identical to the frame that was sent.
+
+json:POINTER: the reply is parsed as JSON and the value at the RFC 6901 pointer (e.g. json:/seq) must equal this request\*(Aqs {{seq}}, as a number or a numeric string. The payload must contain {{seq}}.
+
+With exact and json:POINTER, other data frames are counted as unsolicited and the worker keeps waiting for its reply until \-\-message\-timeout.
+.TP
+\fB\-\-ping\-interval\fR \fI<DURATION>\fR [default: 0s]
+Periodic ping heartbeat interval (e.g., \*(Aq10s\*(Aq, \*(Aq0s\*(Aq to disable)
+.TP
+\fB\-\-max\-p50\fR \fI<DURATION>\fR
+SLO threshold: Maximum acceptable p50 round\-trip latency (e.g., \*(Aq10ms\*(Aq, \*(Aq500us\*(Aq)
+.TP
+\fB\-\-max\-p95\fR \fI<DURATION>\fR
+SLO threshold: Maximum acceptable p95 round\-trip latency (e.g., \*(Aq50ms\*(Aq, \*(Aq20ms\*(Aq)
+.TP
+\fB\-\-max\-p99\fR \fI<DURATION>\fR
+SLO threshold: Maximum acceptable p99 round\-trip latency (e.g., \*(Aq100ms\*(Aq, \*(Aq50ms\*(Aq)
+.TP
+\fB\-\-max\-p999\fR \fI<DURATION>\fR
+SLO threshold: Maximum acceptable p99.9 round\-trip latency (e.g., \*(Aq250ms\*(Aq)
+.TP
+\fB\-\-max\-error\-rate\fR \fI<FLOAT>\fR
+SLO threshold: Maximum acceptable error rate fraction (e.g., \*(Aq0.01\*(Aq for 1%, \*(Aq0.001\*(Aq for 0.1%)
+.TP
+\fB\-\-min\-throughput\fR \fI<RPS>\fR
+SLO threshold: Minimum required message throughput (messages/sec)
+.TP
+\fB\-\-auth\-type\fR \fI<TYPE>\fR [default: none]
+Authentication type (none, static, apikey)
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+none: No authentication
+.IP \(bu 2
+static: Static bearer token
+.IP \(bu 2
+apikey: API Key
+.RE
+.TP
+\fB\-\-auth\-token\fR \fI<TOKEN>\fR
+Static token for auth (used with \-\-auth\-type static)
+.TP
+\fB\-\-auth\-header\fR \fI<HEADER>\fR [default: Authorization]
+Header name for static token (used with \-\-auth\-type static)
+.TP
+\fB\-\-auth\-apikey\fR \fI<KEY>\fR
+API Key (used with \-\-auth\-type apikey)
+.TP
+\fB\-\-auth\-apikey\-header\fR \fI<HEADER>\fR [default: X\-API\-Key]
+API Key header name (used with \-\-auth\-type apikey)
+.TP
+\fB\-\-graphql\-ws\-operation\-name\fR \fI<NAME>\fR
+GraphQL WS operation name
+.TP
+\fB\-\-graphql\-ws\-operation\fR \fI<OPERATION>\fR
+GraphQL WS operation (query/mutation/subscription)
+.TP
+\fB\-\-graphql\-ws\-variables\fR \fI<JSON>\fR
+GraphQL WS variables (JSON)
+.TP
+\fB\-\-graphql\-ws\-extensions\fR \fI<JSON>\fR
+GraphQL WS extensions (JSON)
+.TP
+\fB\-\-format\fR \fI<FORMAT>\fR [default: text]
+Output report format
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+text: Human\-readable styled terminal tables
+.IP \(bu 2
+json: Schema\-versioned JSON for CI parsing and metric archiving
+.IP \(bu 2
+markdown: GitHub Flavored Markdown table for PR comments and job summaries
+.RE
+.TP
+\fB\-\-compare\fR \fI<FILE>...\fR
+Compare two JSON reports for regression detection
+.TP
+\fB\-\-compare\-threshold\fR \fI<PERCENT>\fR [default: 10]
+Regression threshold percentage (default: 10%)
+.TP
+\fB\-\-fail\-on\-regression\fR
+Fail on regression (exit code 2)
+.TP
+\fB\-o\fR, \fB\-\-output\fR \fI<FILE>\fR
+Write output report to the specified file path
+.TP
+\fB\-\-tui\fR
+Launch interactive terminal dashboard (TUI)
+.TP
+\fB\-\-no\-progress\fR
+Suppress interactive progress bar (recommended for non\-interactive CI/CD runners)
+.TP
+\fB\-\-no\-reconnect\fR
+End a connection\*(Aqs worker after a timeout, I/O error or server close instead of reconnecting with backoff
+.TP
+\fB\-\-scenario\fR \fI<FILE>\fR
+Path to scenario YAML file defining multi\-phase test (conflicts with individual flags)
+.TP
+\fB\-\-phase\fR \fI<NAME>\fR
+Run only a specific phase from the scenario by name
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.TP
+[\fIURL\fR]
+Target WebSocket URL (e.g., ws://127.0.0.1:9001/ws or wss://api.example.com/stream)
+.SH VERSION
+v0.1.1

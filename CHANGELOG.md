@@ -17,6 +17,7 @@ v0.2.0 ships a smaller crate in which every feature works end to end. Several fe
 - If you built from `main` after 0.1.1 and enabled a removed feature (`distributed`, `otel`, `prometheus`, `capture`, `chaos`, `mock`, `compression`, `tracing-subscriber`), drop it from `--features` and remove its flags. Build the archive branch if you still need one of them.
 
 ### Added
+- Man page and shell completions. `wsblast man` prints the wsblast(1) man page and `wsblast completions <bash|zsh|fish|powershell|elvish>` prints a completion script; both commands are hidden and leave the normal command line unchanged. The release archives ship them as `wsblast.1` and `completions/`.
 - Scenario DSL with YAML multi-phase definitions, per-phase targets, actions (`Send`, `Wait`, `Ping`, `Close`), think time, and CLI URL precedence.
 - Handshake authentication (`auth` feature) for static bearer tokens and API keys (`--auth-type static|apikey`).
 - Apollo GraphQL WS subscription mode (`--mode graphql-ws`) with `connection_init` / `subscribe` lifecycle handling and legacy `graphql-ws` (`start` / `data`) support.
