@@ -39,7 +39,16 @@ async fn spawn_tls_echo_server() -> TlsEchoServer {
         .unwrap();
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // Bind the address `localhost` resolves to first, which the client also
+    // tries first. Windows runners resolve it to `::1` before `127.0.0.1`, and
+    // Windows retries a refused loopback connection for about two seconds, so
+    // a server on the other address would not be reached within the run.
+    let local_addr = tokio::net::lookup_host("localhost:0")
+        .await
+        .unwrap()
+        .next()
+        .expect("localhost does not resolve");
+    let listener = TcpListener::bind(local_addr).await.unwrap();
     let url = format!("wss://localhost:{}", listener.local_addr().unwrap().port());
     let cancel = CancellationToken::new();
     let cancel_server = cancel.clone();
