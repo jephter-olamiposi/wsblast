@@ -8,15 +8,15 @@ A high-performance WebSocket load testing CLI written in Rust.
 
 [![Crates.io][crates-badge]][crates-url]
 [![Build Status][actions-badge]][actions-url]
-[![License: MIT][mit-badge]][mit-url]
+[![License: MIT OR Apache-2.0][license-badge]][license-url]
 [![Downloads][downloads-badge]][crates-url]
 
 [crates-badge]: https://img.shields.io/crates/v/wsblast.svg
 [crates-url]: https://crates.io/crates/wsblast
 [actions-badge]: https://github.com/jephter-olamiposi/wsblast/actions/workflows/ci.yml/badge.svg
 [actions-url]: https://github.com/jephter-olamiposi/wsblast/actions/workflows/ci.yml
-[mit-badge]: https://img.shields.io/badge/license-MIT-blue.svg
-[mit-url]: https://github.com/jephter-olamiposi/wsblast/blob/main/LICENSE
+[license-badge]: https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg
+[license-url]: https://github.com/jephter-olamiposi/wsblast#license
 [downloads-badge]: https://img.shields.io/crates/d/wsblast.svg
 
 ## Overview
@@ -513,4 +513,15 @@ Latency budgets apply to round-trip time, which only `--mode echo` measures; oth
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Licensed under either of
+
+* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
+* MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in wsblast by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
