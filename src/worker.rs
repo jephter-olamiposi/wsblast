@@ -1123,6 +1123,15 @@ fn categorize_session_error(err: &TungsteniteError, direction: ErrorDirection) -
             if is_dns_resolution_error(io_err) {
                 return ErrorCategory::DnsResolution;
             }
+            // tokio-rustls reports a failed handshake as an I/O error wrapping
+            // the rustls error, not as `TungsteniteError::Tls`.
+            if matches!(direction, ErrorDirection::Connect)
+                && io_err
+                    .get_ref()
+                    .is_some_and(|inner| inner.is::<rustls::Error>())
+            {
+                return ErrorCategory::TlsHandshake;
+            }
             match io_err.kind() {
                 std::io::ErrorKind::TimedOut => ErrorCategory::Timeout,
                 std::io::ErrorKind::ConnectionRefused => ErrorCategory::TcpConnect,
