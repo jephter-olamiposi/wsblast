@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-rc.3] - 2026-10-24
+
+### Fixed
+- The `aarch64-unknown-linux-gnu` release binary is built on Ubuntu 22.04 instead of 24.04, so it needs glibc 2.35 instead of 2.39, the same as the x86_64 binary. The rc.2 installer refused to install it on Ubuntu 22.04 and Debian 12.
+
 ## [0.2.0-rc.2] - 2026-10-24
 
 ### Fixed
