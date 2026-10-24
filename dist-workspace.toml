@@ -51,6 +51,8 @@ github-custom-job-permissions = { "publish-crates" = { contents = "read", id-tok
 # formula = "wsblast"
 
 # ring compiles C and assembly for the target, so aarch64 Linux is built on
-# a native arm64 runner instead of being cross-compiled from x86_64.
+# a native arm64 runner instead of being cross-compiled from x86_64. Both
+# Linux targets build on Ubuntu 22.04 so the binaries need glibc 2.35 at
+# most and run on Ubuntu 22.04, Debian 12 and Amazon Linux 2023.
 [dist.github-custom-runners]
-aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+aarch64-unknown-linux-gnu = "ubuntu-22.04-arm"
