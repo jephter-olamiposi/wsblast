@@ -22,8 +22,10 @@ Pushing a tag `vX.Y.Z` whose version matches `version` in `Cargo.toml` runs
 2. creates a GitHub Release with `wsblast-<target>.tar.gz` (Unix) or
    `wsblast-<target>.zip` (Windows), a `.sha256` file for each archive,
    `sha256.sum`, a source tarball, and the `wsblast-installer.sh` and
-   `wsblast-installer.ps1` installers. The release notes come from the
-   matching section of `CHANGELOG.md`.
+   `wsblast-installer.ps1` installers. Each archive holds the binary, the
+   `wsblast.1` man page and a `completions/` directory next to the README,
+   licenses and changelog. The release notes come from the matching section
+   of `CHANGELOG.md`.
 3. publishes the crate to crates.io through `publish-crates.yml`, using
    trusted publishing.
 
@@ -84,7 +86,9 @@ push to it, enable the `homebrew` installer and publish job, then run
 
 1. Make sure CI is green on `main`.
 2. Set `version` in `Cargo.toml` and add a matching `## [X.Y.Z]` section to
-   `CHANGELOG.md`. Run `cargo check` so `Cargo.lock` picks up the version.
+   `CHANGELOG.md`. Run `cargo check` so `Cargo.lock` picks up the version,
+   then `WSBLAST_BLESS=1 cargo test --test generated_assets` so the man page
+   in `contrib/` carries the new version (CI fails until it does).
 3. Check the plan locally (optional): `dist plan --tag vX.Y.Z`.
 4. Commit, then tag and push:
 
@@ -100,7 +104,8 @@ For v0.2.0, ship `v0.2.0-rc.1` first:
 1. Set `version = "0.2.0-rc.1"` in `Cargo.toml`, add a `## [0.2.0-rc.1]`
    changelog section, commit, tag `v0.2.0-rc.1` and push the tag.
 2. Confirm the GitHub prerelease has all five archives, their `.sha256`
-   files and both installers, and that the crates.io job was skipped.
+   files and both installers, that the archives contain `wsblast.1` and
+   `completions/`, and that the crates.io job was skipped.
 3. Try the artifacts:
 
    ```bash

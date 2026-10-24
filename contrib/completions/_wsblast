@@ -1,0 +1,92 @@
+#compdef wsblast
+
+autoload -U is-at-least
+
+_wsblast() {
+    typeset -A opt_args
+    typeset -a _arguments_options
+    local ret=1
+
+    if is-at-least 5.2; then
+        _arguments_options=(-s -S -C)
+    else
+        _arguments_options=(-s -C)
+    fi
+
+    local context curcontext="$curcontext" state line
+    _arguments "${_arguments_options[@]}" : \
+'()-u+[Target WebSocket endpoint flag (alternative to positional argument)]:URL:_default' \
+'()--url=[Target WebSocket endpoint flag (alternative to positional argument)]:URL:_default' \
+'-c+[Number of concurrent WebSocket connection workers]:NUM:_default' \
+'--connections=[Number of concurrent WebSocket connection workers]:NUM:_default' \
+'--ramp-rate=[Connection ramp rate in workers per second (0 = spawn all connections immediately)]:WORKERS_PER_SEC:_default' \
+'-d+[Total test duration including the connection ramp (e.g., '\''10s'\'', '\''30s'\'', '\''2m'\'', '\''500ms'\'')]:DURATION:_default' \
+'--duration=[Total test duration including the connection ramp (e.g., '\''10s'\'', '\''30s'\'', '\''2m'\'', '\''500ms'\'')]:DURATION:_default' \
+'-n+[Maximum total messages to send across all workers (optional limit)]:NUM:_default' \
+'--requests=[Maximum total messages to send across all workers (optional limit)]:NUM:_default' \
+'-r+[Message rate per connection per second (0 = unthrottled / maximum possible)]:MSG_PER_SEC:_default' \
+'--rate=[Message rate per connection per second (0 = unthrottled / maximum possible)]:MSG_PER_SEC:_default' \
+'-p+[Inline message payload to send (supports {{timestamp}}, {{worker_id}}, {{seq}})]:TEXT:_default' \
+'--payload=[Inline message payload to send (supports {{timestamp}}, {{worker_id}}, {{seq}})]:TEXT:_default' \
+'(-p --payload)--payload-file=[Path to a file containing the message payload]:FILE:_files' \
+'*-H+[Custom HTTP header to include in the WebSocket handshake (can be specified multiple times)]:HEADER:VALUE:_default' \
+'*--header=[Custom HTTP header to include in the WebSocket handshake (can be specified multiple times)]:HEADER:VALUE:_default' \
+'--subprotocol=[Optional WebSocket subprotocol to request during handshake]:NAME:_default' \
+'--mode=[Load testing execution mode]:MODE:((echo\:"Send request frame, await response, and record round-trip latency (RTT)"
+stream\:"Continuously stream frames without awaiting per-frame acknowledgments"
+listen\:"Connect workers and passively record incoming server-pushed broadcast messages"
+graphql-ws\:"Apollo GraphQL WS protocol (subscriptions)"))' \
+'--connect-timeout=[Connection handshake timeout (e.g., '\''5s'\'', '\''2000ms'\'')]:DURATION:_default' \
+'--message-timeout=[Per-message response timeout in echo mode (e.g., '\''5s'\'', '\''1000ms'\'')]:DURATION:_default' \
+'--match=[Echo reply matching\: first (default\: the first data frame after a send is the reply), exact, or json\:POINTER (an RFC 6901 pointer such as json\:/seq)]:MODE:_default' \
+'--ping-interval=[Periodic ping heartbeat interval (e.g., '\''10s'\'', '\''0s'\'' to disable)]:DURATION:_default' \
+'--max-p50=[SLO threshold\: Maximum acceptable p50 round-trip latency (e.g., '\''10ms'\'', '\''500us'\'')]:DURATION:_default' \
+'--max-p95=[SLO threshold\: Maximum acceptable p95 round-trip latency (e.g., '\''50ms'\'', '\''20ms'\'')]:DURATION:_default' \
+'--max-p99=[SLO threshold\: Maximum acceptable p99 round-trip latency (e.g., '\''100ms'\'', '\''50ms'\'')]:DURATION:_default' \
+'--max-p999=[SLO threshold\: Maximum acceptable p99.9 round-trip latency (e.g., '\''250ms'\'')]:DURATION:_default' \
+'--max-error-rate=[SLO threshold\: Maximum acceptable error rate fraction (e.g., '\''0.01'\'' for 1%, '\''0.001'\'' for 0.1%)]:FLOAT:_default' \
+'--min-throughput=[SLO threshold\: Minimum required message throughput (messages/sec)]:RPS:_default' \
+'--auth-type=[Authentication type (none, static, apikey)]:TYPE:((none\:"No authentication"
+static\:"Static bearer token"
+apikey\:"API Key"))' \
+'--auth-token=[Static token for auth (used with --auth-type static)]:TOKEN:_default' \
+'--auth-header=[Header name for static token (used with --auth-type static)]:HEADER:_default' \
+'--auth-apikey=[API Key (used with --auth-type apikey)]:KEY:_default' \
+'--auth-apikey-header=[API Key header name (used with --auth-type apikey)]:HEADER:_default' \
+'--graphql-ws-operation-name=[GraphQL WS operation name]:NAME:_default' \
+'--graphql-ws-operation=[GraphQL WS operation (query/mutation/subscription)]:OPERATION:_default' \
+'--graphql-ws-variables=[GraphQL WS variables (JSON)]:JSON:_default' \
+'--graphql-ws-extensions=[GraphQL WS extensions (JSON)]:JSON:_default' \
+'--format=[Output report format]:FORMAT:((text\:"Human-readable styled terminal tables"
+json\:"Schema-versioned JSON for CI parsing and metric archiving"
+markdown\:"GitHub Flavored Markdown table for PR comments and job summaries"))' \
+'*--compare=[Compare two JSON reports for regression detection]:FILE:_files:FILE:_files' \
+'--compare-threshold=[Regression threshold percentage (default\: 10%)]:PERCENT:_default' \
+'-o+[Write output report to the specified file path]:FILE:_files' \
+'--output=[Write output report to the specified file path]:FILE:_files' \
+'(-c --connections -d --duration -r --rate -p --payload --payload-file)--scenario=[Path to scenario YAML file defining multi-phase test (conflicts with individual flags)]:FILE:_files' \
+'--phase=[Run only a specific phase from the scenario by name]:NAME:_default' \
+'--binary[Send payload as WebSocket binary frames instead of text frames]' \
+'--fail-on-regression[Fail on regression (exit code 2)]' \
+'--tui[Launch interactive terminal dashboard (TUI)]' \
+'--no-progress[Suppress interactive progress bar (recommended for non-interactive CI/CD runners)]' \
+'--no-reconnect[End a connection'\''s worker after a timeout, I/O error or server close instead of reconnecting with backoff]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'::url -- Target WebSocket URL (e.g., ws\://127.0.0.1\:9001/ws or wss\://api.example.com/stream):_default' \
+&& ret=0
+}
+
+(( $+functions[_wsblast_commands] )) ||
+_wsblast_commands() {
+    local commands; commands=()
+    _describe -t commands 'wsblast commands' commands "$@"
+}
+
+if [ "$funcstack[1]" = "_wsblast" ]; then
+    _wsblast "$@"
+else
+    compdef _wsblast wsblast
+fi

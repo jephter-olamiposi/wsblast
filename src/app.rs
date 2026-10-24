@@ -11,7 +11,7 @@ use crate::runner::Runner;
 #[cfg(feature = "scenario")]
 use crate::runner::ScenarioExecutor;
 use crate::tui::TuiApp;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use colored::Colorize;
 use std::sync::Arc;
 
@@ -36,6 +36,57 @@ fn apply_auth(config: &mut LoadTestConfig) -> Result<()> {
         crate::auth::apply_auth_header(&mut config.headers, &auth).map_err(WsBlastError::Worker)?;
     }
     Ok(())
+}
+
+/// Hidden commands that print packaging assets generated from the CLI
+/// definition. They are recognised before the load-test parser runs, so the
+/// normal command line and its `--help` output are unchanged.
+#[derive(Debug, Parser)]
+#[command(name = "wsblast", disable_version_flag = true)]
+enum AssetCommand {
+    /// Print a shell completion script to stdout
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// Print the wsblast(1) man page in roff format to stdout
+    Man,
+}
+
+impl AssetCommand {
+    /// Parses an asset command when the first argument names one.
+    fn from_args() -> Option<Self> {
+        let first = std::env::args_os().nth(1)?;
+        if !matches!(first.to_str(), Some("completions" | "man")) {
+            return None;
+        }
+        match Self::try_parse() {
+            Ok(command) => Some(command),
+            Err(err) => {
+                let _ = err.print();
+                std::process::exit(if err.use_stderr() { 1 } else { 0 });
+            }
+        }
+    }
+
+    /// Renders into memory first: the generators cannot report a failed
+    /// write, and stdout may be a closed pipe.
+    fn print(self) -> Result<()> {
+        use std::io::Write;
+
+        let mut rendered = Vec::new();
+        match self {
+            Self::Completions { shell } => {
+                clap_complete::generate(shell, &mut Cli::command(), "wsblast", &mut rendered);
+            }
+            Self::Man => clap_mangen::Man::new(Cli::command()).render(&mut rendered)?,
+        }
+        let mut stdout = std::io::stdout().lock();
+        match stdout.write_all(&rendered).and_then(|()| stdout.flush()) {
+            Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+            result => Ok(result?),
+        }
+    }
 }
 
 /// Parses the command line, keeping exit code 2 reserved for SLO breaches.
@@ -109,6 +160,10 @@ fn run_compare(cli: &Cli) -> Result<()> {
 }
 
 async fn run_app() -> Result<()> {
+    if let Some(command) = AssetCommand::from_args() {
+        return command.print();
+    }
+
     let cli = parse_cli();
 
     // Handle compare command first (doesn't run load test)
