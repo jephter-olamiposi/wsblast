@@ -46,10 +46,11 @@ cargo install wsblast
 ```
 
 ### Pre-Compiled Binary (macOS & Linux)
-Installs the pre-built binary for your OS and CPU architecture into `/usr/local/bin`:
+Installs the pre-built binary for your OS and CPU architecture into `/usr/local/bin`, after verifying its published SHA-256 checksum:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jephter-olamiposi/wsblast/main/install.sh | sh
 ```
+Set `WSBLAST_VERSION` (for example `| WSBLAST_VERSION=v0.1.1 sh`) to install a specific release without querying the GitHub API.
 
 ### Docker
 ```bash
@@ -58,7 +59,7 @@ docker run --rm -it wsblast wss://echo.websocket.org -c 20 -d 10s
 ```
 
 ### Direct Download
-Standalone `.tar.gz` and `.zip` packages for Linux, macOS (Apple Silicon & Intel), and Windows are available on the [Releases](https://github.com/jephter-olamiposi/wsblast/releases) page.
+Standalone `.tar.gz` and `.zip` packages for Linux (x86_64 & aarch64), macOS (Apple Silicon & Intel), and Windows, each with a `.sha256` checksum, are available on the [Releases](https://github.com/jephter-olamiposi/wsblast/releases) page.
 
 ---
 
