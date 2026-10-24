@@ -994,60 +994,60 @@ impl LoadTestConfig {
 
 /// Parses concise human duration strings into standard [`Duration`].
 ///
-/// Supported suffix multipliers: `us`/`µs` (microseconds), `ms` (milliseconds),
-/// `s` (seconds), `m` (minutes), `h` (hours). Defaults to integer seconds if no suffix is present.
+/// Supported suffixes: `ns` (nanoseconds), `us`/`µs` (microseconds),
+/// `ms` (milliseconds), `s` (seconds), `m` (minutes), `h` (hours). Every
+/// suffix accepts integer or fractional values (`1.5ms`, `0.5us`). A bare
+/// value without a suffix is an integer number of seconds.
 ///
 /// # Errors
 ///
-/// Returns [`ConfigError::InvalidDuration`] if the string is empty or contains non-numeric components.
+/// Returns [`ConfigError::InvalidDuration`] if the string is empty, is not a
+/// number with a supported suffix, or is negative, NaN, infinite, or too large
+/// to represent as a [`Duration`].
 pub fn parse_human_duration(s: &str) -> Result<Duration> {
     let s = s.trim();
     if s.is_empty() {
         return Err(ConfigError::InvalidDuration("empty duration string".into()).into());
     }
 
-    if let Some(val) = s.strip_suffix("us").or_else(|| s.strip_suffix("µs")) {
-        let num: u64 = val
-            .parse()
-            .map_err(|_| ConfigError::InvalidDuration(s.to_string()))?;
-        return Ok(Duration::from_micros(num));
+    const UNITS: [(&str, u64); 7] = [
+        ("ns", 1),
+        ("us", 1_000),
+        ("µs", 1_000),
+        ("ms", 1_000_000),
+        ("s", 1_000_000_000),
+        ("m", 60_000_000_000),
+        ("h", 3_600_000_000_000),
+    ];
+
+    let invalid = || WsBlastError::Config(ConfigError::InvalidDuration(s.to_string()));
+
+    for (suffix, nanos_per_unit) in UNITS {
+        if let Some(value) = s.strip_suffix(suffix) {
+            return scale_duration(value, nanos_per_unit).ok_or_else(invalid);
+        }
     }
 
-    if let Some(val) = s.strip_suffix("ms") {
-        let num: u64 = val
-            .parse()
-            .map_err(|_| ConfigError::InvalidDuration(s.to_string()))?;
-        return Ok(Duration::from_millis(num));
+    s.parse::<u64>()
+        .map(Duration::from_secs)
+        .map_err(|_| invalid())
+}
+
+fn scale_duration(value: &str, nanos_per_unit: u64) -> Option<Duration> {
+    const NANOS_PER_SEC: u128 = 1_000_000_000;
+
+    if let Ok(whole) = value.parse::<u64>() {
+        let nanos = u128::from(whole) * u128::from(nanos_per_unit);
+        let secs = u64::try_from(nanos / NANOS_PER_SEC).ok()?;
+        let subsec = u32::try_from(nanos % NANOS_PER_SEC).ok()?;
+        return Some(Duration::new(secs, subsec));
     }
 
-    if let Some(val) = s.strip_suffix('s') {
-        let num: f64 = val
-            .parse()
-            .map_err(|_| ConfigError::InvalidDuration(s.to_string()))?;
-        return Ok(Duration::from_secs_f64(num));
+    let num: f64 = value.parse().ok()?;
+    if num.is_sign_negative() {
+        return None;
     }
-
-    if let Some(val) = s.strip_suffix('m') {
-        let num: f64 = val
-            .parse()
-            .map_err(|_| ConfigError::InvalidDuration(s.to_string()))?;
-        return Ok(Duration::from_secs_f64(num * 60.0));
-    }
-
-    if let Some(val) = s.strip_suffix('h') {
-        let num: f64 = val
-            .parse()
-            .map_err(|_| ConfigError::InvalidDuration(s.to_string()))?;
-        return Ok(Duration::from_secs_f64(num * 3600.0));
-    }
-
-    if let Ok(num) = s.parse::<u64>() {
-        return Ok(Duration::from_secs(num));
-    }
-
-    Err(WsBlastError::Config(ConfigError::InvalidDuration(
-        s.to_string(),
-    )))
+    Duration::try_from_secs_f64(num * nanos_per_unit as f64 / NANOS_PER_SEC as f64).ok()
 }
 
 /// Parses a header string into (HeaderName, HeaderValue).
@@ -1089,6 +1089,72 @@ mod tests {
             Duration::from_micros(100)
         );
         assert_eq!(parse_human_duration("0s").unwrap(), Duration::ZERO);
+        assert_eq!(parse_human_duration("30").unwrap(), Duration::from_secs(30));
+        assert_eq!(
+            parse_human_duration("1.5s").unwrap(),
+            Duration::from_millis(1500)
+        );
+    }
+
+    #[test]
+    fn durations_accept_nanoseconds_and_fractional_units() {
+        let cases = [
+            ("250ns", Duration::from_nanos(250)),
+            ("1.5ms", Duration::from_micros(1500)),
+            ("0.5us", Duration::from_nanos(500)),
+            ("0.5µs", Duration::from_nanos(500)),
+            ("1.5m", Duration::from_secs(90)),
+            ("0.5h", Duration::from_secs(1800)),
+            ("2h", Duration::from_secs(7200)),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(parse_human_duration(input).unwrap(), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn durations_reject_negative_non_finite_and_overflowing_values() {
+        let cases = [
+            "-1s",
+            "-1",
+            "-0.5ms",
+            "-3m",
+            "infs",
+            "inf",
+            "-infh",
+            "NaNs",
+            "nanms",
+            "1e400s",
+            "1e300h",
+            "18446744073709551615h",
+            "99999999999999999999",
+            "s",
+            "",
+            "abc",
+        ];
+        for input in cases {
+            assert!(
+                matches!(
+                    parse_human_duration(input),
+                    Err(WsBlastError::Config(ConfigError::InvalidDuration(_)))
+                ),
+                "{input:?} should be rejected"
+            );
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn parse_human_duration_never_panics(input in "\\PC*") {
+            let _ = parse_human_duration(&input);
+        }
+
+        #[test]
+        fn parse_human_duration_never_panics_on_numeric_shapes(
+            input in "[-+]?([0-9]{0,25}(\\.[0-9]{0,12})?([eE][-+]?[0-9]{1,4})?|inf|NaN|infinity)(ns|us|µs|ms|s|m|h)?"
+        ) {
+            let _ = parse_human_duration(&input);
+        }
     }
 
     #[test]
