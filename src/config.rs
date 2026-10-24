@@ -764,6 +764,20 @@ impl LoadTestConfig {
             }
         }
 
+        // Only echo mode measures round-trip time; any other mode would leave the
+        // RTT histogram empty and a latency budget could never be evaluated.
+        let has_latency_slo = slo.max_p50.is_some()
+            || slo.max_p95.is_some()
+            || slo.max_p99.is_some()
+            || slo.max_p999.is_some();
+        if has_latency_slo && cli.mode != TestMode::Echo {
+            return Err(ConfigError::UnsupportedOption(format!(
+                "latency SLOs (--max-p50/--max-p95/--max-p99/--max-p999) require --mode echo; {:?} mode does not measure round-trip time",
+                cli.mode
+            ))
+            .into());
+        }
+
         #[cfg(feature = "auth")]
         let auth = {
             use crate::cli::AuthType;
@@ -1082,6 +1096,44 @@ mod tests {
         let (name, value) = parse_header_pair("Authorization: Bearer mytoken123").unwrap();
         assert_eq!(name.as_str(), "authorization");
         assert_eq!(value.to_str().unwrap(), "Bearer mytoken123");
+    }
+
+    #[test]
+    fn latency_slo_outside_echo_mode_is_rejected() {
+        use clap::Parser;
+
+        for mode in ["stream", "listen"] {
+            let cli = Cli::parse_from([
+                "wsblast",
+                "ws://127.0.0.1:9001",
+                "--mode",
+                mode,
+                "--max-p99",
+                "1us",
+            ]);
+            let error = LoadTestConfig::from_cli(cli).unwrap_err();
+            assert!(
+                error.to_string().contains("require --mode echo"),
+                "{mode}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_latency_slos_are_allowed_outside_echo_mode() {
+        use clap::Parser;
+
+        let cli = Cli::parse_from([
+            "wsblast",
+            "ws://127.0.0.1:9001",
+            "--mode",
+            "stream",
+            "--max-error-rate",
+            "0.01",
+            "--min-throughput",
+            "10",
+        ]);
+        assert!(LoadTestConfig::from_cli(cli).is_ok());
     }
 
     #[cfg(feature = "compression")]

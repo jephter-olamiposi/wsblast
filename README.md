@@ -495,6 +495,8 @@ wsblast [OPTIONS] [URL] [COMMAND]
 | `--max-error-rate <FLOAT>` | Maximum acceptable error rate fraction (e.g. `0.01` for 1%) |
 | `--min-throughput <RPS>` | Minimum required message throughput (messages/sec) |
 
+Latency budgets apply to round-trip time, which only `--mode echo` measures; other modes reject them at startup. A latency check with no measured round trips (for example, every request timed out) fails rather than passing on an empty histogram.
+
 ---
 
 ## Exit Codes

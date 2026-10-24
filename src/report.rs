@@ -9,6 +9,7 @@ use comfy_table::{Cell, Color, Row, Table};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::time::Duration;
 
 /// Result of evaluating configured SLO thresholds against aggregated test metrics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,60 +369,20 @@ pub fn evaluate_slos(slo: &SloThresholds, metrics: &AggregatedMetrics) -> SloEva
     let mut checks = Vec::new();
     let mut all_passed = true;
 
-    if let Some(target_p50) = slo.max_p50 {
-        let actual = metrics.message_rtt.p50_duration();
-        let passed = actual <= target_p50;
-        if !passed {
-            all_passed = false;
-        }
-        checks.push(SloCheck {
-            name: "Latency p50".into(),
-            target: format!("<= {:?}", target_p50),
-            actual: format!("{:?}", actual),
-            passed,
-        });
-    }
-
-    if let Some(target_p95) = slo.max_p95 {
-        let actual = metrics.message_rtt.p95_duration();
-        let passed = actual <= target_p95;
-        if !passed {
-            all_passed = false;
-        }
-        checks.push(SloCheck {
-            name: "Latency p95".into(),
-            target: format!("<= {:?}", target_p95),
-            actual: format!("{:?}", actual),
-            passed,
-        });
-    }
-
-    if let Some(target_p99) = slo.max_p99 {
-        let actual = metrics.message_rtt.p99_duration();
-        let passed = actual <= target_p99;
-        if !passed {
-            all_passed = false;
-        }
-        checks.push(SloCheck {
-            name: "Latency p99".into(),
-            target: format!("<= {:?}", target_p99),
-            actual: format!("{:?}", actual),
-            passed,
-        });
-    }
-
-    if let Some(target_p999) = slo.max_p999 {
-        let actual = metrics.message_rtt.p999_duration();
-        let passed = actual <= target_p999;
-        if !passed {
-            all_passed = false;
-        }
-        checks.push(SloCheck {
-            name: "Latency p99.9".into(),
-            target: format!("<= {:?}", target_p999),
-            actual: format!("{:?}", actual),
-            passed,
-        });
+    let rtt = &metrics.message_rtt;
+    let latency_targets = [
+        ("Latency p50", slo.max_p50, rtt.p50_duration()),
+        ("Latency p95", slo.max_p95, rtt.p95_duration()),
+        ("Latency p99", slo.max_p99, rtt.p99_duration()),
+        ("Latency p99.9", slo.max_p999, rtt.p999_duration()),
+    ];
+    for (name, target, actual) in latency_targets {
+        let Some(target) = target else {
+            continue;
+        };
+        let check = latency_check(name, target, actual, rtt.count);
+        all_passed &= check.passed;
+        checks.push(check);
     }
 
     if let Some(max_err) = slo.max_error_rate {
@@ -453,6 +414,28 @@ pub fn evaluate_slos(slo: &SloThresholds, metrics: &AggregatedMetrics) -> SloEva
     SloEvaluation {
         passed: all_passed,
         checks,
+    }
+}
+
+/// Builds one latency SLO check.
+///
+/// A latency budget cannot pass without evidence: when no round trip was
+/// measured (every request timed out, or the mode does not measure RTT) the
+/// check fails instead of comparing the empty histogram's zero against the target.
+fn latency_check(name: &str, target: Duration, actual: Duration, samples: u64) -> SloCheck {
+    if samples == 0 {
+        return SloCheck {
+            name: name.into(),
+            target: format!("<= {target:?}"),
+            actual: "no RTT samples".into(),
+            passed: false,
+        };
+    }
+    SloCheck {
+        name: name.into(),
+        target: format!("<= {target:?}"),
+        actual: format!("{actual:?}"),
+        passed: actual <= target,
     }
 }
 
@@ -834,6 +817,62 @@ mod tests {
             message_rtt: latency(250),
             error_breakdown: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn latency_slo_fails_when_no_rtt_was_measured() {
+        let mut metrics = sample_metrics();
+        metrics.message_rtt = LatencyStats::from_histogram(
+            &hdrhistogram::Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap(),
+        );
+        let slo = SloThresholds {
+            max_p50: Some(Duration::from_secs(1)),
+            max_p99: Some(Duration::from_secs(1)),
+            ..Default::default()
+        };
+
+        let evaluation = evaluate_slos(&slo, &metrics);
+
+        assert!(!evaluation.passed);
+        assert_eq!(evaluation.checks.len(), 2);
+        assert!(evaluation.checks.iter().all(|check| !check.passed));
+        assert!(
+            evaluation
+                .checks
+                .iter()
+                .all(|check| check.actual == "no RTT samples")
+        );
+    }
+
+    #[test]
+    fn latency_slo_compares_measured_percentiles() {
+        let metrics = sample_metrics();
+        let within = SloThresholds {
+            max_p99: Some(Duration::from_micros(250)),
+            ..Default::default()
+        };
+        let breached = SloThresholds {
+            max_p99: Some(Duration::from_micros(249)),
+            ..Default::default()
+        };
+
+        assert!(evaluate_slos(&within, &metrics).passed);
+        assert!(!evaluate_slos(&breached, &metrics).passed);
+    }
+
+    #[test]
+    fn non_latency_slos_still_evaluate_without_rtt_samples() {
+        let mut metrics = sample_metrics();
+        metrics.message_rtt = LatencyStats::from_histogram(
+            &hdrhistogram::Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap(),
+        );
+        let slo = SloThresholds {
+            max_error_rate: Some(0.01),
+            min_throughput: Some(50.0),
+            ..Default::default()
+        };
+
+        assert!(evaluate_slos(&slo, &metrics).passed);
     }
 
     #[test]
