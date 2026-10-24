@@ -948,14 +948,25 @@ async fn test_echo_ping_tick_does_not_add_paced_data_sends() {
 async fn test_stream_and_listen_modes_with_ping_interval() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
-    let stream = run(echo_test_config(&target_url)
-        .mode(TestMode::Stream)
-        .rate_per_connection(200)
-        .ping_interval(Duration::from_millis(50))
-        .duration(Duration::from_millis(500)))
-    .await;
+    let stream_config = || {
+        echo_test_config(&target_url)
+            .mode(TestMode::Stream)
+            .rate_per_connection(200)
+            .duration(Duration::from_millis(500))
+    };
+    // The achievable paced rate depends on the platform's timer resolution
+    // (about 15.6 ms on Windows), so compare against a run without pings on
+    // the same machine instead of a fixed count.
+    let baseline = run(stream_config()).await;
+    let stream = run(stream_config().ping_interval(Duration::from_millis(50))).await;
     assert_eq!(stream.total_connections_established, 1);
-    assert!(stream.total_messages_sent > 50);
+    assert!(baseline.total_messages_sent > 10, "{baseline:?}");
+    assert!(
+        stream.total_messages_sent * 2 >= baseline.total_messages_sent,
+        "keepalive pings slowed stream mode: {} sent with ping vs {} without",
+        stream.total_messages_sent,
+        baseline.total_messages_sent
+    );
     assert_eq!(stream.error_rate, 0.0);
 
     let listen = run(echo_test_config(&target_url)
@@ -1237,7 +1248,12 @@ async fn test_error_rate_is_one_when_every_request_times_out() {
 async fn test_error_rate_is_one_when_the_target_refuses_connections() {
     let dead_url = Url::parse("ws://127.0.0.1:59997").unwrap();
 
-    let metrics = run(single_session_echo_config(&dead_url)).await;
+    // Linux and macOS refuse a closed local port at once, but Windows retries
+    // the SYN for about two seconds first. A short connect timeout makes every
+    // attempt fail inside the run on all three, as refused or as timed out.
+    let metrics =
+        run(single_session_echo_config(&dead_url).connect_timeout(Duration::from_millis(100)))
+            .await;
 
     assert_eq!(metrics.total_messages_sent, 0);
     assert_eq!(metrics.error_breakdown.values().sum::<u64>(), 3);
