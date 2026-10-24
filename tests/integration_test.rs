@@ -196,13 +196,6 @@ async fn test_echo_mode_load_run() {
         auth: None,
         #[cfg(feature = "graphql-ws")]
         graphql_ws: None,
-        #[cfg(feature = "capture")]
-        capture: wsblast::config::CaptureConfig {
-            enabled: false,
-            output_path: std::path::PathBuf::from("capture.pcapng"),
-            format: wsblast::config::CaptureFormat::PcapNg,
-            max_frames: 0,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,
@@ -250,13 +243,6 @@ async fn test_slo_evaluation_pass_and_fail() {
         auth: None,
         #[cfg(feature = "graphql-ws")]
         graphql_ws: None,
-        #[cfg(feature = "capture")]
-        capture: wsblast::config::CaptureConfig {
-            enabled: false,
-            output_path: std::path::PathBuf::from("capture.pcapng"),
-            format: wsblast::config::CaptureFormat::PcapNg,
-            max_frames: 0,
-        },
         slo: SloThresholds {
             max_p50: Some(Duration::from_secs(1)),
             max_p95: Some(Duration::from_secs(2)),
@@ -312,13 +298,6 @@ async fn test_json_and_markdown_report_formatting() {
         auth: None,
         #[cfg(feature = "graphql-ws")]
         graphql_ws: None,
-        #[cfg(feature = "capture")]
-        capture: wsblast::config::CaptureConfig {
-            enabled: false,
-            output_path: std::path::PathBuf::from("capture.pcapng"),
-            format: wsblast::config::CaptureFormat::PcapNg,
-            max_frames: 0,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Json,
         output_path: None,
@@ -372,13 +351,6 @@ async fn test_error_taxonomy_when_target_offline() {
         auth: None,
         #[cfg(feature = "graphql-ws")]
         graphql_ws: None,
-        #[cfg(feature = "capture")]
-        capture: wsblast::config::CaptureConfig {
-            enabled: false,
-            output_path: std::path::PathBuf::from("capture.pcapng"),
-            format: wsblast::config::CaptureFormat::PcapNg,
-            max_frames: 0,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,
@@ -494,13 +466,6 @@ async fn test_custom_headers_propagation() {
         auth: None,
         #[cfg(feature = "graphql-ws")]
         graphql_ws: None,
-        #[cfg(feature = "capture")]
-        capture: wsblast::config::CaptureConfig {
-            enabled: false,
-            output_path: std::path::PathBuf::from("capture.pcapng"),
-            format: wsblast::config::CaptureFormat::PcapNg,
-            max_frames: 0,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,
@@ -617,13 +582,6 @@ async fn test_graphql_ws_subscription_lifecycle() {
             variables: None,
             extensions: None,
         }),
-        #[cfg(feature = "capture")]
-        capture: wsblast::config::CaptureConfig {
-            enabled: false,
-            output_path: std::path::PathBuf::from("capture.pcapng"),
-            format: wsblast::config::CaptureFormat::PcapNg,
-            max_frames: 0,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,
@@ -672,13 +630,6 @@ async fn test_connection_ramp_rate() {
         auth: None,
         #[cfg(feature = "graphql-ws")]
         graphql_ws: None,
-        #[cfg(feature = "capture")]
-        capture: wsblast::config::CaptureConfig {
-            enabled: false,
-            output_path: std::path::PathBuf::from("capture.pcapng"),
-            format: wsblast::config::CaptureFormat::PcapNg,
-            max_frames: 0,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,
@@ -719,13 +670,6 @@ async fn test_duration_includes_connection_ramp() {
         auth: None,
         #[cfg(feature = "graphql-ws")]
         graphql_ws: None,
-        #[cfg(feature = "capture")]
-        capture: wsblast::config::CaptureConfig {
-            enabled: false,
-            output_path: std::path::PathBuf::from("capture.pcapng"),
-            format: wsblast::config::CaptureFormat::PcapNg,
-            max_frames: 0,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,
@@ -786,13 +730,6 @@ async fn test_requests_limit_enforcement() {
         auth: None,
         #[cfg(feature = "graphql-ws")]
         graphql_ws: None,
-        #[cfg(feature = "capture")]
-        capture: wsblast::config::CaptureConfig {
-            enabled: false,
-            output_path: std::path::PathBuf::from("capture.pcapng"),
-            format: wsblast::config::CaptureFormat::PcapNg,
-            max_frames: 0,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,
@@ -837,13 +774,6 @@ async fn test_stream_mode_load_run() {
         auth: None,
         #[cfg(feature = "graphql-ws")]
         graphql_ws: None,
-        #[cfg(feature = "capture")]
-        capture: wsblast::config::CaptureConfig {
-            enabled: false,
-            output_path: std::path::PathBuf::from("capture.pcapng"),
-            format: wsblast::config::CaptureFormat::PcapNg,
-            max_frames: 0,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,
@@ -885,13 +815,6 @@ async fn test_binary_payload_dispatch() {
         auth: None,
         #[cfg(feature = "graphql-ws")]
         graphql_ws: None,
-        #[cfg(feature = "capture")]
-        capture: wsblast::config::CaptureConfig {
-            enabled: false,
-            output_path: std::path::PathBuf::from("capture.pcapng"),
-            format: wsblast::config::CaptureFormat::PcapNg,
-            max_frames: 0,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,
@@ -969,13 +892,6 @@ async fn test_listen_mode_with_server_broadcast_and_ping() {
         auth: None,
         #[cfg(feature = "graphql-ws")]
         graphql_ws: None,
-        #[cfg(feature = "capture")]
-        capture: wsblast::config::CaptureConfig {
-            enabled: false,
-            output_path: std::path::PathBuf::from("capture.pcapng"),
-            format: wsblast::config::CaptureFormat::PcapNg,
-            max_frames: 0,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,
@@ -1015,13 +931,6 @@ fn scenario_base_config(target_url: Url) -> LoadTestConfig {
         auth: None,
         #[cfg(feature = "graphql-ws")]
         graphql_ws: None,
-        #[cfg(feature = "capture")]
-        capture: wsblast::config::CaptureConfig {
-            enabled: false,
-            output_path: std::path::PathBuf::from("capture.pcapng"),
-            format: wsblast::config::CaptureFormat::PcapNg,
-            max_frames: 0,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,
@@ -1147,13 +1056,6 @@ fn echo_test_config(target_url: Url) -> LoadTestConfig {
         auth: None,
         #[cfg(feature = "graphql-ws")]
         graphql_ws: None,
-        #[cfg(feature = "capture")]
-        capture: wsblast::config::CaptureConfig {
-            enabled: false,
-            output_path: std::path::PathBuf::from("capture.pcapng"),
-            format: wsblast::config::CaptureFormat::PcapNg,
-            max_frames: 0,
-        },
         slo: SloThresholds::default(),
         output_format: OutputFormat::Text,
         output_path: None,

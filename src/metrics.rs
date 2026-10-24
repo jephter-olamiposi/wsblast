@@ -1,26 +1,13 @@
 //! Metric collection, lock-free telemetry, HDR latency histograms, and aggregation.
 
 use crate::error::{ErrorCategory, Result as WsResult, WsBlastError};
-#[cfg(feature = "capture")]
-use bytes::Bytes;
 use hdrhistogram::Histogram;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-#[cfg(feature = "capture")]
-use std::fs::File;
-#[cfg(feature = "capture")]
-use std::io::BufWriter;
 
-#[cfg(feature = "capture")]
-use crate::config::CaptureFormat;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-
-#[cfg(feature = "capture")]
-use crossbeam::queue::SegQueue;
-#[cfg(feature = "capture")]
-use tokio_tungstenite::tungstenite::protocol::Message;
 
 #[cfg(feature = "otel")]
 use opentelemetry::metrics::{Counter, Gauge, Histogram as OtelHistogram, MeterProvider as _};
@@ -221,175 +208,6 @@ impl WorkerMetrics {
         *self.errors.entry(err).or_insert(0) += 1;
         self.live.total_errors.fetch_add(1, Ordering::Relaxed);
     }
-}
-
-/// Frame capture for recording WebSocket frames to PCAP-NG or JSONL files.
-/// Uses a lock-free ring buffer (SegQueue) for zero-copy hot-path recording.
-#[cfg(feature = "capture")]
-#[derive(Clone)]
-pub struct FrameCapture {
-    frames: Arc<SegQueue<CapturedFrame>>,
-    max_frames: usize,
-}
-
-#[cfg(feature = "capture")]
-#[derive(Debug, Clone)]
-struct CapturedFrame {
-    timestamp_ms: u64,
-    worker_id: usize,
-    direction: CaptureDirection,
-    payload: Bytes,
-    is_binary: bool,
-}
-
-#[cfg(feature = "capture")]
-#[derive(Debug, Clone, Copy)]
-enum CaptureDirection {
-    Sent,
-    Received,
-}
-
-#[cfg(feature = "capture")]
-impl FrameCapture {
-    pub fn new(max_frames: usize) -> Self {
-        Self {
-            frames: Arc::new(SegQueue::new()),
-            max_frames,
-        }
-    }
-
-    #[inline]
-    pub fn record_sent(&self, worker_id: usize, payload: &Message) {
-        if self.max_frames != 0 && self.frames.len() >= self.max_frames {
-            return; // Stop recording once the configured cap is reached.
-        }
-        let frame = CapturedFrame {
-            timestamp_ms: current_timestamp_ms(),
-            worker_id,
-            direction: CaptureDirection::Sent,
-            payload: message_to_bytes(payload),
-            is_binary: payload.is_binary(),
-        };
-        self.frames.push(frame);
-    }
-
-    #[inline]
-    pub fn record_received(&self, worker_id: usize, payload: &Message) {
-        if self.max_frames != 0 && self.frames.len() >= self.max_frames {
-            return;
-        }
-        let frame = CapturedFrame {
-            timestamp_ms: current_timestamp_ms(),
-            worker_id,
-            direction: CaptureDirection::Received,
-            payload: message_to_bytes(payload),
-            is_binary: payload.is_binary(),
-        };
-        self.frames.push(frame);
-    }
-
-    /// Drains all captured frames and writes to file in specified format.
-    pub fn drain_and_write(
-        &self,
-        path: &std::path::Path,
-        format: CaptureFormat,
-    ) -> std::io::Result<()> {
-        let mut frames = Vec::new();
-        while let Some(frame) = self.frames.pop() {
-            frames.push(frame);
-        }
-        match format {
-            CaptureFormat::PcapNg => write_pcapng(path, &frames),
-            CaptureFormat::JsonLines => write_jsonl(path, &frames),
-        }
-    }
-}
-
-#[cfg(feature = "capture")]
-fn current_timestamp_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-#[cfg(feature = "capture")]
-fn message_to_bytes(msg: &Message) -> Bytes {
-    match msg {
-        Message::Text(t) => Bytes::copy_from_slice(t.as_bytes()),
-        Message::Binary(b) => b.clone(),
-        Message::Ping(p) | Message::Pong(p) => Bytes::copy_from_slice(p),
-        Message::Close(c) => {
-            let data = format!("{:?}", c);
-            Bytes::from(data)
-        }
-        Message::Frame(f) => {
-            let data = format!("{:?}", f);
-            Bytes::from(data)
-        }
-    }
-}
-
-#[cfg(feature = "capture")]
-fn write_jsonl(path: &std::path::Path, frames: &[CapturedFrame]) -> std::io::Result<()> {
-    use base64::Engine as _;
-    use std::io::Write;
-    let file = File::create(path)?;
-    let mut writer = BufWriter::new(file);
-    for frame in frames {
-        let json = serde_json::json!({
-            "timestamp_ms": frame.timestamp_ms,
-            "worker_id": frame.worker_id,
-            "direction": match frame.direction {
-                CaptureDirection::Sent => "sent",
-                CaptureDirection::Received => "received",
-            },
-            "is_binary": frame.is_binary,
-            "payload": base64::engine::general_purpose::STANDARD.encode(&frame.payload),
-            "payload_len": frame.payload.len(),
-        });
-        writeln!(writer, "{}", json)?;
-    }
-    Ok(())
-}
-#[cfg(feature = "capture")]
-fn write_pcapng(path: &std::path::Path, frames: &[CapturedFrame]) -> std::io::Result<()> {
-    use pcap_file::DataLink;
-    use pcap_file::pcapng::PcapNgBlock;
-    use pcap_file::pcapng::PcapNgWriter;
-    use pcap_file::pcapng::blocks::enhanced_packet::EnhancedPacketBlock;
-    use pcap_file::pcapng::blocks::interface_description::InterfaceDescriptionBlock;
-    use std::borrow::Cow;
-    use std::time::Duration;
-
-    let file = File::create(path)?;
-    let mut writer = PcapNgWriter::new(BufWriter::new(file))
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-    // Write Section Header Block (already written by PcapNgWriter::new)
-
-    // Write Interface Description Block
-    let idb = InterfaceDescriptionBlock::new(DataLink::NULL, 65535);
-    writer
-        .write_block(&idb.into_block())
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-    for frame in frames {
-        let timestamp = Duration::from_micros(frame.timestamp_ms * 1000);
-        let packet_data: Cow<'_, [u8]> = Cow::Owned(frame.payload.to_vec());
-
-        let mut epb = EnhancedPacketBlock::default();
-        epb.interface_id = 0;
-        epb.timestamp = timestamp;
-        epb.original_len = packet_data.len() as u32;
-        epb.data = packet_data;
-        epb.options = Vec::new();
-        writer
-            .write_block(&epb.into_block())
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-    }
-
-    Ok(())
 }
 
 /// Statistical summary computed from an HDR latency histogram.

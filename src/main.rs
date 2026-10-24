@@ -132,14 +132,6 @@ async fn run_app() -> Result<()> {
                 ),
             ));
         }
-        #[cfg(feature = "capture")]
-        if cli.capture {
-            return Err(wsblast::error::WsBlastError::Config(
-                wsblast::error::ConfigError::UnsupportedOption(
-                    "frame capture is only available in standalone mode".to_string(),
-                ),
-            ));
-        }
         #[cfg(feature = "otel")]
         if cli.enable_otel {
             return Err(wsblast::error::WsBlastError::Config(

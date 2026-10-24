@@ -3,8 +3,6 @@
 use crate::config::LoadTestConfig;
 #[cfg(feature = "scenario")]
 use crate::config::{ScenarioConfig, ScenarioPhase};
-#[cfg(feature = "capture")]
-use crate::metrics::FrameCapture;
 use crate::metrics::{AggregatedMetrics, LiveMetrics, WorkerMetrics};
 use crate::worker::WorkerSession;
 use colored::Colorize;
@@ -19,26 +17,17 @@ pub struct Runner {
     live_metrics: Arc<LiveMetrics>,
     cancel_token: CancellationToken,
     handle_signals: bool,
-    #[cfg(feature = "capture")]
-    frame_capture: Option<FrameCapture>,
     #[cfg(feature = "scenario")]
     scenario: Option<Arc<ScenarioPhase>>,
 }
 
 impl Runner {
     pub fn new(config: LoadTestConfig) -> Self {
-        #[cfg(feature = "capture")]
-        let frame_capture = config
-            .capture
-            .enabled
-            .then(|| FrameCapture::new(config.capture.max_frames));
         Self {
             config: Arc::new(config),
             live_metrics: LiveMetrics::new(),
             cancel_token: CancellationToken::new(),
             handle_signals: true,
-            #[cfg(feature = "capture")]
-            frame_capture,
             #[cfg(feature = "scenario")]
             scenario: None,
         }
@@ -59,18 +48,11 @@ impl Runner {
         if let Some(payload) = phase.payload.clone() {
             config.payload = payload;
         }
-        #[cfg(feature = "capture")]
-        let frame_capture = config
-            .capture
-            .enabled
-            .then(|| FrameCapture::new(config.capture.max_frames));
         Self {
             config: Arc::new(config),
             live_metrics: LiveMetrics::new(),
             cancel_token: CancellationToken::new(),
             handle_signals: true,
-            #[cfg(feature = "capture")]
-            frame_capture,
             scenario: Some(Arc::new(phase)),
         }
     }
@@ -82,8 +64,6 @@ impl Runner {
             self.cancel_token.clone(),
             metrics,
         );
-        #[cfg(feature = "capture")]
-        let session = session.with_frame_capture(self.frame_capture.clone());
         #[cfg(feature = "scenario")]
         if let Some(phase) = &self.scenario {
             return session.with_scenario(Arc::clone(phase));
@@ -100,28 +80,6 @@ impl Runner {
     pub fn with_live_metrics(mut self, live_metrics: Arc<LiveMetrics>) -> Self {
         self.live_metrics = live_metrics;
         self
-    }
-
-    /// Shares a frame buffer so every worker writes into one capture file.
-    #[cfg(feature = "capture")]
-    pub fn with_frame_capture(mut self, frame_capture: Option<FrameCapture>) -> Self {
-        self.frame_capture = frame_capture;
-        self
-    }
-
-    /// Drains captured frames into the configured file.
-    #[cfg(feature = "capture")]
-    pub fn write_capture(&self) {
-        if let Some(capture) = &self.frame_capture {
-            if let Err(err) = capture
-                .drain_and_write(&self.config.capture.output_path, self.config.capture.format)
-            {
-                eprintln!(
-                    "Failed to write frame capture to '{}': {err}",
-                    self.config.capture.output_path.display()
-                );
-            }
-        }
     }
 
     pub fn cancel_token(&self) -> CancellationToken {
@@ -157,9 +115,6 @@ impl Runner {
     /// initialization or histogram aggregation fails.
     pub async fn run(&self) -> crate::error::Result<AggregatedMetrics> {
         let (worker_metrics, elapsed, attempted) = self.run_and_collect_worker_metrics().await?;
-
-        #[cfg(feature = "capture")]
-        self.write_capture();
 
         AggregatedMetrics::merge(worker_metrics, elapsed, attempted)
     }
@@ -419,8 +374,6 @@ pub struct ScenarioExecutor {
     live_metrics: Arc<LiveMetrics>,
     cancel_token: CancellationToken,
     handle_signals: bool,
-    #[cfg(feature = "capture")]
-    frame_capture: Option<FrameCapture>,
 }
 
 #[cfg(feature = "scenario")]
@@ -441,11 +394,6 @@ impl ScenarioExecutor {
         phase: Option<&str>,
         cli_target: Option<&str>,
     ) -> crate::error::Result<Self> {
-        #[cfg(feature = "capture")]
-        let frame_capture = base_config
-            .capture
-            .enabled
-            .then(|| FrameCapture::new(base_config.capture.max_frames));
         Ok(Self {
             scenario_name: scenario.metadata.name.clone(),
             cli_target: cli_target
@@ -461,8 +409,6 @@ impl ScenarioExecutor {
             live_metrics: LiveMetrics::new(),
             cancel_token: CancellationToken::new(),
             handle_signals: true,
-            #[cfg(feature = "capture")]
-            frame_capture,
         })
     }
 
@@ -542,8 +488,6 @@ impl ScenarioExecutor {
                 .with_live_metrics(Arc::clone(&self.live_metrics))
                 .with_cancel_token(self.cancel_token.child_token())
                 .with_signal_handling(false);
-            #[cfg(feature = "capture")]
-            let runner = runner.with_frame_capture(self.frame_capture.clone());
             let (worker_metrics, elapsed, connections) =
                 runner.run_and_collect_worker_metrics().await?;
 
@@ -556,19 +500,6 @@ impl ScenarioExecutor {
                     _ = tokio::time::sleep(Duration::from_millis(500)) => {}
                     _ = self.cancel_token.cancelled() => {}
                 }
-            }
-        }
-
-        #[cfg(feature = "capture")]
-        if let Some(capture) = &self.frame_capture {
-            if let Err(err) = capture.drain_and_write(
-                &self.base_config.capture.output_path,
-                self.base_config.capture.format,
-            ) {
-                eprintln!(
-                    "Failed to write frame capture to '{}': {err}",
-                    self.base_config.capture.output_path.display()
-                );
             }
         }
 

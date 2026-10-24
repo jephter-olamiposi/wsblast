@@ -26,17 +26,12 @@ use crate::config::{GraphQLWSMessage, GraphQLWSStartPayload};
 #[cfg(feature = "scenario")]
 use crate::config::{ScenarioAction, ScenarioPhase};
 
-#[cfg(feature = "capture")]
-use crate::metrics::FrameCapture;
-
 /// Represents a single asynchronous WebSocket client worker session.
 pub struct WorkerSession {
     pub worker_id: usize,
     pub config: Arc<LoadTestConfig>,
     pub cancel_token: CancellationToken,
     pub metrics: WorkerMetrics,
-    #[cfg(feature = "capture")]
-    frame_capture: Option<FrameCapture>,
     #[cfg(feature = "scenario")]
     scenario: Option<Arc<ScenarioPhase>>,
 }
@@ -48,33 +43,17 @@ impl WorkerSession {
         cancel_token: CancellationToken,
         metrics: WorkerMetrics,
     ) -> Self {
-        #[cfg(feature = "capture")]
-        let frame_capture = if config.capture.enabled {
-            Some(FrameCapture::new(config.capture.max_frames))
-        } else {
-            None
-        };
-
         Self {
             worker_id,
             config,
             cancel_token,
             metrics,
-            #[cfg(feature = "capture")]
-            frame_capture,
             #[cfg(feature = "scenario")]
             scenario: None,
         }
     }
 
     /// Attaches a compiled scenario phase that drives think-time and actions.
-    /// Shares a frame buffer across workers so one capture file covers the run.
-    #[cfg(feature = "capture")]
-    pub fn with_frame_capture(mut self, capture: Option<FrameCapture>) -> Self {
-        self.frame_capture = capture;
-        self
-    }
-
     #[cfg(feature = "scenario")]
     pub fn with_scenario(mut self, phase: Arc<ScenarioPhase>) -> Self {
         self.scenario = Some(phase);
@@ -207,22 +186,6 @@ impl WorkerSession {
         Ok(req)
     }
 
-    /// Records an outbound frame when capture is enabled.
-    fn capture_sent(&self, _message: &Message) {
-        #[cfg(feature = "capture")]
-        if let Some(capture) = &self.frame_capture {
-            capture.record_sent(self.worker_id, _message);
-        }
-    }
-
-    /// Records an inbound frame when capture is enabled.
-    fn capture_received(&self, _message: &Message) {
-        #[cfg(feature = "capture")]
-        if let Some(capture) = &self.frame_capture {
-            capture.record_received(self.worker_id, _message);
-        }
-    }
-
     async fn run_echo_loop<S>(&mut self, ws_stream: S) -> SessionEnd
     where
         S: futures_util::Sink<Message, Error = TungsteniteError>
@@ -293,8 +256,6 @@ impl WorkerSession {
 
             let msg = self.render_payload(seq);
             let frame_len = message_byte_len(&msg);
-            #[cfg(feature = "capture")]
-            let captured_msg = self.frame_capture.as_ref().map(|_| msg.clone());
             let sent = self.retain_for_exact_match(&msg);
             let start_time = Instant::now();
 
@@ -304,10 +265,6 @@ impl WorkerSession {
                         self.metrics
                             .record_error(categorize_session_error(&err, ErrorDirection::Write));
                         break;
-                    }
-                    #[cfg(feature = "capture")]
-                    if let (Some(capture), Some(captured)) = (&self.frame_capture, captured_msg) {
-                        capture.record_sent(self.worker_id, &captured);
                     }
                     self.metrics.record_message_sent(frame_len);
                 }
@@ -396,7 +353,6 @@ impl WorkerSession {
                 _ = ticker.tick() => {
                     let msg = self.render_payload(seq);
                     let len = message_byte_len(&msg);
-                    self.capture_sent(&msg);
                     if let Err(e) = sink.send(msg).await {
                         self.metrics.record_error(categorize_session_error(
                             &e,
@@ -426,14 +382,10 @@ impl WorkerSession {
                 msg_opt = stream.next() => {
                     match msg_opt {
                         Some(Ok(Message::Text(t))) => {
-                            let len = t.len();
-                            self.capture_received(&Message::Text(t));
-                            self.metrics.record_message_recv(len, None);
+                            self.metrics.record_message_recv(t.len(), None);
                         }
                         Some(Ok(Message::Binary(b))) => {
-                            let len = b.len();
-                            self.capture_received(&Message::Binary(b));
-                            self.metrics.record_message_recv(len, None);
+                            self.metrics.record_message_recv(b.len(), None);
                         }
                         Some(Ok(Message::Ping(p))) => {
                             let _ = sink.send(Message::Pong(p)).await;
@@ -484,14 +436,10 @@ impl WorkerSession {
                 msg_opt = stream.next() => {
                     match msg_opt {
                         Some(Ok(Message::Text(t))) => {
-                            let len = t.len();
-                            self.capture_received(&Message::Text(t));
-                            self.metrics.record_message_recv(len, None);
+                            self.metrics.record_message_recv(t.len(), None);
                         }
                         Some(Ok(Message::Binary(b))) => {
-                            let len = b.len();
-                            self.capture_received(&Message::Binary(b));
-                            self.metrics.record_message_recv(len, None);
+                            self.metrics.record_message_recv(b.len(), None);
                         }
                         Some(Ok(Message::Ping(p))) => {
                             let _ = sink.send(Message::Pong(p)).await;
@@ -582,8 +530,6 @@ impl WorkerSession {
                             let active_payload = payload.as_ref().unwrap_or(&self.config.payload);
                             let msg = self.render_message(active_payload, seq);
                             let frame_len = message_byte_len(&msg);
-                            #[cfg(feature = "capture")]
-                            let captured_msg = self.frame_capture.as_ref().map(|_| msg.clone());
                             let sent = self.retain_for_exact_match(&msg);
                             let start_time = Instant::now();
 
@@ -595,12 +541,6 @@ impl WorkerSession {
                                 break 'script;
                             }
 
-                            #[cfg(feature = "capture")]
-                            if let (Some(capture), Some(captured)) =
-                                (&self.frame_capture, captured_msg)
-                            {
-                                capture.record_sent(self.worker_id, &captured);
-                            }
                             self.metrics.record_message_sent(frame_len);
 
                             if self.config.mode == TestMode::Echo {
@@ -753,7 +693,6 @@ impl WorkerSession {
                 Ok(Message::Pong(_) | Message::Frame(_)) => continue,
                 Err(e) => return Err(categorize_session_error(&e, ErrorDirection::Read)),
             };
-            self.capture_received(&frame);
             if reply_matches(&self.config.reply_match, &frame, sent, seq) {
                 return Ok(Some(message_byte_len(&frame)));
             }
@@ -834,7 +773,6 @@ impl WorkerSession {
         };
         let init_len = init_json.len();
         let init_message = Message::Text(Utf8Bytes::from(init_json));
-        self.capture_sent(&init_message);
         if let Err(e) = sink.send(init_message).await {
             self.metrics
                 .record_error(categorize_session_error(&e, ErrorDirection::Write));
@@ -868,13 +806,6 @@ impl WorkerSession {
                 msg_result = stream.next() => {
                     match msg_result {
                         Some(Ok(Message::Text(text))) => {
-                            #[cfg(feature = "capture")]
-                            if let Some(capture) = &self.frame_capture {
-                                capture.record_received(
-                                    self.worker_id,
-                                    &Message::Text(text.clone()),
-                                );
-                            }
                             if let Ok(msg) = serde_json::from_str::<GraphQLWSMessage>(&text) {
                                 match msg {
                                     GraphQLWSMessage::ConnectionAck => {
@@ -941,7 +872,6 @@ impl WorkerSession {
         };
         let start_len = start_json.len();
         let start_message = Message::Text(Utf8Bytes::from(start_json));
-        self.capture_sent(&start_message);
         if let Err(e) = sink.send(start_message).await {
             self.metrics
                 .record_error(categorize_session_error(&e, ErrorDirection::Write));
@@ -971,13 +901,6 @@ impl WorkerSession {
                 msg_result = stream.next() => {
                     match msg_result {
                         Some(Ok(Message::Text(text))) => {
-                            #[cfg(feature = "capture")]
-                            if let Some(capture) = &self.frame_capture {
-                                capture.record_received(
-                                    self.worker_id,
-                                    &Message::Text(text.clone()),
-                                );
-                            }
                             if let Ok(msg) = serde_json::from_str::<GraphQLWSMessage>(&text) {
                                 match msg {
                                     GraphQLWSMessage::Data { id: _, payload: _ }
@@ -1043,7 +966,6 @@ impl WorkerSession {
             }
         };
         let stop_message = Message::Text(Utf8Bytes::from(stop_json));
-        self.capture_sent(&stop_message);
         let _ = sink.send(stop_message).await;
 
         // Ending an open subscription because the run is over is not a failure.

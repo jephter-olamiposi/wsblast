@@ -69,8 +69,6 @@ jsonwebtoken = { version = "9", optional = true }
 oauth2 = { version = "5", optional = true }
 chrono = { version = "0.4", features = ["serde"], optional = true }
 reqwest = { version = "0.12", features = ["blocking", "json"], optional = true }
-crossbeam = { version = "0.8", optional = true }
-pcap-file = { version = "3.0.0-rc1", optional = true }
 uuid = { version = "1.8", features = ["v4", "serde"], optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"], optional = true }
 
@@ -81,11 +79,10 @@ otel = ["opentelemetry", "opentelemetry-otlp", "opentelemetry_sdk"]
 prometheus = ["prometheus-client", "axum", "tower"]
 auth = ["jsonwebtoken", "oauth2", "chrono", "reqwest"]
 graphql-ws = []
-capture = ["crossbeam", "pcap-file"]
 mock = ["tokio-tungstenite/native-tls"]
 distributed = ["tonic", "prost", "prost-types", "uuid", "tracing", "tracing-subscriber"]
 compare = []
-full = ["scenario", "otel", "prometheus", "auth", "graphql-ws", "capture", "compare", "mock", "distributed"]
+full = ["scenario", "otel", "prometheus", "auth", "graphql-ws", "compare", "mock", "distributed"]
 tracing-subscriber = ["dep:tracing-subscriber"]
 
 [target.'cfg(unix)'.dependencies]

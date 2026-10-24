@@ -282,26 +282,6 @@ pub struct Cli {
     #[arg(long = "graphql-ws-extensions", value_name = "JSON")]
     pub graphql_ws_extensions: Option<String>,
 
-    /// Enable frame capture to file
-    #[cfg(feature = "capture")]
-    #[arg(long = "capture", default_value_t = false)]
-    pub capture: bool,
-
-    /// Frame capture output file path
-    #[cfg(feature = "capture")]
-    #[arg(long = "capture-output", value_name = "FILE")]
-    pub capture_output: Option<PathBuf>,
-
-    /// Frame capture format (pcapng or jsonl)
-    #[cfg(feature = "capture")]
-    #[arg(long = "capture-format", value_name = "FORMAT", value_enum, default_value_t = CaptureFormat::PcapNg)]
-    pub capture_format: CaptureFormat,
-
-    /// Maximum frames to capture (0 = unlimited)
-    #[cfg(feature = "capture")]
-    #[arg(long = "capture-max-frames", value_name = "NUM", default_value_t = 0)]
-    pub capture_max_frames: usize,
-
     /// Output report format
     #[arg(long = "format", value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
@@ -485,17 +465,6 @@ pub enum TestMode {
     #[cfg(feature = "graphql-ws")]
     #[value(name = "graphql-ws", alias = "graph-qlws")]
     GraphQLWS,
-}
-
-/// Frame capture output format.
-#[cfg(feature = "capture")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CaptureFormat {
-    /// PCAP-NG format for Wireshark analysis
-    PcapNg,
-    /// JSON Lines format for structured logging
-    JsonLines,
 }
 
 /// Supported serialisation and presentation formats for test summaries.

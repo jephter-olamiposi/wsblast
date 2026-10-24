@@ -37,8 +37,6 @@ pub struct LoadTestConfig {
     pub auth: Option<AuthConfig>,
     #[cfg(feature = "graphql-ws")]
     pub graphql_ws: Option<GraphQLWSConfig>,
-    #[cfg(feature = "capture")]
-    pub capture: CaptureConfig,
     pub slo: SloThresholds,
     pub output_format: OutputFormat,
     pub output_path: Option<PathBuf>,
@@ -294,18 +292,6 @@ pub struct GraphQLWSStartPayload {
     pub variables: Option<serde_json::Value>,
     pub extensions: Option<serde_json::Value>,
 }
-
-#[cfg(feature = "capture")]
-#[derive(Debug, Clone)]
-pub struct CaptureConfig {
-    pub enabled: bool,
-    pub output_path: PathBuf,
-    pub format: CaptureFormat,
-    pub max_frames: usize,
-}
-
-#[cfg(feature = "capture")]
-pub use crate::cli::CaptureFormat;
 
 #[cfg(feature = "scenario")]
 #[derive(Debug, Clone, Deserialize)]
@@ -964,16 +950,6 @@ impl LoadTestConfig {
             auth,
             #[cfg(feature = "graphql-ws")]
             graphql_ws,
-            #[cfg(feature = "capture")]
-            capture: CaptureConfig {
-                enabled: cli.capture,
-                output_path: cli
-                    .capture_output
-                    .clone()
-                    .unwrap_or_else(|| PathBuf::from("capture.pcapng")),
-                format: cli.capture_format,
-                max_frames: cli.capture_max_frames,
-            },
             slo,
             output_format: cli.format,
             output_path: cli.output_file,
