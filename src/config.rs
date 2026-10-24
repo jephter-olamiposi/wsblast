@@ -50,6 +50,110 @@ pub struct LoadTestConfig {
     pub no_progress: bool,
     /// Ends a worker on its first connection loss instead of reconnecting.
     pub no_reconnect: bool,
+    /// Decides which inbound data frame answers an echo request.
+    pub reply_match: ReplyMatch,
+}
+
+/// Rule an echo wait uses to recognise the reply to the request in flight.
+///
+/// Frames that do not match are counted as unsolicited and skipped; the wait
+/// still ends at the message timeout.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ReplyMatch {
+    /// The first text or binary frame after the send is the reply.
+    #[default]
+    First,
+    /// The reply is byte-identical to the frame that was sent.
+    Exact,
+    /// The JSON value at this RFC 6901 pointer equals the request's `{{seq}}`.
+    JsonPointer(String),
+}
+
+impl ReplyMatch {
+    /// Renders the rule as it is spelled on the command line.
+    pub fn flag_value(&self) -> String {
+        match self {
+            Self::First => "first".to_string(),
+            Self::Exact => "exact".to_string(),
+            Self::JsonPointer(pointer) => format!("json:{pointer}"),
+        }
+    }
+}
+
+impl FromStr for ReplyMatch {
+    type Err = ConfigError;
+
+    fn from_str(raw: &str) -> std::result::Result<Self, Self::Err> {
+        match raw {
+            "first" => Ok(Self::First),
+            "exact" => Ok(Self::Exact),
+            _ => match raw.strip_prefix("json:") {
+                Some(pointer) if is_json_pointer(pointer) => {
+                    Ok(Self::JsonPointer(pointer.to_string()))
+                }
+                Some(pointer) => Err(ConfigError::UnsupportedOption(format!(
+                    "--match json:{pointer}: '{pointer}' is not a valid RFC 6901 JSON pointer \
+                     (use '' or '/'-separated tokens, escaping '~' as '~0' and '/' as '~1')"
+                ))),
+                None => Err(ConfigError::UnsupportedOption(format!(
+                    "--match '{raw}' is not supported; use first, exact or json:<pointer>"
+                ))),
+            },
+        }
+    }
+}
+
+/// Checks RFC 6901 syntax: empty, or `/`-prefixed tokens where `~` only
+/// appears as the escapes `~0` and `~1`.
+fn is_json_pointer(pointer: &str) -> bool {
+    if pointer.is_empty() {
+        return true;
+    }
+    if !pointer.starts_with('/') {
+        return false;
+    }
+    let mut chars = pointer.chars();
+    while let Some(c) = chars.next() {
+        if c == '~' && !matches!(chars.next(), Some('0' | '1')) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Rejects reply matching that the configured mode or payloads cannot honour.
+///
+/// JSON matching compares against the request's `{{seq}}`, so every payload a
+/// worker may send must be a text template carrying that placeholder.
+fn validate_reply_match<'a>(
+    reply_match: &ReplyMatch,
+    mode: TestMode,
+    mut payloads: impl Iterator<Item = &'a PayloadConfig>,
+) -> Result<()> {
+    if *reply_match == ReplyMatch::First {
+        return Ok(());
+    }
+    if mode != TestMode::Echo {
+        return Err(ConfigError::UnsupportedOption(format!(
+            "--match {} requires --mode echo; {mode:?} mode does not wait for replies",
+            reply_match.flag_value()
+        ))
+        .into());
+    }
+    if let ReplyMatch::JsonPointer(_) = reply_match {
+        let carries_seq = |payload: &PayloadConfig| match payload {
+            PayloadConfig::DynamicText(template) => template.contains("{{seq}}"),
+            PayloadConfig::StaticText(_) | PayloadConfig::Binary(_) => false,
+        };
+        if !payloads.all(carries_seq) {
+            return Err(ConfigError::UnsupportedOption(format!(
+                "--match {} needs a text payload containing the {{{{seq}}}} placeholder to compare replies against",
+                reply_match.flag_value()
+            ))
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// Payload specification supporting zero-allocation cached frames or dynamic templating.
@@ -694,6 +798,7 @@ impl LoadTestConfig {
         let connect_timeout = parse_human_duration(&cli.connect_timeout)?;
         let message_timeout = parse_human_duration(&cli.message_timeout)?;
         let ping_interval = parse_human_duration(&cli.ping_interval)?;
+        let reply_match: ReplyMatch = cli.reply_match.parse()?;
 
         #[cfg(feature = "graphql-ws")]
         let graphql_ws = build_graphql_config(&cli)?;
@@ -725,6 +830,7 @@ impl LoadTestConfig {
                 r#"{"source":"wsblast","ts":"{{timestamp}}","seq":{{seq}}}"#.to_string(),
             )
         };
+        validate_reply_match(&reply_match, cli.mode, std::iter::once(&payload))?;
 
         let mut headers = HeaderMap::new();
         for h in &cli.headers {
@@ -937,6 +1043,7 @@ impl LoadTestConfig {
             tui: cli.tui,
             no_progress: cli.no_progress,
             no_reconnect: cli.no_reconnect,
+            reply_match,
         })
     }
 
@@ -989,6 +1096,21 @@ impl LoadTestConfig {
         config.rate_per_conn = phase.rate_per_conn;
         if let Some(payload) = phase.payload {
             config.payload = payload;
+        }
+
+        for phase in scenario.compile(cli.phase.as_deref())? {
+            let phase_payload = phase.payload.as_ref().unwrap_or(&config.payload);
+            let action_payloads = phase.actions.iter().filter_map(|action| match action {
+                ScenarioAction::Send { payload, .. } => {
+                    Some(payload.as_ref().unwrap_or(phase_payload))
+                }
+                _ => None,
+            });
+            validate_reply_match(
+                &config.reply_match,
+                config.mode,
+                std::iter::once(phase_payload).chain(action_payloads),
+            )?;
         }
 
         Ok(config)
@@ -1517,5 +1639,127 @@ phases:
         })
         .unwrap();
         assert_eq!(subscribe["type"], "subscribe");
+    }
+
+    fn match_config(args: &[&str]) -> Result<LoadTestConfig> {
+        use clap::Parser;
+
+        let mut argv = vec!["wsblast", "ws://127.0.0.1:9001"];
+        argv.extend_from_slice(args);
+        LoadTestConfig::from_cli(Cli::parse_from(argv))
+    }
+
+    fn assert_unsupported_option(result: Result<LoadTestConfig>, needle: &str) {
+        match result {
+            Err(WsBlastError::Config(ConfigError::UnsupportedOption(message))) => {
+                assert!(message.contains(needle), "{message}");
+            }
+            other => panic!("expected UnsupportedOption containing '{needle}', got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reply_match_defaults_to_first() {
+        let config = match_config(&[]).unwrap();
+        assert_eq!(config.reply_match, ReplyMatch::First);
+    }
+
+    #[test]
+    fn reply_match_parses_every_mode() {
+        let exact = match_config(&["--match", "exact", "--payload", "ping"]).unwrap();
+        assert_eq!(exact.reply_match, ReplyMatch::Exact);
+
+        let json = match_config(&["--match", "json:/data/seq"]).unwrap();
+        assert_eq!(
+            json.reply_match,
+            ReplyMatch::JsonPointer("/data/seq".to_string())
+        );
+
+        let escaped = match_config(&["--match", "json:/a~1b/~0c"]).unwrap();
+        assert_eq!(
+            escaped.reply_match,
+            ReplyMatch::JsonPointer("/a~1b/~0c".to_string())
+        );
+    }
+
+    #[test]
+    fn unknown_reply_match_is_rejected() {
+        assert_unsupported_option(match_config(&["--match", "last"]), "--match");
+    }
+
+    #[test]
+    fn json_reply_match_requires_seq_placeholder() {
+        assert_unsupported_option(
+            match_config(&["--match", "json:/seq", "--payload", r#"{"seq":1}"#]),
+            "{{seq}}",
+        );
+        assert_unsupported_option(
+            match_config(&["--match", "json:/seq", "--payload", "{{timestamp}}"]),
+            "{{seq}}",
+        );
+        assert_unsupported_option(
+            match_config(&["--match", "json:/seq", "--binary", "--payload", "{{seq}}"]),
+            "{{seq}}",
+        );
+    }
+
+    #[test]
+    fn json_reply_match_rejects_invalid_pointers() {
+        for pointer in ["json:seq", "json:/seq~", "json:/a~2b"] {
+            assert_unsupported_option(match_config(&["--match", pointer]), "RFC 6901");
+        }
+    }
+
+    #[test]
+    fn reply_match_requires_echo_mode() {
+        for mode in ["stream", "listen"] {
+            assert_unsupported_option(
+                match_config(&["--mode", mode, "--match", "json:/seq"]),
+                "--mode echo",
+            );
+            assert_unsupported_option(
+                match_config(&["--mode", mode, "--match", "exact"]),
+                "--mode echo",
+            );
+        }
+        assert!(match_config(&["--mode", "stream", "--match", "first"]).is_ok());
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn json_reply_match_checks_scenario_payloads() {
+        use clap::Parser;
+
+        let cli = Cli::parse_from([
+            "wsblast",
+            "--scenario",
+            "scenario.yaml",
+            "--match",
+            "json:/seq",
+        ]);
+
+        let mut static_phase = phase("static");
+        static_phase.payload = Some("ping".to_string());
+        assert_unsupported_option(
+            LoadTestConfig::from_scenario_config(&scenario(vec![static_phase]), &cli),
+            "{{seq}}",
+        );
+
+        let mut later_phase = phase("later");
+        later_phase.actions = vec![ActionConfig::Send {
+            payload: Some("ping".to_string()),
+            count: None,
+        }];
+        assert_unsupported_option(
+            LoadTestConfig::from_scenario_config(
+                &scenario(vec![phase("first"), later_phase]),
+                &cli,
+            ),
+            "{{seq}}",
+        );
+
+        let mut templated = phase("templated");
+        templated.payload = Some(r#"{"seq":{{seq}}}"#.to_string());
+        assert!(LoadTestConfig::from_scenario_config(&scenario(vec![templated]), &cli).is_ok());
     }
 }

@@ -54,6 +54,8 @@ pub struct LiveMetrics {
     pub bytes_sent: AtomicU64,
     pub bytes_received: AtomicU64,
     pub total_errors: AtomicU64,
+    /// Data frames an echo wait skipped because they did not match the reply rule.
+    pub unsolicited_frames: AtomicU64,
 }
 
 impl LiveMetrics {
@@ -73,6 +75,7 @@ impl LiveMetrics {
             bytes_sent: self.bytes_sent.load(Ordering::Relaxed),
             bytes_received: self.bytes_received.load(Ordering::Relaxed),
             total_errors: self.total_errors.load(Ordering::Relaxed),
+            unsolicited_frames: self.unsolicited_frames.load(Ordering::Relaxed),
         }
     }
 }
@@ -89,6 +92,7 @@ pub struct LiveSnapshot {
     pub bytes_sent: u64,
     pub bytes_received: u64,
     pub total_errors: u64,
+    pub unsolicited_frames: u64,
 }
 
 /// Task-local metrics container owned by a single worker to eliminate mutex contention.
@@ -104,6 +108,8 @@ pub struct WorkerMetrics {
     /// Handshakes recorded after this worker's first one; every other entry in
     /// `handshake_hist` is a first handshake.
     pub reconnects: u64,
+    /// Data frames skipped while waiting for an echo reply.
+    pub unsolicited_frames: u64,
     pub live: Arc<LiveMetrics>,
 }
 
@@ -134,6 +140,7 @@ impl WorkerMetrics {
             bytes_recv: 0,
             errors: HashMap::new(),
             reconnects: 0,
+            unsolicited_frames: 0,
             live,
         })
     }
@@ -196,6 +203,17 @@ impl WorkerMetrics {
         self.live
             .bytes_received
             .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_unsolicited_frames(&mut self, count: u64) {
+        if count == 0 {
+            return;
+        }
+        self.unsolicited_frames += count;
+        self.live
+            .unsolicited_frames
+            .fetch_add(count, Ordering::Relaxed);
     }
 
     #[inline]
@@ -460,6 +478,9 @@ pub struct AggregatedMetrics {
     pub total_connections_failed: u64,
     #[serde(default)]
     pub total_reconnects: u64,
+    /// Data frames that did not match `--match` while an echo reply was awaited.
+    #[serde(default)]
+    pub total_unsolicited_frames: u64,
     pub total_messages_sent: u64,
     pub total_messages_recv: u64,
     pub total_bytes_sent: u64,
@@ -493,6 +514,7 @@ impl AggregatedMetrics {
         let mut total_bytes_sent = 0u64;
         let mut total_bytes_recv = 0u64;
         let mut total_reconnects = 0u64;
+        let mut total_unsolicited_frames = 0u64;
         let mut error_breakdown = HashMap::new();
 
         for w in workers {
@@ -503,6 +525,7 @@ impl AggregatedMetrics {
             total_bytes_sent += w.bytes_sent;
             total_bytes_recv += w.bytes_recv;
             total_reconnects += w.reconnects;
+            total_unsolicited_frames += w.unsolicited_frames;
 
             for (category, count) in w.errors {
                 *error_breakdown.entry(category).or_insert(0) += count;
@@ -536,6 +559,7 @@ impl AggregatedMetrics {
             total_connections_established,
             total_connections_failed,
             total_reconnects,
+            total_unsolicited_frames,
             total_messages_sent,
             total_messages_recv,
             total_bytes_sent,

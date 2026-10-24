@@ -406,12 +406,23 @@ wsblast [OPTIONS] [URL] [COMMAND]
 | `--mode` | `echo` | Execution mode: `echo` (RTT round-trip), `stream` (dispatch-only), `listen`, `graphql-ws` |
 | `--connect-timeout` | `5s` | Timeout for establishing TCP+TLS+WS upgrade handshake |
 | `--message-timeout` | `5s` | Per-message response timeout in echo mode |
+| `--match` | `first` | How echo mode recognises a reply: `first` (the first data frame after a send), `exact` (byte-identical to the request) or `json:<pointer>` (JSON value at the pointer equals the request's `{{seq}}`). See [How replies are matched](#how-replies-are-matched) |
 | `--ping-interval` | `0s` | Heartbeat ping interval (`0s` = disabled) |
 | `--no-reconnect` | `false` | Stop a worker after a timeout, I/O error or server close instead of reconnecting (backoff 100ms doubling to 5s) |
 | `--tui` | `false` | Launch interactive terminal dashboard |
 | `--format` | `text` | Output report format: `text`, `json`, `markdown` |
 | `-o, --output` | `None` | File path to write report output |
 | `--no-progress` | `false` | Suppress progress bar (recommended for CI logs) |
+
+### How replies are matched
+
+In echo mode each worker sends one request and waits for its reply before sending the next, and the RTT runs from the send to that reply. `--match` decides which inbound frame counts as the reply:
+
+- `first` (default): the first text or binary frame received after the send is the reply. This is the cheapest rule and is exact against a plain echo server, but a server that also pushes unsolicited frames (broadcasts, heartbeats, presence updates) gets those frames recorded as replies with a too-short RTT, and the real reply is then credited to the next request.
+- `exact`: the reply must be byte-identical to the request frame, of the same frame type. Use it with servers that echo verbatim but also push other traffic.
+- `json:<pointer>`: the reply is parsed as JSON and the value at the [RFC 6901](https://www.rfc-editor.org/rfc/rfc6901) pointer must equal the request's `{{seq}}`, given as a JSON number or a numeric string. For example `--payload '{"op":"ping","id":{{seq}}}' --match json:/id` matches replies such as `{"op":"pong","id":"42"}`. The payload must contain `{{seq}}`.
+
+With `exact` and `json:<pointer>`, frames that do not match are counted as `total_unsolicited_frames` (shown in the text and Markdown reports when non-zero) and the worker keeps waiting for its reply until `--message-timeout`, after which the usual timeout and reconnect handling applies. A non-default `--match` requires `--mode echo`, `json:<pointer>` without `{{seq}}` in every payload (including scenario phase and action payloads) or with an invalid pointer is rejected at startup, and distributed runs only support `first`.
 
 ### Scenario Options
 

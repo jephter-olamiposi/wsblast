@@ -156,6 +156,15 @@ async fn run_app() -> Result<()> {
                 ),
             ));
         }
+        if cli.reply_match.parse::<wsblast::config::ReplyMatch>()?
+            != wsblast::config::ReplyMatch::First
+        {
+            return Err(wsblast::error::WsBlastError::Config(
+                wsblast::error::ConfigError::UnsupportedOption(
+                    "--match other than first is only available in standalone mode".to_string(),
+                ),
+            ));
+        }
 
         let coordinator_url = match cli.coordinator_url.as_deref() {
             Some(raw) => Some(url::Url::parse(raw).map_err(|e| {

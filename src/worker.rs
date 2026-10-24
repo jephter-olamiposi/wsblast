@@ -1,7 +1,7 @@
 //! Per-connection asynchronous WebSocket worker session lifecycle.
 
 use crate::cli::TestMode;
-use crate::config::{LoadTestConfig, PayloadConfig};
+use crate::config::{LoadTestConfig, PayloadConfig, ReplyMatch};
 use crate::error::ErrorCategory;
 use crate::metrics::WorkerMetrics;
 use bytes::Bytes;
@@ -312,6 +312,7 @@ impl WorkerSession {
             let frame_len = message_byte_len(&msg);
             #[cfg(feature = "capture")]
             let captured_msg = self.frame_capture.as_ref().map(|_| msg.clone());
+            let sent = self.retain_for_exact_match(&msg);
             let start_time = Instant::now();
 
             tokio::select! {
@@ -333,36 +334,9 @@ impl WorkerSession {
                 }
             }
 
-            let recv_fut = async {
-                while let Some(msg_res) = stream.next().await {
-                    match msg_res {
-                        Ok(Message::Text(txt)) => {
-                            #[cfg(feature = "capture")]
-                            if let Some(ref capture) = self.frame_capture {
-                                capture
-                                    .record_received(self.worker_id, &Message::Text(txt.clone()));
-                            }
-                            return Ok(Some(txt.len()));
-                        }
-                        Ok(Message::Binary(bin)) => {
-                            #[cfg(feature = "capture")]
-                            if let Some(ref capture) = self.frame_capture {
-                                capture
-                                    .record_received(self.worker_id, &Message::Binary(bin.clone()));
-                            }
-                            return Ok(Some(bin.len()));
-                        }
-                        Ok(Message::Ping(data)) => {
-                            let _ = sink.send(Message::Pong(data)).await;
-                        }
-                        Ok(Message::Pong(_)) => {}
-                        Ok(Message::Close(_)) => return Ok(None),
-                        Ok(Message::Frame(_)) => {}
-                        Err(e) => return Err(categorize_session_error(&e, ErrorDirection::Read)),
-                    }
-                }
-                Err(ErrorCategory::UnexpectedClose)
-            };
+            let mut unsolicited = 0u64;
+            let recv_fut =
+                self.await_reply(&mut stream, &mut sink, sent.as_ref(), seq, &mut unsolicited);
 
             // Cancellation wins over a simultaneously ready reply so nothing
             // after the test window is recorded.
@@ -371,6 +345,7 @@ impl WorkerSession {
                 _ = self.cancel_token.cancelled() => None,
                 res = tokio::time::timeout(self.config.message_timeout, recv_fut) => Some(res),
             };
+            self.metrics.record_unsolicited_frames(unsolicited);
             let Some(response) = response else {
                 let _ = sink.send(Message::Close(None)).await;
                 break;
@@ -662,6 +637,7 @@ impl WorkerSession {
                             let frame_len = message_byte_len(&msg);
                             #[cfg(feature = "capture")]
                             let captured_msg = self.frame_capture.as_ref().map(|_| msg.clone());
+                            let sent = self.retain_for_exact_match(&msg);
                             let start_time = Instant::now();
 
                             if let Err(err) = sink.send(msg).await {
@@ -681,45 +657,14 @@ impl WorkerSession {
                             self.metrics.record_message_sent(frame_len);
 
                             if self.config.mode == TestMode::Echo {
-                                let recv_fut = async {
-                                    while let Some(msg_res) = stream.next().await {
-                                        match msg_res {
-                                            Ok(Message::Text(txt)) => {
-                                                #[cfg(feature = "capture")]
-                                                if let Some(ref capture) = self.frame_capture {
-                                                    capture.record_received(
-                                                        self.worker_id,
-                                                        &Message::Text(txt.clone()),
-                                                    );
-                                                }
-                                                return Ok(Some(txt.len()));
-                                            }
-                                            Ok(Message::Binary(bin)) => {
-                                                #[cfg(feature = "capture")]
-                                                if let Some(ref capture) = self.frame_capture {
-                                                    capture.record_received(
-                                                        self.worker_id,
-                                                        &Message::Binary(bin.clone()),
-                                                    );
-                                                }
-                                                return Ok(Some(bin.len()));
-                                            }
-                                            Ok(Message::Ping(data)) => {
-                                                let _ = sink.send(Message::Pong(data)).await;
-                                            }
-                                            Ok(Message::Pong(_)) => {}
-                                            Ok(Message::Close(_)) => return Ok(None),
-                                            Ok(Message::Frame(_)) => {}
-                                            Err(e) => {
-                                                return Err(categorize_session_error(
-                                                    &e,
-                                                    ErrorDirection::Read,
-                                                ));
-                                            }
-                                        }
-                                    }
-                                    Err(ErrorCategory::UnexpectedClose)
-                                };
+                                let mut unsolicited = 0u64;
+                                let recv_fut = self.await_reply(
+                                    &mut stream,
+                                    &mut sink,
+                                    sent.as_ref(),
+                                    seq,
+                                    &mut unsolicited,
+                                );
 
                                 let response = tokio::select! {
                                     biased;
@@ -729,6 +674,7 @@ impl WorkerSession {
                                         recv_fut,
                                     ) => Some(res),
                                 };
+                                self.metrics.record_unsolicited_frames(unsolicited);
                                 let Some(response) = response else {
                                     let _ = sink.send(Message::Close(None)).await;
                                     break 'script;
@@ -823,6 +769,50 @@ impl WorkerSession {
             _ = tokio::time::sleep(think_time) => true,
             _ = self.cancel_token.cancelled() => false,
         }
+    }
+
+    /// Keeps a handle on the outgoing frame when the reply must equal it.
+    ///
+    /// Frames hold refcounted buffers, so this never copies the payload.
+    fn retain_for_exact_match(&self, msg: &Message) -> Option<Message> {
+        (self.config.reply_match == ReplyMatch::Exact).then(|| msg.clone())
+    }
+
+    /// Reads frames until one matches `--match` for request `seq`, answering
+    /// pings on the way. Returns the reply size, or `None` on a server Close.
+    ///
+    /// Non-matching data frames are added to `unsolicited`, which the caller
+    /// records even when this future is dropped by a timeout or cancellation.
+    async fn await_reply<St, Si>(
+        &self,
+        stream: &mut St,
+        sink: &mut Si,
+        sent: Option<&Message>,
+        seq: u64,
+        unsolicited: &mut u64,
+    ) -> Result<Option<usize>, ErrorCategory>
+    where
+        St: futures_util::Stream<Item = std::result::Result<Message, TungsteniteError>> + Unpin,
+        Si: futures_util::Sink<Message, Error = TungsteniteError> + Unpin,
+    {
+        while let Some(msg_res) = stream.next().await {
+            let frame = match msg_res {
+                Ok(frame @ (Message::Text(_) | Message::Binary(_))) => frame,
+                Ok(Message::Ping(data)) => {
+                    let _ = sink.send(Message::Pong(data)).await;
+                    continue;
+                }
+                Ok(Message::Close(_)) => return Ok(None),
+                Ok(Message::Pong(_) | Message::Frame(_)) => continue,
+                Err(e) => return Err(categorize_session_error(&e, ErrorDirection::Read)),
+            };
+            self.capture_received(&frame);
+            if reply_matches(&self.config.reply_match, &frame, sent, seq) {
+                return Ok(Some(message_byte_len(&frame)));
+            }
+            *unsolicited += 1;
+        }
+        Err(ErrorCategory::UnexpectedClose)
     }
 
     /// Builds the optional keepalive ticker shared by every session mode.
@@ -1173,6 +1163,33 @@ impl ReconnectBackoff {
     }
 }
 
+/// Decides whether an inbound data frame answers the request in flight.
+///
+/// `sent` is only required by [`ReplyMatch::Exact`]; JSON parsing happens
+/// only for [`ReplyMatch::JsonPointer`], so the default rule stays
+/// allocation-free.
+fn reply_matches(rule: &ReplyMatch, frame: &Message, sent: Option<&Message>, seq: u64) -> bool {
+    match rule {
+        ReplyMatch::First => true,
+        ReplyMatch::Exact => sent == Some(frame),
+        ReplyMatch::JsonPointer(pointer) => {
+            let data: &[u8] = match frame {
+                Message::Text(text) => text.as_bytes(),
+                Message::Binary(bytes) => bytes,
+                _ => return false,
+            };
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(data) else {
+                return false;
+            };
+            match value.pointer(pointer) {
+                Some(serde_json::Value::Number(number)) => number.as_u64() == Some(seq),
+                Some(serde_json::Value::String(text)) => text.parse::<u64>() == Ok(seq),
+                _ => false,
+            }
+        }
+    }
+}
+
 fn message_byte_len(msg: &Message) -> usize {
     match msg {
         Message::Text(t) => t.len(),
@@ -1513,5 +1530,89 @@ mod chaos_tests {
             corrupt_message(Message::Binary(Bytes::new())),
             Message::Binary(Bytes::new())
         );
+    }
+}
+
+#[cfg(test)]
+mod reply_match_tests {
+    use super::*;
+
+    fn text(raw: &'static str) -> Message {
+        Message::Text(Utf8Bytes::from_static(raw))
+    }
+
+    #[test]
+    fn first_accepts_any_data_frame() {
+        let rule = ReplyMatch::First;
+        assert!(reply_matches(&rule, &text("anything"), None, 7));
+        assert!(reply_matches(
+            &rule,
+            &Message::Binary(Bytes::from_static(b"\x00")),
+            None,
+            7
+        ));
+    }
+
+    #[test]
+    fn exact_requires_identical_frame_type_and_bytes() {
+        let rule = ReplyMatch::Exact;
+        let sent = text("ping");
+        assert!(reply_matches(&rule, &text("ping"), Some(&sent), 0));
+        assert!(!reply_matches(&rule, &text("pong"), Some(&sent), 0));
+        assert!(!reply_matches(
+            &rule,
+            &Message::Binary(Bytes::from_static(b"ping")),
+            Some(&sent),
+            0
+        ));
+    }
+
+    #[test]
+    fn json_pointer_compares_numbers_and_numeric_strings_with_seq() {
+        let rule = ReplyMatch::JsonPointer("/data/seq".to_string());
+        assert!(reply_matches(
+            &rule,
+            &text(r#"{"data":{"seq":7}}"#),
+            None,
+            7
+        ));
+        assert!(reply_matches(
+            &rule,
+            &text(r#"{"data":{"seq":"7"}}"#),
+            None,
+            7
+        ));
+        assert!(reply_matches(
+            &rule,
+            &Message::Binary(Bytes::from_static(br#"{"data":{"seq":7}}"#)),
+            None,
+            7
+        ));
+
+        assert!(!reply_matches(
+            &rule,
+            &text(r#"{"data":{"seq":6}}"#),
+            None,
+            7
+        ));
+        assert!(!reply_matches(
+            &rule,
+            &text(r#"{"data":{"seq":"x"}}"#),
+            None,
+            7
+        ));
+        assert!(!reply_matches(
+            &rule,
+            &text(r#"{"data":{"seq":7.5}}"#),
+            None,
+            7
+        ));
+        assert!(!reply_matches(
+            &rule,
+            &text(r#"{"event":"heartbeat"}"#),
+            None,
+            7
+        ));
+        assert!(!reply_matches(&rule, &text("not json"), None, 7));
     }
 }
