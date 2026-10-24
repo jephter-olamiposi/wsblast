@@ -11,8 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Cargo.toml declares a [[bench]] target and the crate has a build script, so
-# Cargo needs more than src/ to load the manifest; .dockerignore trims the context.
+# Cargo.toml declares a [[bench]] target, so Cargo needs more than src/ to load
+# the manifest; .dockerignore trims the context.
 COPY . .
 
 RUN cargo build --release --locked --bin wsblast

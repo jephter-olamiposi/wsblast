@@ -21,9 +21,6 @@ pub enum WsBlastError {
     #[error("SLO threshold breached: {0}")]
     SloBreach(String),
 
-    #[error("Distributed coordination error: {0}")]
-    Distributed(String),
-
     #[error("Metrics initialization failed: {0}")]
     Metrics(String),
 }

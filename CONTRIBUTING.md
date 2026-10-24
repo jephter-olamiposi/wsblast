@@ -18,25 +18,10 @@ Security problems should not be filed as public issues; see
    rustup toolchain install stable --component rustfmt --component clippy
    ```
 
-2. Install `protoc` (the Protocol Buffers compiler). The `distributed` feature
-   generates gRPC code from `proto/wsblast.proto` at build time, so `protoc`
-   is needed for `--features distributed`, `--features full` and
-   `--all-features` builds:
-
-   | Platform | Command |
-   | :--- | :--- |
-   | Debian / Ubuntu | `sudo apt-get install protobuf-compiler` |
-   | Fedora | `sudo dnf install protobuf-compiler` |
-   | macOS | `brew install protobuf` |
-   | Windows | `winget install protobuf` or `choco install protoc` |
-
-   If `protoc` is installed somewhere unusual, point the build at it with the
-   `PROTOC` environment variable.
-
-3. On Linux, the default `native-tls` backend links OpenSSL, so you also need
+2. On Linux, the default `native-tls` backend links OpenSSL, so you also need
    `pkg-config` and the OpenSSL headers (`libssl-dev` on Debian and Ubuntu).
 
-4. Clone and build:
+3. Clone and build:
 
    ```bash
    git clone https://github.com/jephter-olamiposi/wsblast.git
