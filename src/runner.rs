@@ -7,7 +7,6 @@ use crate::config::{ScenarioConfig, ScenarioPhase};
 use crate::metrics::FrameCapture;
 use crate::metrics::{AggregatedMetrics, LiveMetrics, WorkerMetrics};
 use crate::worker::WorkerSession;
-#[cfg(unix)]
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::Arc;
@@ -184,12 +183,27 @@ impl Runner {
             None
         };
 
-        let start_time = Instant::now();
+        warn_if_ramp_exceeds_duration(
+            total_connections,
+            self.config.ramp_rate,
+            self.config.duration,
+        );
+
         let spawn_delay = if self.config.ramp_rate > 0 {
             Some(Duration::from_secs_f64(1.0 / self.config.ramp_rate as f64))
         } else {
             None
         };
+
+        // `--duration` is total wall-clock time including the ramp, so the
+        // timer shares `start_time` with elapsed, throughput, and progress.
+        let start_time = Instant::now();
+        let duration_token = self.cancel_token.clone();
+        let test_duration = self.config.duration;
+        tokio::spawn(async move {
+            tokio::time::sleep(test_duration).await;
+            duration_token.cancel();
+        });
 
         let mut handles = Vec::with_capacity(total_connections);
         for worker_id in 0..total_connections {
@@ -207,13 +221,6 @@ impl Runner {
                 }
             }
         }
-
-        let duration_token = self.cancel_token.clone();
-        let test_duration = self.config.duration;
-        tokio::spawn(async move {
-            tokio::time::sleep(test_duration).await;
-            duration_token.cancel();
-        });
 
         if let Some(max_reqs) = self.config.max_requests {
             let req_token = self.cancel_token.clone();
@@ -344,6 +351,29 @@ async fn recv_or_pending(signal: Option<&mut tokio::signal::unix::Signal>) {
             signal.recv().await;
         }
         None => std::future::pending().await,
+    }
+}
+
+/// Warns when the ramp cannot open every connection before `duration` ends.
+///
+/// Workers are spawned at `0, 1/rate, 2/rate, ...`, so the last one starts at
+/// `(connections - 1) / rate`; at or past `duration` the run is cancelled first.
+fn warn_if_ramp_exceeds_duration(connections: usize, ramp_rate: u64, duration: Duration) {
+    if ramp_rate == 0 || connections == 0 {
+        return;
+    }
+    let last_spawn_secs = (connections - 1) as f64 / ramp_rate as f64;
+    if last_spawn_secs >= duration.as_secs_f64() {
+        let reachable = (duration.as_secs_f64() * ramp_rate as f64).ceil() as usize;
+        eprintln!(
+            "{} Opening {} connections at --ramp-rate {}/s takes {:.1}s, but the {:.1}s duration includes the ramp; only about {} connections will be opened.",
+            colored::Colorize::bold("Warning:").yellow(),
+            connections,
+            ramp_rate,
+            last_spawn_secs,
+            duration.as_secs_f64(),
+            reachable.min(connections)
+        );
     }
 }
 

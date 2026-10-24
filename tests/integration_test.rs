@@ -711,6 +711,75 @@ async fn test_connection_ramp_rate() {
     cancel_server.cancel();
 }
 
+#[tokio::test]
+async fn test_duration_includes_connection_ramp() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    let config = LoadTestConfig {
+        target_url,
+        connections: 5,
+        ramp_rate: 5,
+        duration: Duration::from_millis(600),
+        max_requests: None,
+        rate_per_conn: 0,
+        payload: PayloadConfig::from_text("static-frame".to_string()),
+        headers: HeaderMap::new(),
+        subprotocol: None,
+        mode: TestMode::Echo,
+        connect_timeout: Duration::from_secs(2),
+        message_timeout: Duration::from_secs(2),
+        ping_interval: Duration::ZERO,
+        #[cfg(feature = "compression")]
+        compression: wsblast::config::CompressionConfig {
+            enabled: false,
+            level: 6,
+        },
+        #[cfg(feature = "auth")]
+        auth: None,
+        #[cfg(feature = "graphql-ws")]
+        graphql_ws: None,
+        #[cfg(feature = "capture")]
+        capture: wsblast::config::CaptureConfig {
+            enabled: false,
+            output_path: std::path::PathBuf::from("capture.pcapng"),
+            format: wsblast::config::CaptureFormat::PcapNg,
+            max_frames: 0,
+        },
+        #[cfg(feature = "chaos")]
+        chaos: wsblast::config::ChaosConfig {
+            enabled: false,
+            latency_ms: None,
+            loss_percent: None,
+            corrupt_percent: None,
+            close_percent: None,
+        },
+        slo: SloThresholds::default(),
+        output_format: OutputFormat::Text,
+        output_path: None,
+        tui: false,
+        no_progress: true,
+        no_reconnect: false,
+    };
+
+    let started = std::time::Instant::now();
+    let metrics = Runner::new(config).run().await.unwrap();
+    let wall = started.elapsed();
+
+    assert!(
+        wall < Duration::from_millis(900),
+        "run took {wall:?}, expected the 600ms duration to include the ramp"
+    );
+    assert!(
+        metrics.elapsed >= Duration::from_millis(550)
+            && metrics.elapsed < Duration::from_millis(800),
+        "elapsed {:?} should track the 600ms duration",
+        metrics.elapsed
+    );
+    assert!(metrics.total_connections_established >= 1);
+
+    cancel_server.cancel();
+}
+
 #[test]
 fn test_payload_config_classification() {
     let static_p = PayloadConfig::from_text("plain text without macros".to_string());
