@@ -97,18 +97,22 @@ async fn wait_with_limit(mut child: Child, limit: Duration) -> Finished {
         buf
     });
 
-    let status = match tokio::time::timeout(limit, child.wait()).await {
-        Ok(status) => status.unwrap(),
-        Err(_) => {
-            let _ = child.kill().await;
-            panic!("wsblast did not exit within {limit:?} of SIGINT");
-        }
-    };
+    let status = tokio::time::timeout(limit, child.wait()).await;
+    if status.is_err() {
+        let _ = child.kill().await;
+    }
+    let stdout = stdout_task.await.unwrap();
+    let stderr = stderr_task.await.unwrap();
 
-    Finished {
-        code: status.code(),
-        stdout: stdout_task.await.unwrap(),
-        stderr: stderr_task.await.unwrap(),
+    match status {
+        Ok(status) => Finished {
+            code: status.unwrap().code(),
+            stdout,
+            stderr,
+        },
+        Err(_) => panic!(
+            "wsblast did not exit within {limit:?} of SIGINT\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ),
     }
 }
 
@@ -131,6 +135,63 @@ async fn sigint_during_connection_ramp_still_reports() {
     interrupt(&child);
     let finished = wait_with_limit(child, Duration::from_secs(5)).await;
 
+    assert!(
+        matches!(finished.code, Some(0 | 2)),
+        "expected a graceful exit after SIGINT, got {:?}\nstdout:\n{}\nstderr:\n{}",
+        finished.code,
+        finished.stdout,
+        finished.stderr
+    );
+    assert!(
+        finished.stdout.contains(SUMMARY_HEADER),
+        "missing summary after SIGINT\nstdout:\n{}\nstderr:\n{}",
+        finished.stdout,
+        finished.stderr
+    );
+
+    cancel_server.cancel();
+}
+
+#[cfg(feature = "scenario")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sigint_during_scenario_stops_remaining_phases() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    let scenario_path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("cli_signals_two_phase_{}.yaml", std::process::id()));
+    let phase = |name: &str| {
+        format!(
+            "  - name: \"{name}\"\n    duration: \"5s\"\n    connections: 2\n    ramp_rate: 4\n    rate_per_conn: 20\n"
+        )
+    };
+    let scenario = format!(
+        "version: \"1.0\"\ntarget: \"{target_url}\"\nmetadata:\n  name: \"signal\"\nphases:\n{}{}",
+        phase("first"),
+        phase("second")
+    );
+    std::fs::write(&scenario_path, scenario).unwrap();
+
+    let child = spawn_wsblast(&[
+        "--scenario",
+        scenario_path.to_str().unwrap(),
+        "--no-progress",
+    ]);
+
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    interrupt(&child);
+    let finished = wait_with_limit(child, Duration::from_secs(4)).await;
+    let _ = std::fs::remove_file(&scenario_path);
+
+    assert!(
+        finished.stderr.contains("phase 1/2"),
+        "phase 1 never started\nstderr:\n{}",
+        finished.stderr
+    );
+    assert!(
+        !finished.stderr.contains("phase 2/2"),
+        "SIGINT only stopped the current phase\nstderr:\n{}",
+        finished.stderr
+    );
     assert!(
         matches!(finished.code, Some(0 | 2)),
         "expected a graceful exit after SIGINT, got {:?}\nstdout:\n{}\nstderr:\n{}",

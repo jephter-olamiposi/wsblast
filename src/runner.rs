@@ -19,6 +19,7 @@ pub struct Runner {
     config: Arc<LoadTestConfig>,
     live_metrics: Arc<LiveMetrics>,
     cancel_token: CancellationToken,
+    handle_signals: bool,
     #[cfg(feature = "capture")]
     frame_capture: Option<FrameCapture>,
     #[cfg(feature = "scenario")]
@@ -36,6 +37,7 @@ impl Runner {
             config: Arc::new(config),
             live_metrics: LiveMetrics::new(),
             cancel_token: CancellationToken::new(),
+            handle_signals: true,
             #[cfg(feature = "capture")]
             frame_capture,
             #[cfg(feature = "scenario")]
@@ -67,6 +69,7 @@ impl Runner {
             config: Arc::new(config),
             live_metrics: LiveMetrics::new(),
             cancel_token: CancellationToken::new(),
+            handle_signals: true,
             #[cfg(feature = "capture")]
             frame_capture,
             scenario: Some(Arc::new(phase)),
@@ -126,6 +129,24 @@ impl Runner {
         self.cancel_token.clone()
     }
 
+    /// Drives this runner from a caller-owned token, typically a child of a
+    /// run-level token so that cancelling the parent stops this runner while
+    /// this runner's own duration and request limits stay local to it.
+    pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
+        self.cancel_token = cancel_token;
+        self
+    }
+
+    /// Controls whether [`Runner::run`] listens for Ctrl+C and SIGTERM.
+    ///
+    /// Enabled by default. Disable it when the caller owns signal handling,
+    /// for example a library host or an orchestrator that cancels a parent of
+    /// this runner's token.
+    pub fn with_signal_handling(mut self, enabled: bool) -> Self {
+        self.handle_signals = enabled;
+        self
+    }
+
     /// Spawns the worker pool, tracks real-time progress, and aggregates final metrics.
     ///
     /// Cancellation via timeout or interrupt signal gracefully stops all worker loops
@@ -157,7 +178,11 @@ impl Runner {
         let total_connections = self.config.connections;
         check_file_descriptor_limit(total_connections);
 
-        spawn_signal_listener(self.cancel_token.clone());
+        let _signal_listener = if self.handle_signals {
+            spawn_signal_listener(self.cancel_token.clone())
+        } else {
+            None
+        };
 
         let start_time = Instant::now();
         let spawn_delay = if self.config.ramp_rate > 0 {
@@ -255,31 +280,41 @@ impl Runner {
     }
 }
 
+/// Stops the signal listener task when the owning run ends.
+struct SignalListener(tokio::task::JoinHandle<()>);
+
+impl Drop for SignalListener {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Cancels `token` on Ctrl+C, and on SIGTERM where the platform has it.
 ///
 /// OS handlers are registered before this returns, not when the spawned task
 /// is first polled, so a signal delivered while workers are still ramping is
 /// observed instead of killing the process with the default disposition. The
-/// listener exits once `token` is cancelled for any reason.
-fn spawn_signal_listener(token: CancellationToken) {
+/// listener exits once `token` is cancelled or the returned guard is dropped.
+fn spawn_signal_listener(token: CancellationToken) -> Option<SignalListener> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
         let mut sigint = signal(SignalKind::interrupt()).ok();
         let mut sigterm = signal(SignalKind::terminate()).ok();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             tokio::select! {
                 _ = recv_or_pending(sigint.as_mut()) => token.cancel(),
                 _ = recv_or_pending(sigterm.as_mut()) => token.cancel(),
                 _ = token.cancelled() => {}
             }
         });
+        Some(SignalListener(handle))
     }
 
     #[cfg(windows)]
     {
         let mut ctrl_c = tokio::signal::windows::ctrl_c().ok();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             tokio::select! {
                 _ = async {
                     match ctrl_c.as_mut() {
@@ -292,11 +327,13 @@ fn spawn_signal_listener(token: CancellationToken) {
                 _ = token.cancelled() => {}
             }
         });
+        Some(SignalListener(handle))
     }
 
     #[cfg(not(any(unix, windows)))]
     {
         let _ = token;
+        None
     }
 }
 
@@ -350,6 +387,8 @@ pub struct ScenarioExecutor {
     phases: Vec<ScenarioPhase>,
     base_config: LoadTestConfig,
     live_metrics: Arc<LiveMetrics>,
+    cancel_token: CancellationToken,
+    handle_signals: bool,
     #[cfg(feature = "capture")]
     frame_capture: Option<FrameCapture>,
 }
@@ -390,6 +429,8 @@ impl ScenarioExecutor {
             phases: scenario.compile(phase)?,
             base_config,
             live_metrics: LiveMetrics::new(),
+            cancel_token: CancellationToken::new(),
+            handle_signals: true,
             #[cfg(feature = "capture")]
             frame_capture,
         })
@@ -406,7 +447,23 @@ impl ScenarioExecutor {
         Arc::clone(&self.live_metrics)
     }
 
-    /// Executes every compiled phase sequentially.
+    /// Returns the run-level token. Cancelling it stops the current phase
+    /// and skips every remaining phase; each phase runs on a child of it.
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
+    }
+
+    /// Controls whether [`ScenarioExecutor::run`] listens for Ctrl+C and
+    /// SIGTERM. Enabled by default; phase runners never install their own
+    /// listener, so with this disabled only [`ScenarioExecutor::cancel_token`]
+    /// stops the scenario early.
+    pub fn with_signal_handling(mut self, enabled: bool) -> Self {
+        self.handle_signals = enabled;
+        self
+    }
+
+    /// Executes every compiled phase sequentially until the scenario ends or
+    /// the run-level token is cancelled.
     ///
     /// Returns merged worker metrics, total elapsed time, and total connection
     /// attempts across all phases.
@@ -420,7 +477,16 @@ impl ScenarioExecutor {
         let mut total_elapsed = Duration::ZERO;
         let mut total_connections = 0u64;
 
+        let _signal_listener = if self.handle_signals {
+            spawn_signal_listener(self.cancel_token.clone())
+        } else {
+            None
+        };
+
         for (phase_idx, phase) in self.phases.iter().enumerate() {
+            if self.cancel_token.is_cancelled() {
+                break;
+            }
             eprintln!(
                 "{} Scenario '{}' phase {}/{}: '{}' ({} connections for {:?})",
                 if phase_idx > 0 { "→" } else { "▶" },
@@ -443,7 +509,9 @@ impl ScenarioExecutor {
             }
 
             let runner = Runner::with_scenario(config, phase.clone())
-                .with_live_metrics(Arc::clone(&self.live_metrics));
+                .with_live_metrics(Arc::clone(&self.live_metrics))
+                .with_cancel_token(self.cancel_token.child_token())
+                .with_signal_handling(false);
             #[cfg(feature = "capture")]
             let runner = runner.with_frame_capture(self.frame_capture.clone());
             let (worker_metrics, elapsed, connections) =
@@ -454,7 +522,10 @@ impl ScenarioExecutor {
             all_worker_metrics.extend(worker_metrics);
 
             if phase_idx + 1 < self.phases.len() {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                    _ = self.cancel_token.cancelled() => {}
+                }
             }
         }
 
