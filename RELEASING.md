@@ -71,7 +71,7 @@ token is stored in GitHub.
    available to workflows (the release job needs `contents: write` to create
    the GitHub Release) and allow GitHub Actions to create releases.
 3. If `main` has branch protection, add the CI jobs you want to require
-   (for example `Rustfmt`, `Clippy (full)`, `Test (ubuntu-latest, full)`,
+   (for example `Rustfmt`, `Clippy (full)`, `Test (ubuntu-24.04, full)`,
    `MSRV (default)`, `Docs`, `Package`, `End-to-end SLO gate`, `cargo-deny`).
 
 ### Optional: Homebrew tap

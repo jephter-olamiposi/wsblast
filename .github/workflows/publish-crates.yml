@@ -17,13 +17,13 @@ on:
 jobs:
   publish:
     name: cargo publish
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: crates-io
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Authenticate with crates.io
         id: auth
