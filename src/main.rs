@@ -14,9 +14,6 @@ use wsblast::runner::Runner;
 use wsblast::runner::ScenarioExecutor;
 use wsblast::tui::TuiApp;
 
-#[cfg(feature = "distributed")]
-use wsblast::distributed::{DistributedConfig, DistributedMode};
-
 /// Resolves configured authentication once and merges it into handshake headers.
 #[cfg(feature = "auth")]
 fn apply_auth(config: &mut LoadTestConfig) -> Result<()> {
@@ -103,75 +100,6 @@ async fn run_app() -> Result<()> {
         }
 
         return Ok(());
-    }
-
-    // Handle distributed mode (coordinator or worker)
-    #[cfg(feature = "distributed")]
-    if let Some(mode) = cli.distributed_mode {
-        if cli.scenario.is_some() {
-            return Err(wsblast::error::WsBlastError::Config(
-                wsblast::error::ConfigError::UnsupportedOption(
-                    "scenario definitions cannot be distributed; run each phase as a separate load test"
-                        .to_string(),
-                ),
-            ));
-        }
-        if cli.tui {
-            return Err(wsblast::error::WsBlastError::Config(
-                wsblast::error::ConfigError::UnsupportedOption(
-                    "the interactive TUI is only available in standalone mode".to_string(),
-                ),
-            ));
-        }
-        if cli.reply_match.parse::<wsblast::config::ReplyMatch>()?
-            != wsblast::config::ReplyMatch::First
-        {
-            return Err(wsblast::error::WsBlastError::Config(
-                wsblast::error::ConfigError::UnsupportedOption(
-                    "--match other than first is only available in standalone mode".to_string(),
-                ),
-            ));
-        }
-
-        let coordinator_url = match cli.coordinator_url.as_deref() {
-            Some(raw) => Some(url::Url::parse(raw).map_err(|e| {
-                wsblast::error::WsBlastError::Config(wsblast::error::ConfigError::InvalidUrl(
-                    raw.to_string(),
-                    e.to_string(),
-                ))
-            })?),
-            None => None,
-        };
-
-        let distributed_config = DistributedConfig {
-            mode,
-            coordinator_url,
-            worker_id: cli.worker_id.clone(),
-            worker_count: cli.worker_count,
-            bind_addr: cli.worker_bind.clone(),
-            coordinator_bind_addr: cli.coordinator_bind.clone(),
-        };
-
-        return match mode {
-            DistributedMode::Coordinator => {
-                let load_config = LoadTestConfig::from_cli(cli.clone())?;
-                #[cfg(feature = "auth")]
-                let mut load_config = load_config;
-                #[cfg(feature = "auth")]
-                apply_auth(&mut load_config)?;
-                let slo_passed =
-                    wsblast::distributed::run_coordinator(distributed_config, load_config)
-                        .await
-                        .map_err(|e| wsblast::error::WsBlastError::Distributed(e.to_string()))?;
-                if !slo_passed {
-                    std::process::exit(2);
-                }
-                Ok(())
-            }
-            DistributedMode::Worker => wsblast::distributed::run_worker(distributed_config)
-                .await
-                .map_err(|e| wsblast::error::WsBlastError::Distributed(e.to_string())),
-        };
     }
 
     let scenario_mode = cli.is_scenario_mode();

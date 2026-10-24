@@ -3,8 +3,6 @@
 pub mod auth;
 pub mod cli;
 pub mod config;
-#[cfg(feature = "distributed")]
-pub mod distributed;
 pub mod error;
 pub mod metrics;
 pub mod report;
@@ -22,10 +20,6 @@ pub use config::AuthConfig;
 #[cfg(feature = "scenario")]
 pub use config::{ActionConfig, PhaseConfig, ScenarioConfig, ScenarioMeta};
 pub use config::{LoadTestConfig, PayloadConfig, SloThresholds};
-#[cfg(feature = "distributed")]
-pub use distributed::{DistributedConfig, DistributedMode};
-#[cfg(feature = "distributed")]
-pub use distributed::{run_coordinator, run_worker};
 pub use error::{ConfigError, ErrorCategory, Result, WorkerError, WsBlastError};
 pub use metrics::{AggregatedMetrics, LatencyStats, LiveMetrics, LiveSnapshot, WorkerMetrics};
 #[cfg(feature = "compare")]

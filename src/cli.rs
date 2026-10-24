@@ -266,44 +266,6 @@ pub struct Cli {
     #[arg(long = "fail-on-regression", default_value_t = false)]
     pub fail_on_regression: bool,
 
-    /// Distributed mode: coordinator or worker (omit for a standalone load test)
-    #[cfg(feature = "distributed")]
-    #[arg(long = "distributed-mode", value_name = "MODE", value_enum)]
-    pub distributed_mode: Option<DistributedMode>,
-
-    /// Coordinator URL (required for worker mode)
-    #[cfg(feature = "distributed")]
-    #[arg(long = "coordinator-url", value_name = "URL")]
-    pub coordinator_url: Option<String>,
-
-    /// Worker ID (auto-generated if not provided)
-    #[cfg(feature = "distributed")]
-    #[arg(long = "worker-id", value_name = "ID")]
-    pub worker_id: Option<String>,
-
-    /// Total worker count (coordinator mode)
-    #[cfg(feature = "distributed")]
-    #[arg(long = "worker-count", value_name = "NUM", default_value_t = 1)]
-    pub worker_count: usize,
-
-    /// Bind address for worker gRPC server
-    #[cfg(feature = "distributed")]
-    #[arg(
-        long = "worker-bind",
-        value_name = "ADDR",
-        default_value = "127.0.0.1:50051"
-    )]
-    pub worker_bind: String,
-
-    /// Bind address for coordinator gRPC server
-    #[cfg(feature = "distributed")]
-    #[arg(
-        long = "coordinator-bind",
-        value_name = "ADDR",
-        default_value = "127.0.0.1:50052"
-    )]
-    pub coordinator_bind: String,
-
     /// Write output report to the specified file path
     #[arg(short = 'o', long = "output", value_name = "FILE")]
     pub output_file: Option<PathBuf>,
@@ -357,17 +319,6 @@ pub enum AuthType {
     /// API Key
     #[value(name = "apikey", alias = "api-key")]
     ApiKey,
-}
-
-/// Distributed operation mode.
-#[cfg(feature = "distributed")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DistributedMode {
-    /// Coordinator node that orchestrates workers
-    Coordinator,
-    /// Worker node that executes load test
-    Worker,
 }
 
 /// Supported execution patterns for WebSocket load generation.

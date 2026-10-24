@@ -42,14 +42,10 @@ jobs:
           - scenario
           - auth
           - graphql-ws
-          - distributed
           - compare
-          - tracing-subscriber
           - full
     steps:
       - uses: actions/checkout@v4
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -78,10 +74,6 @@ jobs:
       RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Unit, integration and bench-target tests
@@ -109,8 +101,6 @@ jobs:
           fi
           echo "Checking the declared MSRV $version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
@@ -137,8 +127,6 @@ jobs:
       RUSTDOCFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --locked --no-deps --all-features
