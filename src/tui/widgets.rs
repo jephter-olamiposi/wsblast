@@ -8,7 +8,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Gauge, Paragraph, Sparkline};
 
-pub fn render_dashboard(
+/// Draws the whole dashboard for one frame.
+pub(super) fn render_dashboard(
     f: &mut Frame,
     config: &LoadTestConfig,
     snap: &LiveSnapshot,

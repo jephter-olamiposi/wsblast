@@ -10,7 +10,7 @@ use crate::error::WorkerError;
 /// The header is resolved once before the load test starts and sent on every
 /// handshake, including reconnects.
 #[cfg(feature = "auth")]
-pub fn resolve_auth_header(
+pub(crate) fn resolve_auth_header(
     auth: &AuthConfig,
 ) -> std::result::Result<(http::header::HeaderName, http::header::HeaderValue), WorkerError> {
     let (header, value) = match auth {
@@ -40,7 +40,7 @@ pub fn resolve_auth_header(
 ///
 /// Existing headers with the same name are replaced.
 #[cfg(feature = "auth")]
-pub fn apply_auth_header(
+pub(crate) fn apply_auth_header(
     headers: &mut http::HeaderMap,
     auth: &AuthConfig,
 ) -> std::result::Result<(), WorkerError> {

@@ -7,62 +7,79 @@ use colored::Colorize;
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, Color, Row, Table};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "compare")]
 use std::collections::BTreeMap;
 use std::fs;
 use std::time::Duration;
 
-/// Result of evaluating configured SLO thresholds against aggregated test metrics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Outcome of [`evaluate_slos`]: one check per configured threshold.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SloEvaluation {
+    /// True when every check passed, including when no threshold was set.
     pub passed: bool,
+    /// Checks in a fixed order: p50, p95, p99, p99.9, error rate, throughput.
     pub checks: Vec<SloCheck>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One evaluated SLO threshold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SloCheck {
+    /// Human-readable name, for example `Latency p99`.
     pub name: String,
+    /// The threshold, formatted for display (`<= 25ms`).
     pub target: String,
+    /// The measured value, formatted for display, or `no RTT samples`.
     pub actual: String,
+    /// Whether the measured value satisfies the threshold.
     pub passed: bool,
 }
 
 /// Endpoint one scenario phase ran against, listed in scenario reports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PhaseTarget {
+    /// Phase name.
     pub phase: String,
+    /// Endpoint the phase connected to.
     pub target_url: url::Url,
 }
 
 /// Baseline comparison for regression detection.
+#[cfg(feature = "compare")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BaselineComparison {
-    pub baseline: AggregatedMetrics,
-    pub current: AggregatedMetrics,
-    pub regressions: Vec<Regression>,
-    pub improvements: Vec<Improvement>,
+pub(crate) struct BaselineComparison {
+    pub(crate) baseline: AggregatedMetrics,
+    pub(crate) current: AggregatedMetrics,
+    pub(crate) regressions: Vec<Regression>,
+    pub(crate) improvements: Vec<Improvement>,
 }
 
 /// `pct_change` is the signed relative change from baseline to current, in percent.
+#[cfg(feature = "compare")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Regression {
-    pub metric: String,
-    pub baseline: f64,
-    pub current: f64,
-    pub pct_change: f64,
+pub(crate) struct Regression {
+    pub(crate) metric: String,
+    pub(crate) baseline: f64,
+    pub(crate) current: f64,
+    pub(crate) pct_change: f64,
 }
 
 /// `pct_change` is the signed relative change from baseline to current, in
 /// percent: positive for a throughput gain, negative for a latency drop.
+#[cfg(feature = "compare")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Improvement {
-    pub metric: String,
-    pub baseline: f64,
-    pub current: f64,
-    pub pct_change: f64,
+pub(crate) struct Improvement {
+    pub(crate) metric: String,
+    pub(crate) baseline: f64,
+    pub(crate) current: f64,
+    pub(crate) pct_change: f64,
 }
 
 /// Report payloads are either the schema envelope (`{ "metrics": ... }`) or a
 /// bare aggregated-metrics object produced by earlier versions.
+#[cfg(feature = "compare")]
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ReportDocument {
@@ -75,12 +92,14 @@ enum ReportDocument {
 /// # Errors
 ///
 /// Returns a [`serde_json::Error`] when the document matches neither shape.
-pub fn parse_report_metrics(json: &str) -> serde_json::Result<AggregatedMetrics> {
+#[cfg(feature = "compare")]
+pub(crate) fn parse_report_metrics(json: &str) -> serde_json::Result<AggregatedMetrics> {
     match serde_json::from_str::<ReportDocument>(json)? {
         ReportDocument::Envelope { metrics } | ReportDocument::Bare(metrics) => Ok(metrics),
     }
 }
 
+#[cfg(feature = "compare")]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MetricDirection {
     HigherIsBetter,
@@ -89,6 +108,7 @@ enum MetricDirection {
 }
 
 /// Classifies a metric by the direction that constitutes an improvement.
+#[cfg(feature = "compare")]
 fn metric_direction(metric: &str) -> MetricDirection {
     match metric {
         // Input sizing, not an outcome: comparing it would flag intentional reconfiguration.
@@ -108,7 +128,8 @@ fn metric_direction(metric: &str) -> MetricDirection {
 /// higher is better, while errors and latency percentiles lower is better. A
 /// metric that appears from a zero baseline is reported as a full 100% move so
 /// new error categories cannot be silently skipped.
-pub fn compare_metrics(
+#[cfg(feature = "compare")]
+pub(crate) fn compare_metrics(
     baseline: &AggregatedMetrics,
     current: &AggregatedMetrics,
     threshold: f64,
@@ -172,6 +193,7 @@ pub fn compare_metrics(
     }
 }
 
+#[cfg(feature = "compare")]
 fn metrics_to_map(metrics: &AggregatedMetrics) -> BTreeMap<String, f64> {
     let mut map = BTreeMap::new();
 
@@ -250,7 +272,8 @@ fn metrics_to_map(metrics: &AggregatedMetrics) -> BTreeMap<String, f64> {
 }
 
 /// Renders a comparison report in the specified format.
-pub fn render_comparison_report(
+#[cfg(feature = "compare")]
+pub(crate) fn render_comparison_report(
     comparison: &BaselineComparison,
     format: OutputFormat,
     threshold: f64,
@@ -262,6 +285,7 @@ pub fn render_comparison_report(
     }
 }
 
+#[cfg(feature = "compare")]
 fn render_text_comparison(comparison: &BaselineComparison, threshold: f64) -> String {
     let mut out = String::new();
 
@@ -317,6 +341,7 @@ fn render_text_comparison(comparison: &BaselineComparison, threshold: f64) -> St
     out
 }
 
+#[cfg(feature = "compare")]
 fn render_json_comparison(comparison: &BaselineComparison, threshold: f64) -> String {
     #[derive(serde::Serialize)]
     struct JsonComparison<'a> {
@@ -336,6 +361,7 @@ fn render_json_comparison(comparison: &BaselineComparison, threshold: f64) -> St
     serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into())
 }
 
+#[cfg(feature = "compare")]
 fn render_markdown_comparison(comparison: &BaselineComparison, threshold: f64) -> String {
     let mut md = String::new();
     md.push_str("# `wsblast` Baseline Comparison Report\n\n");
@@ -374,7 +400,10 @@ fn render_markdown_comparison(comparison: &BaselineComparison, threshold: f64) -
     md
 }
 
-/// Evaluates configured SLO criteria against aggregated test metrics.
+/// Checks every threshold set in `slo` against `metrics`.
+///
+/// A latency threshold fails when no round trip was measured, because an
+/// empty histogram is no evidence that the budget was met.
 pub fn evaluate_slos(slo: &SloThresholds, metrics: &AggregatedMetrics) -> SloEvaluation {
     let mut checks = Vec::new();
     let mut all_passed = true;
@@ -449,7 +478,8 @@ fn latency_check(name: &str, target: Duration, actual: Duration, samples: u64) -
     }
 }
 
-/// Formats benchmark metrics into the requested output format string.
+/// Renders the run report in the configuration's
+/// [`output_format`](LoadTestConfig::output_format).
 pub fn render_report(
     config: &LoadTestConfig,
     metrics: &AggregatedMetrics,
@@ -460,7 +490,7 @@ pub fn render_report(
 
 /// Formats a report that also lists the target of every executed scenario
 /// phase. With no phases it is identical to [`render_report`].
-pub fn render_scenario_report(
+pub(crate) fn render_scenario_report(
     config: &LoadTestConfig,
     metrics: &AggregatedMetrics,
     slo: &SloEvaluation,
@@ -473,25 +503,13 @@ pub fn render_scenario_report(
     }
 }
 
-/// Emits the formatted report to stdout and persists to file if specified in configuration.
+/// Prints the report to stdout and writes it to the configured output path,
+/// listing the target of every executed scenario phase.
 ///
 /// # Errors
 ///
 /// Returns [`std::io::Error`] if writing to the specified `output_path` fails.
-pub fn emit_report(
-    config: &LoadTestConfig,
-    metrics: &AggregatedMetrics,
-    slo: &SloEvaluation,
-) -> std::io::Result<()> {
-    emit_scenario_report(config, metrics, slo, &[])
-}
-
-/// Emits a report that lists the target of every executed scenario phase.
-///
-/// # Errors
-///
-/// Returns [`std::io::Error`] if writing to the specified `output_path` fails.
-pub fn emit_scenario_report(
+pub(crate) fn emit_scenario_report(
     config: &LoadTestConfig,
     metrics: &AggregatedMetrics,
     slo: &SloEvaluation,
@@ -870,6 +888,7 @@ fn format_us(us: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "compare")]
     use crate::error::ErrorCategory;
     use crate::metrics::LatencyStats;
     use std::collections::HashMap;
@@ -969,6 +988,7 @@ mod tests {
         assert!(evaluate_slos(&slo, &metrics).passed);
     }
 
+    #[cfg(feature = "compare")]
     #[test]
     fn higher_throughput_is_an_improvement_and_lower_is_a_regression() {
         let baseline = sample_metrics();
@@ -1001,6 +1021,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "compare")]
     #[test]
     fn higher_latency_is_a_regression_and_lower_is_an_improvement() {
         let mut baseline = sample_metrics();
@@ -1027,6 +1048,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "compare")]
     #[test]
     fn new_errors_from_a_zero_baseline_are_regressions() {
         let baseline = sample_metrics();
@@ -1059,6 +1081,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "compare")]
     #[test]
     fn parses_schema_envelopes_and_bare_metrics() {
         let metrics = sample_metrics();
@@ -1078,6 +1101,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "compare")]
     fn rows_for_metric(rendered: &str, metric: &str) -> Vec<String> {
         rendered
             .lines()
@@ -1086,6 +1110,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(feature = "compare")]
     #[test]
     fn comparison_reports_print_signed_improvement_change() {
         let baseline = sample_metrics();
@@ -1115,6 +1140,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "compare")]
     #[test]
     fn improvement_pct_change_keeps_its_sign() {
         let baseline = sample_metrics();
@@ -1141,6 +1167,7 @@ mod tests {
         assert_eq!(improvement.pct_change, -50.0);
     }
 
+    #[cfg(feature = "compare")]
     #[test]
     fn comparison_json_carries_schema_version() {
         let comparison = compare_metrics(&sample_metrics(), &sample_metrics(), 10.0);
@@ -1243,6 +1270,7 @@ mod tests {
         assert!(parsed.get("phase_targets").is_none(), "{single}");
     }
 
+    #[cfg(feature = "compare")]
     #[test]
     fn reports_without_unsolicited_counter_still_parse() {
         let mut legacy = serde_json::to_value(sample_metrics()).expect("serialize");
@@ -1255,6 +1283,7 @@ mod tests {
         assert_eq!(parsed.total_unsolicited_frames, 0);
     }
 
+    #[cfg(feature = "compare")]
     #[test]
     fn reports_without_not_started_counter_still_parse() {
         let mut legacy = serde_json::to_value(sample_metrics()).expect("serialize");

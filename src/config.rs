@@ -17,42 +17,510 @@ use std::time::Duration;
 use tokio_tungstenite::tungstenite::protocol::frame::Utf8Bytes;
 use url::Url;
 
-/// Fully validated, immutable configuration for load test execution.
+/// Default text payload: a JSON template carrying a timestamp and sequence number.
+const DEFAULT_TEXT_PAYLOAD: &str = r#"{"source":"wsblast","ts":"{{timestamp}}","seq":{{seq}}}"#;
+
+/// Default binary payload used by `--binary` without `--payload`.
+const DEFAULT_BINARY_PAYLOAD: &[u8] = b"wsblast-payload";
+
+/// A validated load test configuration.
+///
+/// Build one with [`LoadTestConfig::builder`]. Every value has passed the same
+/// validation the command line applies, so a [`Runner`](crate::Runner) never
+/// sees an inconsistent configuration.
 #[derive(Debug, Clone)]
 pub struct LoadTestConfig {
-    pub target_url: Url,
-    pub connections: usize,
-    pub ramp_rate: u64,
-    pub duration: Duration,
-    pub max_requests: Option<u64>,
-    pub rate_per_conn: u64,
-    pub payload: PayloadConfig,
-    pub headers: HeaderMap,
-    pub subprotocol: Option<String>,
-    pub mode: TestMode,
-    pub connect_timeout: Duration,
-    pub message_timeout: Duration,
-    pub ping_interval: Duration,
+    pub(crate) target_url: Url,
+    pub(crate) connections: usize,
+    pub(crate) ramp_rate: u64,
+    pub(crate) duration: Duration,
+    pub(crate) max_requests: Option<u64>,
+    pub(crate) rate_per_conn: u64,
+    pub(crate) payload: PayloadConfig,
+    pub(crate) headers: HeaderMap,
+    pub(crate) subprotocol: Option<String>,
+    pub(crate) mode: TestMode,
+    pub(crate) connect_timeout: Duration,
+    pub(crate) message_timeout: Duration,
+    pub(crate) ping_interval: Duration,
     #[cfg(feature = "auth")]
-    pub auth: Option<AuthConfig>,
+    pub(crate) auth: Option<AuthConfig>,
     #[cfg(feature = "graphql-ws")]
-    pub graphql_ws: Option<GraphQLWSConfig>,
-    pub slo: SloThresholds,
-    pub output_format: OutputFormat,
-    pub output_path: Option<PathBuf>,
-    pub tui: bool,
-    pub no_progress: bool,
+    pub(crate) graphql_ws: Option<GraphQLWSConfig>,
+    pub(crate) slo: SloThresholds,
+    pub(crate) output_format: OutputFormat,
+    pub(crate) output_path: Option<PathBuf>,
+    pub(crate) tui: bool,
+    pub(crate) no_progress: bool,
     /// Ends a worker on its first connection loss instead of reconnecting.
-    pub no_reconnect: bool,
+    pub(crate) no_reconnect: bool,
     /// Decides which inbound data frame answers an echo request.
-    pub reply_match: ReplyMatch,
+    pub(crate) reply_match: ReplyMatch,
+}
+
+impl LoadTestConfig {
+    /// Starts a configuration for `target_url` with the command-line defaults.
+    pub fn builder(target_url: impl Into<String>) -> LoadTestConfigBuilder {
+        LoadTestConfigBuilder::new(target_url.into())
+    }
+
+    /// WebSocket endpoint every worker connects to.
+    pub fn target_url(&self) -> &Url {
+        &self.target_url
+    }
+
+    /// Number of concurrent connections, one worker each.
+    pub fn connections(&self) -> usize {
+        self.connections
+    }
+
+    /// Workers started per second; `0` starts all of them at once.
+    pub fn ramp_rate(&self) -> u64 {
+        self.ramp_rate
+    }
+
+    /// Total run time, including the connection ramp.
+    pub fn duration(&self) -> Duration {
+        self.duration
+    }
+
+    /// Cap on messages sent across all workers, if any.
+    pub fn max_requests(&self) -> Option<u64> {
+        self.max_requests
+    }
+
+    /// Messages per second per connection; `0` means unthrottled.
+    pub fn rate_per_connection(&self) -> u64 {
+        self.rate_per_conn
+    }
+
+    /// Extra headers sent with every handshake.
+    pub fn headers(&self) -> &HeaderMap {
+        &self.headers
+    }
+
+    /// WebSocket subprotocol requested during the handshake, if any.
+    pub fn subprotocol(&self) -> Option<&str> {
+        self.subprotocol.as_deref()
+    }
+
+    /// What each worker does on its connection.
+    pub fn mode(&self) -> TestMode {
+        self.mode
+    }
+
+    /// Time allowed for the TCP, TLS and WebSocket handshake.
+    pub fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
+    }
+
+    /// Time an echo request waits for its reply.
+    pub fn message_timeout(&self) -> Duration {
+        self.message_timeout
+    }
+
+    /// Keepalive ping interval; zero disables pings.
+    pub fn ping_interval(&self) -> Duration {
+        self.ping_interval
+    }
+
+    /// Rule that recognises the reply to an echo request.
+    pub fn reply_match(&self) -> &ReplyMatch {
+        &self.reply_match
+    }
+
+    /// SLO thresholds carried with the configuration.
+    pub fn slo(&self) -> &SloThresholds {
+        &self.slo
+    }
+
+    /// Format [`render_report`](crate::render_report) produces.
+    pub fn output_format(&self) -> OutputFormat {
+        self.output_format
+    }
+
+    /// Whether the runner draws a progress bar on stderr.
+    pub fn progress(&self) -> bool {
+        !self.no_progress && !self.tui
+    }
+
+    /// Whether workers reconnect after losing their connection.
+    pub fn reconnect(&self) -> bool {
+        !self.no_reconnect
+    }
+}
+
+/// Builder for [`LoadTestConfig`], created by [`LoadTestConfig::builder`].
+///
+/// Unset values take the command-line defaults: 50 connections for 10 seconds
+/// in echo mode, no ramp and no rate limit, a JSON text payload carrying
+/// `{{seq}}` and `{{timestamp}}`, 5 second connect and message timeouts, no
+/// keepalive pings, reconnects enabled and text output. Unlike the command
+/// line, the builder disables the progress bar by default.
+#[derive(Debug, Clone)]
+#[must_use = "a builder does nothing until `build` is called"]
+pub struct LoadTestConfigBuilder {
+    target: String,
+    connections: usize,
+    ramp_rate: u64,
+    duration: Duration,
+    max_requests: Option<u64>,
+    rate_per_conn: u64,
+    payload: PayloadConfig,
+    headers: HeaderMap,
+    invalid_header: Option<String>,
+    subprotocol: Option<String>,
+    mode: TestMode,
+    connect_timeout: Duration,
+    message_timeout: Duration,
+    ping_interval: Duration,
+    #[cfg(feature = "graphql-ws")]
+    graphql: GraphQLOptions,
+    slo: SloThresholds,
+    output_format: OutputFormat,
+    progress: bool,
+    reconnect: bool,
+    reply_match: ReplyMatch,
+}
+
+/// GraphQL WS settings collected by the builder and checked in `build`.
+#[cfg(feature = "graphql-ws")]
+#[derive(Debug, Clone, Default)]
+struct GraphQLOptions {
+    operation: Option<String>,
+    operation_name: Option<String>,
+    variables: Option<serde_json::Value>,
+    extensions: Option<serde_json::Value>,
+}
+
+impl LoadTestConfigBuilder {
+    fn new(target: String) -> Self {
+        Self {
+            target,
+            connections: 50,
+            ramp_rate: 0,
+            duration: Duration::from_secs(10),
+            max_requests: None,
+            rate_per_conn: 0,
+            payload: PayloadConfig::from_text(DEFAULT_TEXT_PAYLOAD.to_string()),
+            headers: HeaderMap::new(),
+            invalid_header: None,
+            subprotocol: None,
+            mode: TestMode::Echo,
+            connect_timeout: Duration::from_secs(5),
+            message_timeout: Duration::from_secs(5),
+            ping_interval: Duration::ZERO,
+            #[cfg(feature = "graphql-ws")]
+            graphql: GraphQLOptions::default(),
+            slo: SloThresholds::default(),
+            output_format: OutputFormat::Text,
+            progress: false,
+            reconnect: true,
+            reply_match: ReplyMatch::First,
+        }
+    }
+
+    /// Sets the number of concurrent connections. Must be greater than zero.
+    pub fn connections(mut self, connections: usize) -> Self {
+        self.connections = connections;
+        self
+    }
+
+    /// Starts `workers_per_sec` workers per second instead of all at once.
+    pub fn ramp_rate(mut self, workers_per_sec: u64) -> Self {
+        self.ramp_rate = workers_per_sec;
+        self
+    }
+
+    /// Sets the total run time, including the connection ramp.
+    pub fn duration(mut self, duration: Duration) -> Self {
+        self.duration = duration;
+        self
+    }
+
+    /// Ends the run once `max_requests` messages were sent across all
+    /// workers. Must be greater than zero.
+    pub fn max_requests(mut self, max_requests: u64) -> Self {
+        self.max_requests = Some(max_requests);
+        self
+    }
+
+    /// Paces each connection to `messages_per_sec`; `0` means unthrottled.
+    pub fn rate_per_connection(mut self, messages_per_sec: u64) -> Self {
+        self.rate_per_conn = messages_per_sec;
+        self
+    }
+
+    /// Sends `text` as text frames. The placeholders `{{seq}}`,
+    /// `{{timestamp}}` and `{{worker_id}}` are filled in for every frame.
+    pub fn payload_text(mut self, text: impl Into<String>) -> Self {
+        self.payload = PayloadConfig::from_text(text.into());
+        self
+    }
+
+    /// Sends `bytes` as binary frames, unchanged.
+    pub fn payload_binary(mut self, bytes: impl Into<Bytes>) -> Self {
+        self.payload = PayloadConfig::Binary(bytes.into());
+        self
+    }
+
+    /// Adds a handshake header. Repeating a name sends every value.
+    ///
+    /// An invalid name or value is reported by [`build`](Self::build).
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        match (
+            HeaderName::from_str(name.trim()),
+            HeaderValue::from_str(value.trim()),
+        ) {
+            (Ok(name), Ok(value)) => {
+                self.headers.append(name, value);
+            }
+            (Err(_), _) => {
+                self.invalid_header
+                    .get_or_insert_with(|| format!("Invalid header name '{name}'"));
+            }
+            (_, Err(_)) => {
+                self.invalid_header
+                    .get_or_insert_with(|| format!("Invalid header value '{value}'"));
+            }
+        }
+        self
+    }
+
+    /// Requests a WebSocket subprotocol during the handshake.
+    pub fn subprotocol(mut self, subprotocol: impl Into<String>) -> Self {
+        self.subprotocol = Some(subprotocol.into());
+        self
+    }
+
+    /// Sets what each worker does on its connection.
+    pub fn mode(mut self, mode: TestMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Sets the time allowed for the TCP, TLS and WebSocket handshake.
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    /// Sets the time an echo request waits for its reply.
+    pub fn message_timeout(mut self, timeout: Duration) -> Self {
+        self.message_timeout = timeout;
+        self
+    }
+
+    /// Sends a keepalive ping every `interval`; zero disables pings.
+    pub fn ping_interval(mut self, interval: Duration) -> Self {
+        self.ping_interval = interval;
+        self
+    }
+
+    /// Sets how echo mode recognises the reply to a request.
+    pub fn reply_match(mut self, reply_match: ReplyMatch) -> Self {
+        self.reply_match = reply_match;
+        self
+    }
+
+    /// Attaches SLO thresholds, validated against the mode by `build`.
+    pub fn slo(mut self, slo: SloThresholds) -> Self {
+        self.slo = slo;
+        self
+    }
+
+    /// Sets the format [`render_report`](crate::render_report) produces.
+    pub fn output_format(mut self, format: OutputFormat) -> Self {
+        self.output_format = format;
+        self
+    }
+
+    /// Draws a progress bar on stderr while the run is in progress.
+    pub fn progress(mut self, enabled: bool) -> Self {
+        self.progress = enabled;
+        self
+    }
+
+    /// Controls whether workers reconnect, with backoff, after a timeout,
+    /// I/O error or server close. Enabled by default.
+    pub fn reconnect(mut self, enabled: bool) -> Self {
+        self.reconnect = enabled;
+        self
+    }
+
+    /// Sets the GraphQL operation sent by [`TestMode::GraphQLWS`] workers.
+    #[cfg(feature = "graphql-ws")]
+    pub fn graphql_operation(mut self, operation: impl Into<String>) -> Self {
+        self.graphql.operation = Some(operation.into());
+        self
+    }
+
+    /// Sets the GraphQL operation name.
+    #[cfg(feature = "graphql-ws")]
+    pub fn graphql_operation_name(mut self, name: impl Into<String>) -> Self {
+        self.graphql.operation_name = Some(name.into());
+        self
+    }
+
+    /// Sets the GraphQL variables. Must be a JSON object.
+    #[cfg(feature = "graphql-ws")]
+    pub fn graphql_variables(mut self, variables: serde_json::Value) -> Self {
+        self.graphql.variables = Some(variables);
+        self
+    }
+
+    /// Sets the GraphQL extensions. Must be a JSON object.
+    #[cfg(feature = "graphql-ws")]
+    pub fn graphql_extensions(mut self, extensions: serde_json::Value) -> Self {
+        self.graphql.extensions = Some(extensions);
+        self
+    }
+
+    /// Validates the settings and returns the configuration.
+    pub fn build(self) -> Result<LoadTestConfig> {
+        let target_url = parse_target_url(&self.target)?;
+        validate_connections(self.connections)?;
+        validate_max_requests(self.max_requests)?;
+        if let ReplyMatch::JsonPointer(pointer) = &self.reply_match
+            && !is_json_pointer(pointer)
+        {
+            return Err(invalid_json_pointer(pointer).into());
+        }
+        #[cfg(feature = "graphql-ws")]
+        let graphql_ws = validate_graphql(self.mode, self.graphql)?;
+        validate_reply_match(&self.reply_match, self.mode, std::iter::once(&self.payload))?;
+        if let Some(message) = self.invalid_header {
+            return Err(ConfigError::InvalidHeader(message).into());
+        }
+        validate_slo(&self.slo, self.mode)?;
+
+        Ok(LoadTestConfig {
+            target_url,
+            connections: self.connections,
+            ramp_rate: self.ramp_rate,
+            duration: self.duration,
+            max_requests: self.max_requests,
+            rate_per_conn: self.rate_per_conn,
+            payload: self.payload,
+            headers: self.headers,
+            subprotocol: self.subprotocol,
+            mode: self.mode,
+            connect_timeout: self.connect_timeout,
+            message_timeout: self.message_timeout,
+            ping_interval: self.ping_interval,
+            #[cfg(feature = "auth")]
+            auth: None,
+            #[cfg(feature = "graphql-ws")]
+            graphql_ws,
+            slo: self.slo,
+            output_format: self.output_format,
+            output_path: None,
+            tui: false,
+            no_progress: !self.progress,
+            no_reconnect: !self.reconnect,
+            reply_match: self.reply_match,
+        })
+    }
+}
+
+fn validate_connections(connections: usize) -> Result<()> {
+    if connections == 0 {
+        return Err(ConfigError::ZeroConcurrency(0).into());
+    }
+    Ok(())
+}
+
+fn validate_max_requests(max_requests: Option<u64>) -> Result<()> {
+    if max_requests == Some(0) {
+        return Err(ConfigError::InvalidOption(
+            "requests limit (-n) must be greater than zero".to_string(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Rejects an out-of-range error budget and latency budgets in modes that do
+/// not measure round-trip time.
+fn validate_slo(slo: &SloThresholds, mode: TestMode) -> Result<()> {
+    if let Some(err_rate) = slo.max_error_rate
+        && !(0.0..=1.0).contains(&err_rate)
+    {
+        return Err(ConfigError::InvalidThreshold(format!(
+            "max_error_rate must be between 0.0 and 1.0, received {err_rate}"
+        ))
+        .into());
+    }
+
+    // Only echo mode measures round-trip time; any other mode would leave the
+    // RTT histogram empty and a latency budget could never be evaluated.
+    let has_latency_slo = slo.max_p50.is_some()
+        || slo.max_p95.is_some()
+        || slo.max_p99.is_some()
+        || slo.max_p999.is_some();
+    if has_latency_slo && mode != TestMode::Echo {
+        return Err(ConfigError::UnsupportedOption(format!(
+            "latency SLOs (--max-p50/--max-p95/--max-p99/--max-p999) require --mode echo; {mode:?} mode does not measure round-trip time"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Rejects GraphQL options outside `graphql-ws` mode, and a missing operation
+/// or non-object variables and extensions inside it.
+#[cfg(feature = "graphql-ws")]
+fn validate_graphql(mode: TestMode, options: GraphQLOptions) -> Result<Option<GraphQLWSConfig>> {
+    let has_graphql_options = options.operation.is_some()
+        || options.operation_name.is_some()
+        || options.variables.is_some()
+        || options.extensions.is_some();
+
+    if mode != TestMode::GraphQLWS {
+        if has_graphql_options {
+            return Err(ConfigError::UnsupportedOption(
+                "GraphQL WS options require --mode graphql-ws".to_string(),
+            )
+            .into());
+        }
+        return Ok(None);
+    }
+
+    let operation = options
+        .operation
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            ConfigError::InvalidOption(
+                "--mode graphql-ws requires --graphql-ws-operation <QUERY>".to_string(),
+            )
+        })?;
+
+    for (flag, value) in [
+        ("--graphql-ws-variables", &options.variables),
+        ("--graphql-ws-extensions", &options.extensions),
+    ] {
+        if value.as_ref().is_some_and(|value| !value.is_object()) {
+            return Err(
+                ConfigError::InvalidOption(format!("{flag} must contain a JSON object")).into(),
+            );
+        }
+    }
+
+    Ok(Some(GraphQLWSConfig {
+        operation_name: options.operation_name,
+        operation,
+        variables: options.variables,
+        extensions: options.extensions,
+    }))
 }
 
 /// Rule an echo wait uses to recognise the reply to the request in flight.
 ///
 /// Frames that do not match are counted as unsolicited and skipped; the wait
-/// still ends at the message timeout.
+/// still ends at the message timeout. Parses from the `--match` spelling:
+/// `first`, `exact` or `json:POINTER`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReplyMatch {
     /// The first text or binary frame after the send is the reply.
     #[default]
@@ -65,7 +533,7 @@ pub enum ReplyMatch {
 
 impl ReplyMatch {
     /// Renders the rule as it is spelled on the command line.
-    pub fn flag_value(&self) -> String {
+    pub(crate) fn flag_value(&self) -> String {
         match self {
             Self::First => "first".to_string(),
             Self::Exact => "exact".to_string(),
@@ -85,16 +553,20 @@ impl FromStr for ReplyMatch {
                 Some(pointer) if is_json_pointer(pointer) => {
                     Ok(Self::JsonPointer(pointer.to_string()))
                 }
-                Some(pointer) => Err(ConfigError::UnsupportedOption(format!(
-                    "--match json:{pointer}: '{pointer}' is not a valid RFC 6901 JSON pointer \
-                     (use '' or '/'-separated tokens, escaping '~' as '~0' and '/' as '~1')"
-                ))),
+                Some(pointer) => Err(invalid_json_pointer(pointer)),
                 None => Err(ConfigError::UnsupportedOption(format!(
                     "--match '{raw}' is not supported; use first, exact or json:<pointer>"
                 ))),
             },
         }
     }
+}
+
+fn invalid_json_pointer(pointer: &str) -> ConfigError {
+    ConfigError::UnsupportedOption(format!(
+        "--match json:{pointer}: '{pointer}' is not a valid RFC 6901 JSON pointer \
+         (use '' or '/'-separated tokens, escaping '~' as '~0' and '/' as '~1')"
+    ))
 }
 
 /// Checks RFC 6901 syntax: empty, or `/`-prefixed tokens where `~` only
@@ -152,7 +624,7 @@ fn validate_reply_match<'a>(
 
 /// Payload specification supporting zero-allocation cached frames or dynamic templating.
 #[derive(Debug, Clone)]
-pub enum PayloadConfig {
+pub(crate) enum PayloadConfig {
     /// Static UTF-8 text cached as Utf8Bytes for O(1) zero-allocation cloning.
     StaticText(Utf8Bytes),
     /// Dynamic text template requiring macro substitutions on each frame dispatch.
@@ -163,7 +635,7 @@ pub enum PayloadConfig {
 
 impl PayloadConfig {
     /// Classifies text payload into either a pre-allocated static frame or a dynamic template.
-    pub fn from_text(text: String) -> Self {
+    pub(crate) fn from_text(text: String) -> Self {
         if text.contains("{{") {
             Self::DynamicText(text)
         } else {
@@ -172,38 +644,98 @@ impl PayloadConfig {
     }
 }
 
-/// Service Level Objective thresholds for automated CI/CD pass/fail gating.
-#[derive(Debug, Clone, Default)]
+/// Service level objectives checked by [`evaluate_slos`](crate::evaluate_slos).
+///
+/// Every threshold is optional; an unset threshold is not checked. Latency
+/// thresholds apply to message round-trip time, which only
+/// [`TestMode::Echo`] measures.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct SloThresholds {
+    /// Highest acceptable median round-trip time.
     pub max_p50: Option<Duration>,
+    /// Highest acceptable 95th percentile round-trip time.
     pub max_p95: Option<Duration>,
+    /// Highest acceptable 99th percentile round-trip time.
     pub max_p99: Option<Duration>,
+    /// Highest acceptable 99.9th percentile round-trip time.
     pub max_p999: Option<Duration>,
+    /// Highest acceptable error rate, as a fraction between 0.0 and 1.0.
     pub max_error_rate: Option<f64>,
+    /// Lowest acceptable throughput in messages per second.
     pub min_throughput: Option<f64>,
+}
+
+impl SloThresholds {
+    /// Returns thresholds with nothing set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the highest acceptable median round-trip time.
+    #[must_use]
+    pub fn with_max_p50(mut self, max: Duration) -> Self {
+        self.max_p50 = Some(max);
+        self
+    }
+
+    /// Sets the highest acceptable 95th percentile round-trip time.
+    #[must_use]
+    pub fn with_max_p95(mut self, max: Duration) -> Self {
+        self.max_p95 = Some(max);
+        self
+    }
+
+    /// Sets the highest acceptable 99th percentile round-trip time.
+    #[must_use]
+    pub fn with_max_p99(mut self, max: Duration) -> Self {
+        self.max_p99 = Some(max);
+        self
+    }
+
+    /// Sets the highest acceptable 99.9th percentile round-trip time.
+    #[must_use]
+    pub fn with_max_p999(mut self, max: Duration) -> Self {
+        self.max_p999 = Some(max);
+        self
+    }
+
+    /// Sets the highest acceptable error rate, a fraction between 0.0 and 1.0.
+    #[must_use]
+    pub fn with_max_error_rate(mut self, max: f64) -> Self {
+        self.max_error_rate = Some(max);
+        self
+    }
+
+    /// Sets the lowest acceptable throughput in messages per second.
+    #[must_use]
+    pub fn with_min_throughput(mut self, min: f64) -> Self {
+        self.min_throughput = Some(min);
+        self
+    }
 }
 
 #[cfg(feature = "auth")]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
-pub enum AuthConfig {
+pub(crate) enum AuthConfig {
     Static { token: String, header: String },
     ApiKey { key: String, header: String },
 }
 
 #[cfg(feature = "graphql-ws")]
 #[derive(Debug, Clone)]
-pub struct GraphQLWSConfig {
-    pub operation_name: Option<String>,
-    pub operation: String,
-    pub variables: Option<serde_json::Value>,
-    pub extensions: Option<serde_json::Value>,
+pub(crate) struct GraphQLWSConfig {
+    pub(crate) operation_name: Option<String>,
+    pub(crate) operation: String,
+    pub(crate) variables: Option<serde_json::Value>,
+    pub(crate) extensions: Option<serde_json::Value>,
 }
 
 #[cfg(feature = "graphql-ws")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
-pub enum GraphQLWSMessage {
+pub(crate) enum GraphQLWSMessage {
     #[serde(rename = "connection_init")]
     ConnectionInit { payload: Option<serde_json::Value> },
     #[serde(rename = "connection_ack")]
@@ -251,61 +783,68 @@ pub enum GraphQLWSMessage {
 
 #[cfg(feature = "graphql-ws")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GraphQLWSStartPayload {
-    pub query: String,
+pub(crate) struct GraphQLWSStartPayload {
+    pub(crate) query: String,
     #[serde(rename = "operationName")]
-    pub operation_name: Option<String>,
-    pub variables: Option<serde_json::Value>,
-    pub extensions: Option<serde_json::Value>,
+    pub(crate) operation_name: Option<String>,
+    pub(crate) variables: Option<serde_json::Value>,
+    pub(crate) extensions: Option<serde_json::Value>,
 }
 
+/// A multi-phase load scenario, parsed and validated from YAML.
+///
+/// Load one with [`ScenarioConfig::load`] or [`ScenarioConfig::from_yaml`] and
+/// run it with [`ScenarioExecutor`](crate::ScenarioExecutor). The file format
+/// is described in `docs/scenarios.md`.
 #[cfg(feature = "scenario")]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScenarioConfig {
-    pub version: String,
+    pub(crate) version: String,
     /// Optional target endpoint for every phase. CLI `--url` takes precedence.
     #[serde(default)]
-    pub target: Option<String>,
-    pub metadata: ScenarioMeta,
-    pub phases: Vec<PhaseConfig>,
+    pub(crate) target: Option<String>,
+    pub(crate) metadata: ScenarioMeta,
+    pub(crate) phases: Vec<PhaseConfig>,
 }
 
 #[cfg(feature = "scenario")]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ScenarioMeta {
-    pub name: String,
-    pub description: Option<String>,
-    pub tags: Option<Vec<String>>,
+pub(crate) struct ScenarioMeta {
+    pub(crate) name: String,
+    #[allow(dead_code)]
+    pub(crate) description: Option<String>,
+    #[allow(dead_code)]
+    pub(crate) tags: Option<Vec<String>>,
 }
 
 #[cfg(feature = "scenario")]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PhaseConfig {
-    pub name: String,
+pub(crate) struct PhaseConfig {
+    pub(crate) name: String,
     /// Optional endpoint override for this phase.
     #[serde(default)]
-    pub target: Option<String>,
-    pub duration: String,
-    pub connections: usize,
+    pub(crate) target: Option<String>,
+    pub(crate) duration: String,
+    pub(crate) connections: usize,
     #[serde(default)]
-    pub ramp_rate: u64,
+    pub(crate) ramp_rate: u64,
     #[serde(default)]
-    pub rate_per_conn: u64,
+    pub(crate) rate_per_conn: u64,
     #[serde(default)]
-    pub payload: Option<String>,
+    pub(crate) payload: Option<String>,
     #[serde(default)]
-    pub think_time: Option<String>,
+    pub(crate) think_time: Option<String>,
     #[serde(default)]
-    pub actions: Vec<ActionConfig>,
+    pub(crate) actions: Vec<ActionConfig>,
 }
 
 #[cfg(feature = "scenario")]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
-pub enum ActionConfig {
+pub(crate) enum ActionConfig {
     Send {
         payload: Option<String>,
         #[serde(default)]
@@ -326,22 +865,23 @@ pub enum ActionConfig {
 /// Validated, execution-ready phase compiled from YAML.
 #[cfg(feature = "scenario")]
 #[derive(Debug, Clone)]
-pub struct ScenarioPhase {
-    pub name: String,
-    pub target: Option<Url>,
-    pub duration: Duration,
-    pub connections: usize,
-    pub ramp_rate: u64,
-    pub rate_per_conn: u64,
-    pub payload: Option<PayloadConfig>,
-    pub think_time: Duration,
-    pub actions: Vec<ScenarioAction>,
+pub(crate) struct ScenarioPhase {
+    pub(crate) name: String,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) target: Option<Url>,
+    pub(crate) duration: Duration,
+    pub(crate) connections: usize,
+    pub(crate) ramp_rate: u64,
+    pub(crate) rate_per_conn: u64,
+    pub(crate) payload: Option<PayloadConfig>,
+    pub(crate) think_time: Duration,
+    pub(crate) actions: Vec<ScenarioAction>,
 }
 
 /// Execution-ready action with parsed durations and payload templates.
 #[cfg(feature = "scenario")]
 #[derive(Debug, Clone)]
-pub enum ScenarioAction {
+pub(crate) enum ScenarioAction {
     Send {
         payload: Option<PayloadConfig>,
         count: u64,
@@ -367,14 +907,37 @@ impl ScenarioConfig {
             path: path.display().to_string(),
             source: e,
         })?;
-        let scenario: Self = serde_yaml::from_str(&content)
-            .map_err(|e| ConfigError::InvalidScenario(format!("{}: {e}", path.display())))?;
+        Self::parse(&content, Some(path))
+    }
+
+    /// Parses and validates a scenario from YAML text.
+    pub fn from_yaml(yaml: &str) -> Result<Self> {
+        Self::parse(yaml, None)
+    }
+
+    fn parse(yaml: &str, path: Option<&Path>) -> Result<Self> {
+        let scenario: Self = serde_yaml::from_str(yaml).map_err(|e| {
+            ConfigError::InvalidScenario(match path {
+                Some(path) => format!("{}: {e}", path.display()),
+                None => e.to_string(),
+            })
+        })?;
         scenario.validate()?;
         Ok(scenario)
     }
 
+    /// Scenario name from `metadata.name`.
+    pub fn name(&self) -> &str {
+        &self.metadata.name
+    }
+
+    /// Phase names in run order.
+    pub fn phase_names(&self) -> impl Iterator<Item = &str> {
+        self.phases.iter().map(|phase| phase.name.as_str())
+    }
+
     /// Validates scenario metadata, phase uniqueness, and every phase action.
-    pub fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.version != "1.0" {
             return Err(ConfigError::InvalidScenario(format!(
                 "unsupported version '{}', expected '1.0'",
@@ -420,7 +983,7 @@ impl ScenarioConfig {
     }
 
     /// Resolves the requested phase, defaulting to the first declared phase.
-    pub fn selected_phase(&self, name: Option<&str>) -> Result<&PhaseConfig> {
+    pub(crate) fn selected_phase(&self, name: Option<&str>) -> Result<&PhaseConfig> {
         match name {
             Some(name) => self
                 .phases
@@ -455,7 +1018,7 @@ impl ScenarioConfig {
     /// Returns [`ConfigError::InvalidScenario`] naming the first phase that
     /// has no target from any of the three sources, and URL errors for an
     /// unparsable or non-WebSocket target.
-    pub fn resolve_phase_targets(
+    pub(crate) fn resolve_phase_targets(
         &self,
         cli_url: Option<&str>,
         selected: Option<&str>,
@@ -483,7 +1046,7 @@ impl ScenarioConfig {
     }
 
     /// Compiles every phase, or only the named phase when `selected` is set.
-    pub fn compile(&self, selected: Option<&str>) -> Result<Vec<ScenarioPhase>> {
+    pub(crate) fn compile(&self, selected: Option<&str>) -> Result<Vec<ScenarioPhase>> {
         match selected {
             Some(_) => Ok(vec![ScenarioPhase::compile(
                 self.selected_phase(selected)?,
@@ -501,7 +1064,7 @@ impl ScenarioPhase {
     ///
     /// Returns [`ConfigError::InvalidScenario`] when durations, connection
     /// counts, action counts, or close codes are invalid.
-    pub fn compile(phase: &PhaseConfig) -> Result<Self> {
+    pub(crate) fn compile(phase: &PhaseConfig) -> Result<Self> {
         if phase.connections == 0 {
             return Err(invalid_phase(&phase.name, "connections must be greater than zero").into());
         }
@@ -550,7 +1113,7 @@ impl ScenarioAction {
     ///
     /// Returns [`ConfigError::InvalidScenario`] for unparsable durations, zero
     /// send counts, or close codes that RFC 6455 forbids endpoints to send.
-    pub fn compile(phase_name: &str, action: &ActionConfig) -> Result<Self> {
+    pub(crate) fn compile(phase_name: &str, action: &ActionConfig) -> Result<Self> {
         match action {
             ActionConfig::Send { payload, count } => {
                 let count = count.unwrap_or(1);
@@ -605,7 +1168,7 @@ impl ScenarioAction {
     }
 }
 
-#[cfg(feature = "scenario")]
+/// Parses a target URL and rejects schemes other than `ws` and `wss`.
 pub(crate) fn parse_target_url(raw: &str) -> Result<Url> {
     let url =
         Url::parse(raw).map_err(|e| ConfigError::InvalidUrl(raw.to_string(), e.to_string()))?;
@@ -707,13 +1270,18 @@ impl LoadTestConfig {
     /// - Custom headers violate HTTP specification.
     /// - Error rate threshold is not within the `[0.0, 1.0]` range.
     /// - Payload file cannot be read or contains non-UTF-8 data for text mode.
-    pub fn from_cli(cli: Cli) -> Result<Self> {
+    pub(crate) fn from_cli(cli: Cli) -> Result<Self> {
         Self::from_cli_with_target(cli, None)
     }
 
     /// Builds configuration from CLI arguments, optionally overriding the
     /// target URL with a value from a scenario file.
-    fn from_cli_with_target(cli: Cli, target_override: Option<String>) -> Result<Self> {
+    ///
+    /// The flags are converted into a [`LoadTestConfigBuilder`], so the CLI
+    /// and the library share one validation path. Checks that `build` also
+    /// runs are repeated here in flag order, so a command line with several
+    /// mistakes reports the same one first as before.
+    fn from_cli_with_target(mut cli: Cli, target_override: Option<String>) -> Result<Self> {
         let raw_url = target_override
             .or_else(|| cli.resolve_url().map(ToOwned::to_owned))
             .ok_or_else(|| {
@@ -723,24 +1291,9 @@ impl LoadTestConfig {
                 )
             })?;
 
-        let target_url = Url::parse(&raw_url)
-            .map_err(|e| ConfigError::InvalidUrl(raw_url.clone(), e.to_string()))?;
-
-        match target_url.scheme() {
-            "ws" | "wss" => {}
-            other => return Err(ConfigError::UnsupportedScheme(other.to_string()).into()),
-        }
-
-        if cli.connections == 0 {
-            return Err(ConfigError::ZeroConcurrency(0).into());
-        }
-
-        if let Some(0) = cli.requests {
-            return Err(ConfigError::InvalidOption(
-                "requests limit (-n) must be greater than zero".to_string(),
-            )
-            .into());
-        }
+        parse_target_url(&raw_url)?;
+        validate_connections(cli.connections)?;
+        validate_max_requests(cli.requests)?;
 
         let duration = parse_human_duration(&cli.duration)?;
         let connect_timeout = parse_human_duration(&cli.connect_timeout)?;
@@ -749,7 +1302,7 @@ impl LoadTestConfig {
         let reply_match: ReplyMatch = cli.reply_match.parse()?;
 
         #[cfg(feature = "graphql-ws")]
-        let graphql_ws = build_graphql_config(&cli)?;
+        let graphql = build_graphql_config(&cli)?;
 
         let payload = if let Some(path) = &cli.payload_file {
             let bytes = fs::read(path).map_err(|e| ConfigError::PayloadFile {
@@ -765,18 +1318,16 @@ impl LoadTestConfig {
                 })?;
                 PayloadConfig::from_text(text)
             }
-        } else if let Some(text) = cli.payload {
+        } else if let Some(text) = cli.payload.take() {
             if cli.binary {
                 PayloadConfig::Binary(Bytes::from(text.into_bytes()))
             } else {
                 PayloadConfig::from_text(text)
             }
         } else if cli.binary {
-            PayloadConfig::Binary(Bytes::from_static(b"wsblast-payload"))
+            PayloadConfig::Binary(Bytes::from_static(DEFAULT_BINARY_PAYLOAD))
         } else {
-            PayloadConfig::from_text(
-                r#"{"source":"wsblast","ts":"{{timestamp}}","seq":{{seq}}}"#.to_string(),
-            )
+            PayloadConfig::from_text(DEFAULT_TEXT_PAYLOAD.to_string())
         };
         validate_reply_match(&reply_match, cli.mode, std::iter::once(&payload))?;
 
@@ -811,113 +1362,42 @@ impl LoadTestConfig {
             min_throughput: cli.min_throughput,
         };
 
-        if let Some(err_rate) = slo.max_error_rate
-            && !(0.0..=1.0).contains(&err_rate)
-        {
-            return Err(ConfigError::InvalidThreshold(format!(
-                "max_error_rate must be between 0.0 and 1.0, received {err_rate}"
-            ))
-            .into());
+        let mut builder = LoadTestConfig::builder(raw_url)
+            .connections(cli.connections)
+            .ramp_rate(cli.ramp_rate)
+            .duration(duration)
+            .rate_per_connection(cli.rate)
+            .mode(cli.mode)
+            .connect_timeout(connect_timeout)
+            .message_timeout(message_timeout)
+            .ping_interval(ping_interval)
+            .reply_match(reply_match)
+            .slo(slo)
+            .output_format(cli.format)
+            .progress(!cli.no_progress)
+            .reconnect(!cli.no_reconnect);
+        builder.max_requests = cli.requests;
+        builder.payload = payload;
+        builder.headers = headers;
+        builder.subprotocol = cli.subprotocol.take();
+        #[cfg(feature = "graphql-ws")]
+        if let Some(graphql) = graphql {
+            builder.graphql = GraphQLOptions {
+                operation: Some(graphql.operation),
+                operation_name: graphql.operation_name,
+                variables: graphql.variables,
+                extensions: graphql.extensions,
+            };
         }
 
-        // Only echo mode measures round-trip time; any other mode would leave the
-        // RTT histogram empty and a latency budget could never be evaluated.
-        let has_latency_slo = slo.max_p50.is_some()
-            || slo.max_p95.is_some()
-            || slo.max_p99.is_some()
-            || slo.max_p999.is_some();
-        if has_latency_slo && cli.mode != TestMode::Echo {
-            return Err(ConfigError::UnsupportedOption(format!(
-                "latency SLOs (--max-p50/--max-p95/--max-p99/--max-p999) require --mode echo; {:?} mode does not measure round-trip time",
-                cli.mode
-            ))
-            .into());
-        }
-
+        let mut config = builder.build()?;
+        config.output_path = cli.output_file.take();
+        config.tui = cli.tui;
         #[cfg(feature = "auth")]
-        let auth = {
-            use crate::cli::AuthType;
-            match cli.auth_type {
-                AuthType::None => {
-                    if cli.auth_token.is_some() || cli.auth_apikey.is_some() {
-                        return Err(ConfigError::InvalidAuth(
-                            "authentication options require an explicit --auth-type".to_string(),
-                        )
-                        .into());
-                    }
-                    None
-                }
-                AuthType::Static => {
-                    let token = cli
-                        .auth_token
-                        .as_deref()
-                        .filter(|value| !value.is_empty())
-                        .ok_or_else(|| {
-                            ConfigError::InvalidAuth(
-                                "--auth-type static requires a non-empty --auth-token".to_string(),
-                            )
-                        })?;
-                    Some(AuthConfig::Static {
-                        token: token.to_string(),
-                        header: cli.auth_header.clone(),
-                    })
-                }
-                AuthType::ApiKey => {
-                    let key = cli
-                        .auth_apikey
-                        .as_deref()
-                        .filter(|value| !value.is_empty())
-                        .ok_or_else(|| {
-                            ConfigError::InvalidAuth(
-                                "--auth-type apikey requires a non-empty --auth-apikey".to_string(),
-                            )
-                        })?;
-                    Some(AuthConfig::ApiKey {
-                        key: key.to_string(),
-                        header: cli.auth_apikey_header.clone(),
-                    })
-                }
-            }
-        };
-
-        Ok(Self {
-            target_url,
-            connections: cli.connections,
-            ramp_rate: cli.ramp_rate,
-            duration,
-            max_requests: cli.requests,
-            rate_per_conn: cli.rate,
-            payload,
-            headers,
-            subprotocol: cli.subprotocol,
-            mode: cli.mode,
-            connect_timeout,
-            message_timeout,
-            ping_interval,
-            #[cfg(feature = "auth")]
-            auth,
-            #[cfg(feature = "graphql-ws")]
-            graphql_ws,
-            slo,
-            output_format: cli.format,
-            output_path: cli.output_file,
-            tui: cli.tui,
-            no_progress: cli.no_progress,
-            no_reconnect: cli.no_reconnect,
-            reply_match,
-        })
-    }
-
-    /// Builds a validated configuration from a scenario file's selected phase.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError`] when the scenario file is invalid or when CLI
-    /// validation fails.
-    #[cfg(feature = "scenario")]
-    pub fn from_scenario(path: &Path, cli: &Cli) -> Result<Self> {
-        let scenario = ScenarioConfig::load(path)?;
-        Self::from_scenario_config(&scenario, cli)
+        {
+            config.auth = auth_from_cli(&cli)?;
+        }
+        Ok(config)
     }
 
     /// Builds a validated configuration from an already parsed scenario.
@@ -931,7 +1411,7 @@ impl LoadTestConfig {
     /// Returns [`ConfigError`] when the requested phase does not exist, when
     /// phase values are invalid, or when CLI validation fails.
     #[cfg(feature = "scenario")]
-    pub fn from_scenario_config(scenario: &ScenarioConfig, cli: &Cli) -> Result<Self> {
+    pub(crate) fn from_scenario_config(scenario: &ScenarioConfig, cli: &Cli) -> Result<Self> {
         if cli.tui {
             return Err(ConfigError::UnsupportedOption(
                 "the interactive TUI is not supported with --scenario; use the standard progress output"
@@ -974,6 +1454,53 @@ impl LoadTestConfig {
         }
 
         Ok(config)
+    }
+}
+
+/// Validates the authentication flags and returns the configured method.
+#[cfg(feature = "auth")]
+fn auth_from_cli(cli: &Cli) -> Result<Option<AuthConfig>> {
+    use crate::cli::AuthType;
+    match cli.auth_type {
+        AuthType::None => {
+            if cli.auth_token.is_some() || cli.auth_apikey.is_some() {
+                return Err(ConfigError::InvalidAuth(
+                    "authentication options require an explicit --auth-type".to_string(),
+                )
+                .into());
+            }
+            Ok(None)
+        }
+        AuthType::Static => {
+            let token = cli
+                .auth_token
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    ConfigError::InvalidAuth(
+                        "--auth-type static requires a non-empty --auth-token".to_string(),
+                    )
+                })?;
+            Ok(Some(AuthConfig::Static {
+                token: token.to_string(),
+                header: cli.auth_header.clone(),
+            }))
+        }
+        AuthType::ApiKey => {
+            let key = cli
+                .auth_apikey
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    ConfigError::InvalidAuth(
+                        "--auth-type apikey requires a non-empty --auth-apikey".to_string(),
+                    )
+                })?;
+            Ok(Some(AuthConfig::ApiKey {
+                key: key.to_string(),
+                header: cli.auth_apikey_header.clone(),
+            }))
+        }
     }
 }
 
@@ -1036,7 +1563,7 @@ fn scale_duration(value: &str, nanos_per_unit: u64) -> Option<Duration> {
 }
 
 /// Parses a header string into (HeaderName, HeaderValue).
-pub fn parse_header_pair(header: &str) -> Result<(HeaderName, HeaderValue)> {
+pub(crate) fn parse_header_pair(header: &str) -> Result<(HeaderName, HeaderValue)> {
     let parts: Vec<&str> = header.splitn(2, ':').collect();
     if parts.len() != 2 {
         return Err(ConfigError::InvalidHeader(header.to_string()).into());
@@ -1140,6 +1667,15 @@ mod tests {
         ) {
             let _ = parse_human_duration(&input);
         }
+    }
+
+    #[test]
+    fn text_payloads_are_static_unless_they_carry_placeholders() {
+        let static_p = PayloadConfig::from_text("plain text without macros".to_string());
+        assert!(matches!(static_p, PayloadConfig::StaticText(_)));
+
+        let dynamic_p = PayloadConfig::from_text(r#"{"seq": {{seq}}}"#.to_string());
+        assert!(matches!(dynamic_p, PayloadConfig::DynamicText(_)));
     }
 
     #[test]

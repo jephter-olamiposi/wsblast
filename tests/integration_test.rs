@@ -1,27 +1,17 @@
 //! End-to-end integration test suite verifying load orchestration, metrics, SLOs, and error taxonomy.
 
 use futures_util::{SinkExt, StreamExt};
-use http::header::HeaderMap;
-#[cfg(not(feature = "auth"))]
-use http::header::{HeaderName, HeaderValue};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use url::Url;
-use wsblast::cli::{OutputFormat, TestMode};
-#[cfg(feature = "graphql-ws")]
-use wsblast::config::GraphQLWSConfig;
-#[cfg(feature = "scenario")]
-use wsblast::config::{
-    ActionConfig, PhaseConfig, ScenarioAction, ScenarioConfig, ScenarioMeta, ScenarioPhase,
+use wsblast::{
+    AggregatedMetrics, ErrorCategory, LoadTestConfig, LoadTestConfigBuilder, OutputFormat,
+    ReplyMatch, Runner, SloThresholds, TestMode, evaluate_slos, render_report,
 };
-use wsblast::config::{LoadTestConfig, PayloadConfig, ReplyMatch, SloThresholds};
-use wsblast::error::ErrorCategory;
-use wsblast::report::{evaluate_slos, render_report};
-use wsblast::runner::Runner;
 #[cfg(feature = "scenario")]
-use wsblast::runner::ScenarioExecutor;
+use wsblast::{ScenarioConfig, ScenarioExecutor};
 
 /// Spawns an in-process WebSocket echo server on an ephemeral OS port.
 async fn spawn_echo_server() -> (Url, tokio_util::sync::CancellationToken) {
@@ -71,7 +61,7 @@ async fn spawn_echo_server() -> (Url, tokio_util::sync::CancellationToken) {
 
 /// Asserts every reply was matched to a request, allowing one unanswered
 /// request per connection that was still in flight when the run was cancelled.
-fn assert_in_flight_at_most(metrics: &wsblast::metrics::AggregatedMetrics, connections: u64) {
+fn assert_in_flight_at_most(metrics: &AggregatedMetrics, connections: u64) {
     assert!(
         metrics.total_messages_recv <= metrics.total_messages_sent
             && metrics.total_messages_sent - metrics.total_messages_recv <= connections,
@@ -174,39 +164,30 @@ async fn spawn_graphql_ws_server(
     (target_url, cancel)
 }
 
+/// Echo configuration shared by every test: one connection for one second
+/// with 2 second timeouts and no progress bar. Tests override what they vary.
+fn echo_test_config(target_url: &Url) -> LoadTestConfigBuilder {
+    LoadTestConfig::builder(target_url.as_str())
+        .connections(1)
+        .duration(Duration::from_secs(1))
+        .payload_text("keepalive-test")
+        .connect_timeout(Duration::from_secs(2))
+        .message_timeout(Duration::from_secs(2))
+}
+
+async fn run(config: LoadTestConfigBuilder) -> AggregatedMetrics {
+    Runner::new(config.build().unwrap()).run().await.unwrap()
+}
+
 #[tokio::test]
 async fn test_echo_mode_load_run() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
-    let config = LoadTestConfig {
-        target_url,
-        connections: 10,
-        ramp_rate: 0,
-        duration: Duration::from_millis(800),
-        max_requests: None,
-        rate_per_conn: 0,
-        payload: PayloadConfig::from_text(r#"{"msg":"test","seq":{{seq}}}"#.to_string()),
-        headers: HeaderMap::new(),
-        subprotocol: None,
-        mode: TestMode::Echo,
-        connect_timeout: Duration::from_secs(2),
-        message_timeout: Duration::from_secs(2),
-        ping_interval: Duration::ZERO,
-        #[cfg(feature = "auth")]
-        auth: None,
-        #[cfg(feature = "graphql-ws")]
-        graphql_ws: None,
-        slo: SloThresholds::default(),
-        output_format: OutputFormat::Text,
-        output_path: None,
-        tui: false,
-        no_progress: true,
-        no_reconnect: false,
-        reply_match: ReplyMatch::First,
-    };
-
-    let runner = Runner::new(config.clone());
-    let metrics = runner.run().await.unwrap();
+    let metrics = run(echo_test_config(&target_url)
+        .connections(10)
+        .duration(Duration::from_millis(800))
+        .payload_text(r#"{"msg":"test","seq":{{seq}}}"#))
+    .await;
 
     assert_eq!(metrics.total_connections_attempted, 10);
     assert_eq!(metrics.total_connections_established, 10);
@@ -225,51 +206,29 @@ async fn test_echo_mode_load_run() {
 async fn test_slo_evaluation_pass_and_fail() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
-    let config = LoadTestConfig {
-        target_url,
-        connections: 5,
-        ramp_rate: 0,
-        duration: Duration::from_millis(500),
-        max_requests: None,
-        rate_per_conn: 0,
-        payload: PayloadConfig::from_text("ping".to_string()),
-        headers: HeaderMap::new(),
-        subprotocol: None,
-        mode: TestMode::Echo,
-        connect_timeout: Duration::from_secs(2),
-        message_timeout: Duration::from_secs(2),
-        ping_interval: Duration::ZERO,
-        #[cfg(feature = "auth")]
-        auth: None,
-        #[cfg(feature = "graphql-ws")]
-        graphql_ws: None,
-        slo: SloThresholds {
-            max_p50: Some(Duration::from_secs(1)),
-            max_p95: Some(Duration::from_secs(2)),
-            max_p99: Some(Duration::from_secs(3)),
-            max_p999: None,
-            max_error_rate: Some(0.01),
-            min_throughput: Some(1.0),
-        },
-        output_format: OutputFormat::Json,
-        output_path: None,
-        tui: false,
-        no_progress: true,
-        no_reconnect: false,
-        reply_match: ReplyMatch::First,
-    };
+    let config = echo_test_config(&target_url)
+        .connections(5)
+        .duration(Duration::from_millis(500))
+        .payload_text("ping")
+        .slo(
+            SloThresholds::new()
+                .with_max_p50(Duration::from_secs(1))
+                .with_max_p95(Duration::from_secs(2))
+                .with_max_p99(Duration::from_secs(3))
+                .with_max_error_rate(0.01)
+                .with_min_throughput(1.0),
+        )
+        .output_format(OutputFormat::Json)
+        .build()
+        .unwrap();
 
-    let runner = Runner::new(config.clone());
-    let metrics = runner.run().await.unwrap();
+    let metrics = Runner::new(config.clone()).run().await.unwrap();
 
-    let pass_eval = evaluate_slos(&config.slo, &metrics);
+    let pass_eval = evaluate_slos(config.slo(), &metrics);
     assert!(pass_eval.passed);
     assert_eq!(pass_eval.checks.len(), 5);
 
-    let failing_slo = SloThresholds {
-        max_p50: Some(Duration::from_nanos(1)),
-        ..Default::default()
-    };
+    let failing_slo = SloThresholds::new().with_max_p50(Duration::from_nanos(1));
     let fail_eval = evaluate_slos(&failing_slo, &metrics);
     assert!(!fail_eval.passed);
 
@@ -280,36 +239,20 @@ async fn test_slo_evaluation_pass_and_fail() {
 async fn test_json_and_markdown_report_formatting() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
-    let mut config = LoadTestConfig {
-        target_url,
-        connections: 2,
-        ramp_rate: 0,
-        duration: Duration::from_millis(300),
-        max_requests: None,
-        rate_per_conn: 0,
-        payload: PayloadConfig::from_text("hello".to_string()),
-        headers: HeaderMap::new(),
-        subprotocol: None,
-        mode: TestMode::Echo,
-        connect_timeout: Duration::from_secs(1),
-        message_timeout: Duration::from_secs(1),
-        ping_interval: Duration::ZERO,
-        #[cfg(feature = "auth")]
-        auth: None,
-        #[cfg(feature = "graphql-ws")]
-        graphql_ws: None,
-        slo: SloThresholds::default(),
-        output_format: OutputFormat::Json,
-        output_path: None,
-        tui: false,
-        no_progress: true,
-        no_reconnect: false,
-        reply_match: ReplyMatch::First,
-    };
+    let builder = echo_test_config(&target_url)
+        .connections(2)
+        .duration(Duration::from_millis(300))
+        .payload_text("hello")
+        .connect_timeout(Duration::from_secs(1))
+        .message_timeout(Duration::from_secs(1));
+    let config = builder
+        .clone()
+        .output_format(OutputFormat::Json)
+        .build()
+        .unwrap();
 
-    let runner = Runner::new(config.clone());
-    let metrics = runner.run().await.unwrap();
-    let slo = evaluate_slos(&config.slo, &metrics);
+    let metrics = Runner::new(config.clone()).run().await.unwrap();
+    let slo = evaluate_slos(config.slo(), &metrics);
 
     let json_str = render_report(&config, &metrics, &slo);
     let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("Valid JSON report");
@@ -321,7 +264,10 @@ async fn test_json_and_markdown_report_formatting() {
             > 0.0
     );
 
-    config.output_format = OutputFormat::Markdown;
+    let config = builder
+        .output_format(OutputFormat::Markdown)
+        .build()
+        .unwrap();
     let md_str = render_report(&config, &metrics, &slo);
     assert!(md_str.contains("# `wsblast` WebSocket Benchmark Report"));
     assert!(md_str.contains("Latency Distribution"));
@@ -333,34 +279,14 @@ async fn test_json_and_markdown_report_formatting() {
 async fn test_error_taxonomy_when_target_offline() {
     let dead_url = Url::parse("ws://127.0.0.1:59998").unwrap();
 
-    let config = LoadTestConfig {
-        target_url: dead_url,
-        connections: 4,
-        ramp_rate: 0,
-        duration: Duration::from_millis(300),
-        max_requests: None,
-        rate_per_conn: 0,
-        payload: PayloadConfig::from_text("test".to_string()),
-        headers: HeaderMap::new(),
-        subprotocol: None,
-        mode: TestMode::Echo,
-        connect_timeout: Duration::from_millis(200),
-        message_timeout: Duration::from_millis(200),
-        ping_interval: Duration::ZERO,
-        #[cfg(feature = "auth")]
-        auth: None,
-        #[cfg(feature = "graphql-ws")]
-        graphql_ws: None,
-        slo: SloThresholds::default(),
-        output_format: OutputFormat::Text,
-        output_path: None,
-        tui: false,
-        no_progress: true,
-        no_reconnect: false,
-        reply_match: ReplyMatch::First,
-    };
+    let config = echo_test_config(&dead_url)
+        .connections(4)
+        .duration(Duration::from_millis(300))
+        .payload_text("test")
+        .connect_timeout(Duration::from_millis(200))
+        .message_timeout(Duration::from_millis(200));
 
-    let connect_errors = |metrics: &wsblast::metrics::AggregatedMetrics| {
+    let connect_errors = |metrics: &AggregatedMetrics| {
         let tcp_errs = metrics
             .error_breakdown
             .get(&ErrorCategory::TcpConnect)
@@ -379,7 +305,7 @@ async fn test_error_taxonomy_when_target_offline() {
     // Workers retry with backoff until the duration ends, so every slot logs
     // at least one connect failure and the run still stops on schedule.
     let start = std::time::Instant::now();
-    let metrics = Runner::new(config.clone()).run().await.unwrap();
+    let metrics = run(config.clone()).await;
     assert!(start.elapsed() < Duration::from_secs(2));
 
     assert_eq!(metrics.total_connections_attempted, 4);
@@ -390,9 +316,7 @@ async fn test_error_taxonomy_when_target_offline() {
     assert!(connect_errors(&metrics) >= 4);
 
     // Without reconnects each worker makes exactly one attempt.
-    let mut config = config;
-    config.no_reconnect = true;
-    let metrics = Runner::new(config).run().await.unwrap();
+    let metrics = run(config.reconnect(false)).await;
     assert_eq!(metrics.total_connections_failed, 4);
     assert_eq!(connect_errors(&metrics), 4);
 }
@@ -432,51 +356,13 @@ async fn test_custom_headers_propagation() {
         }
     });
 
-    let mut headers = HeaderMap::new();
-    #[cfg(feature = "auth")]
-    wsblast::auth::apply_auth_header(
-        &mut headers,
-        &wsblast::config::AuthConfig::Static {
-            token: "secret-token-xyz".to_string(),
-            header: "Authorization".to_string(),
-        },
-    )
-    .unwrap();
-    #[cfg(not(feature = "auth"))]
-    headers.insert(
-        HeaderName::from_static("authorization"),
-        HeaderValue::from_static("Bearer secret-token-xyz"),
-    );
-
-    let config = LoadTestConfig {
-        target_url,
-        connections: 1,
-        ramp_rate: 0,
-        duration: Duration::from_millis(500),
-        max_requests: None,
-        rate_per_conn: 0,
-        payload: PayloadConfig::from_text("auth-test".to_string()),
-        headers,
-        subprotocol: None,
-        mode: TestMode::Echo,
-        connect_timeout: Duration::from_secs(1),
-        message_timeout: Duration::from_secs(1),
-        ping_interval: Duration::ZERO,
-        #[cfg(feature = "auth")]
-        auth: None,
-        #[cfg(feature = "graphql-ws")]
-        graphql_ws: None,
-        slo: SloThresholds::default(),
-        output_format: OutputFormat::Text,
-        output_path: None,
-        tui: false,
-        no_progress: true,
-        no_reconnect: false,
-        reply_match: ReplyMatch::First,
-    };
-
-    let runner = Runner::new(config);
-    let metrics = runner.run().await.unwrap();
+    let metrics = run(echo_test_config(&target_url)
+        .duration(Duration::from_millis(500))
+        .payload_text("auth-test")
+        .connect_timeout(Duration::from_secs(1))
+        .message_timeout(Duration::from_secs(1))
+        .header("Authorization", "Bearer secret-token-xyz"))
+    .await;
 
     assert_eq!(metrics.total_connections_established, 1);
     assert_eq!(metrics.total_connections_failed, 0);
@@ -488,8 +374,6 @@ async fn test_custom_headers_propagation() {
 #[tokio::test]
 #[allow(clippy::result_large_err)]
 async fn test_repeated_headers_reach_server() {
-    use clap::Parser;
-
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
     let cancel = tokio_util::sync::CancellationToken::new();
@@ -525,24 +409,14 @@ async fn test_repeated_headers_reach_server() {
     });
 
     let target = format!("ws://127.0.0.1:{}", addr.port());
-    let cli = wsblast::cli::Cli::parse_from([
-        "wsblast",
-        target.as_str(),
-        "-c",
-        "1",
-        "-d",
-        "300ms",
-        "-H",
-        "X-Test: a",
-        "-H",
-        "X-Test: b",
-        "-H",
-        "Host: wsblast.test",
-        "--no-progress",
-    ]);
-    let config = LoadTestConfig::from_cli(cli).unwrap();
+    let config = LoadTestConfig::builder(target)
+        .connections(1)
+        .duration(Duration::from_millis(300))
+        .header("X-Test", "a")
+        .header("X-Test", "b")
+        .header("Host", "wsblast.test");
 
-    let metrics = Runner::new(config).run().await.unwrap();
+    let metrics = run(config).await;
     assert_eq!(metrics.total_connections_established, 1);
 
     let (x_test, host) = tokio::time::timeout(Duration::from_secs(1), seen_rx)
@@ -555,43 +429,85 @@ async fn test_repeated_headers_reach_server() {
     cancel.cancel();
 }
 
+#[test]
+fn test_builder_rejects_invalid_settings() {
+    let target = "ws://127.0.0.1:9001";
+    let message = |builder: LoadTestConfigBuilder| builder.build().unwrap_err().to_string();
+
+    assert!(message(LoadTestConfig::builder("http://127.0.0.1:9001")).contains("scheme"));
+    assert!(message(LoadTestConfig::builder("not a url")).contains("Invalid target URL"));
+    assert!(message(LoadTestConfig::builder(target).connections(0)).contains("greater than zero"));
+    assert!(message(LoadTestConfig::builder(target).max_requests(0)).contains("requests limit"));
+    assert!(message(LoadTestConfig::builder(target).header("bad header", "x")).contains("header"));
+    assert!(
+        message(LoadTestConfig::builder(target).slo(SloThresholds::new().with_max_error_rate(1.5)))
+            .contains("max_error_rate")
+    );
+    assert!(
+        message(
+            LoadTestConfig::builder(target)
+                .mode(TestMode::Stream)
+                .slo(SloThresholds::new().with_max_p99(Duration::from_millis(5)))
+        )
+        .contains("require --mode echo")
+    );
+    assert!(
+        message(
+            LoadTestConfig::builder(target)
+                .payload_text("ping")
+                .reply_match("json:/seq".parse().unwrap())
+        )
+        .contains("{{seq}}")
+    );
+    assert!(
+        message(
+            LoadTestConfig::builder(target)
+                .reply_match(ReplyMatch::Exact)
+                .mode(TestMode::Listen)
+        )
+        .contains("--mode echo")
+    );
+}
+
+#[test]
+fn test_builder_defaults_match_the_command_line() {
+    let config = LoadTestConfig::builder("ws://127.0.0.1:9001")
+        .build()
+        .unwrap();
+
+    assert_eq!(config.target_url().as_str(), "ws://127.0.0.1:9001/");
+    assert_eq!(config.connections(), 50);
+    assert_eq!(config.duration(), Duration::from_secs(10));
+    assert_eq!(config.ramp_rate(), 0);
+    assert_eq!(config.rate_per_connection(), 0);
+    assert_eq!(config.max_requests(), None);
+    assert_eq!(config.mode(), TestMode::Echo);
+    assert_eq!(config.connect_timeout(), Duration::from_secs(5));
+    assert_eq!(config.message_timeout(), Duration::from_secs(5));
+    assert_eq!(config.ping_interval(), Duration::ZERO);
+    assert_eq!(config.reply_match(), &ReplyMatch::First);
+    assert_eq!(config.output_format(), OutputFormat::Text);
+    assert_eq!(config.slo(), &SloThresholds::default());
+    assert!(config.reconnect());
+    assert!(!config.progress());
+    assert!(config.headers().is_empty());
+    assert_eq!(config.subprotocol(), None);
+}
+
 #[cfg(feature = "graphql-ws")]
 #[tokio::test]
 async fn test_graphql_ws_subscription_lifecycle() {
     let (target_url, cancel) = spawn_graphql_ws_server(true).await;
 
-    let config = LoadTestConfig {
-        target_url,
-        connections: 1,
-        ramp_rate: 0,
-        duration: Duration::from_millis(500),
-        max_requests: None,
-        rate_per_conn: 10,
-        payload: PayloadConfig::from_text("{}".to_string()),
-        headers: HeaderMap::new(),
-        subprotocol: Some("graphql-transport-ws".to_string()),
-        mode: TestMode::GraphQLWS,
-        connect_timeout: Duration::from_secs(2),
-        message_timeout: Duration::from_secs(2),
-        ping_interval: Duration::ZERO,
-        #[cfg(feature = "auth")]
-        auth: None,
-        graphql_ws: Some(GraphQLWSConfig {
-            operation_name: Some("Price".to_string()),
-            operation: "subscription Price { price }".to_string(),
-            variables: None,
-            extensions: None,
-        }),
-        slo: SloThresholds::default(),
-        output_format: OutputFormat::Text,
-        output_path: None,
-        tui: false,
-        no_progress: true,
-        no_reconnect: false,
-        reply_match: ReplyMatch::First,
-    };
-
-    let metrics = Runner::new(config).run().await.unwrap();
+    let metrics = run(echo_test_config(&target_url)
+        .duration(Duration::from_millis(500))
+        .rate_per_connection(10)
+        .payload_text("{}")
+        .subprotocol("graphql-transport-ws")
+        .mode(TestMode::GraphQLWS)
+        .graphql_operation_name("Price")
+        .graphql_operation("subscription Price { price }"))
+    .await;
 
     assert_eq!(
         metrics.total_connections_established, 1,
@@ -608,39 +524,42 @@ async fn test_graphql_ws_subscription_lifecycle() {
     cancel.cancel();
 }
 
+#[cfg(feature = "graphql-ws")]
+#[test]
+fn test_builder_validates_graphql_options() {
+    let target = "ws://127.0.0.1:9001";
+    let message = |builder: LoadTestConfigBuilder| builder.build().unwrap_err().to_string();
+
+    assert!(
+        message(LoadTestConfig::builder(target).graphql_operation("subscription { a }"))
+            .contains("--mode graphql-ws")
+    );
+    assert!(
+        message(LoadTestConfig::builder(target).mode(TestMode::GraphQLWS))
+            .contains("--graphql-ws-operation")
+    );
+    assert!(
+        message(
+            LoadTestConfig::builder(target)
+                .mode(TestMode::GraphQLWS)
+                .graphql_operation("subscription { a }")
+                .graphql_variables(serde_json::json!([1, 2]))
+        )
+        .contains("JSON object")
+    );
+}
+
 #[tokio::test]
 async fn test_connection_ramp_rate() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
-    let config = LoadTestConfig {
-        target_url,
-        connections: 5,
-        ramp_rate: 20, // 20 conns/sec -> 50ms delay between worker spawns
-        duration: Duration::from_millis(600),
-        max_requests: None,
-        rate_per_conn: 0,
-        payload: PayloadConfig::from_text("static-frame".to_string()),
-        headers: HeaderMap::new(),
-        subprotocol: None,
-        mode: TestMode::Echo,
-        connect_timeout: Duration::from_secs(2),
-        message_timeout: Duration::from_secs(2),
-        ping_interval: Duration::ZERO,
-        #[cfg(feature = "auth")]
-        auth: None,
-        #[cfg(feature = "graphql-ws")]
-        graphql_ws: None,
-        slo: SloThresholds::default(),
-        output_format: OutputFormat::Text,
-        output_path: None,
-        tui: false,
-        no_progress: true,
-        no_reconnect: false,
-        reply_match: ReplyMatch::First,
-    };
-
-    let runner = Runner::new(config);
-    let metrics = runner.run().await.unwrap();
+    // 20 conns/sec -> 50ms delay between worker spawns
+    let metrics = run(echo_test_config(&target_url)
+        .connections(5)
+        .ramp_rate(20)
+        .duration(Duration::from_millis(600))
+        .payload_text("static-frame"))
+    .await;
 
     assert_eq!(metrics.total_connections_established, 5);
     assert!(metrics.total_messages_sent > 0);
@@ -652,35 +571,14 @@ async fn test_connection_ramp_rate() {
 async fn test_duration_includes_connection_ramp() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
-    let config = LoadTestConfig {
-        target_url,
-        connections: 5,
-        ramp_rate: 5,
-        duration: Duration::from_millis(600),
-        max_requests: None,
-        rate_per_conn: 0,
-        payload: PayloadConfig::from_text("static-frame".to_string()),
-        headers: HeaderMap::new(),
-        subprotocol: None,
-        mode: TestMode::Echo,
-        connect_timeout: Duration::from_secs(2),
-        message_timeout: Duration::from_secs(2),
-        ping_interval: Duration::ZERO,
-        #[cfg(feature = "auth")]
-        auth: None,
-        #[cfg(feature = "graphql-ws")]
-        graphql_ws: None,
-        slo: SloThresholds::default(),
-        output_format: OutputFormat::Text,
-        output_path: None,
-        tui: false,
-        no_progress: true,
-        no_reconnect: false,
-        reply_match: ReplyMatch::First,
-    };
+    let config = echo_test_config(&target_url)
+        .connections(5)
+        .ramp_rate(5)
+        .duration(Duration::from_millis(600))
+        .payload_text("static-frame");
 
     let started = std::time::Instant::now();
-    let metrics = Runner::new(config).run().await.unwrap();
+    let metrics = run(config).await;
     let wall = started.elapsed();
 
     assert!(
@@ -702,11 +600,11 @@ async fn test_duration_includes_connection_ramp() {
 async fn test_slots_the_ramp_never_reaches_are_not_failures() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
-    let mut config = echo_test_config(target_url);
-    config.connections = 10;
-    config.ramp_rate = 5;
-    config.duration = Duration::from_millis(600);
-    let metrics = Runner::new(config).run().await.unwrap();
+    let metrics = run(echo_test_config(&target_url)
+        .connections(10)
+        .ramp_rate(5)
+        .duration(Duration::from_millis(600)))
+    .await;
 
     assert_eq!(metrics.total_connections_attempted, 10);
     assert!(
@@ -737,10 +635,12 @@ async fn test_progress_bar_does_not_extend_elapsed() {
     // 250ms sits between two progress refreshes, where a fixed sleep in the
     // progress loop would overshoot by about 50ms.
     let duration = Duration::from_millis(250);
-    for no_progress in [true, false] {
-        let mut config = echo_test_config(target_url.clone());
-        config.duration = duration;
-        config.no_progress = no_progress;
+    for progress in [false, true] {
+        let config = echo_test_config(&target_url)
+            .duration(duration)
+            .progress(progress)
+            .build()
+            .unwrap();
         let metrics = Runner::new(config)
             .with_signal_handling(false)
             .run()
@@ -750,7 +650,7 @@ async fn test_progress_bar_does_not_extend_elapsed() {
         let overshoot = metrics.elapsed.saturating_sub(duration);
         assert!(
             metrics.elapsed >= duration && overshoot < Duration::from_millis(20),
-            "no_progress={no_progress}: elapsed {:?} for a {duration:?} run",
+            "progress={progress}: elapsed {:?} for a {duration:?} run",
             metrics.elapsed
         );
     }
@@ -758,50 +658,19 @@ async fn test_progress_bar_does_not_extend_elapsed() {
     cancel_server.cancel();
 }
 
-#[test]
-fn test_payload_config_classification() {
-    let static_p = PayloadConfig::from_text("plain text without macros".to_string());
-    assert!(matches!(static_p, PayloadConfig::StaticText(_)));
-
-    let dynamic_p = PayloadConfig::from_text(r#"{"seq": {{seq}}}"#.to_string());
-    assert!(matches!(dynamic_p, PayloadConfig::DynamicText(_)));
-}
-
 #[tokio::test]
 async fn test_requests_limit_enforcement() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
     // Set duration to 30 seconds, but cap requests at 30
-    let config = LoadTestConfig {
-        target_url,
-        connections: 3,
-        ramp_rate: 0,
-        duration: Duration::from_secs(30),
-        max_requests: Some(30),
-        rate_per_conn: 0,
-        payload: PayloadConfig::from_text("req-limit-test".to_string()),
-        headers: HeaderMap::new(),
-        subprotocol: None,
-        mode: TestMode::Echo,
-        connect_timeout: Duration::from_secs(2),
-        message_timeout: Duration::from_secs(2),
-        ping_interval: Duration::ZERO,
-        #[cfg(feature = "auth")]
-        auth: None,
-        #[cfg(feature = "graphql-ws")]
-        graphql_ws: None,
-        slo: SloThresholds::default(),
-        output_format: OutputFormat::Text,
-        output_path: None,
-        tui: false,
-        no_progress: true,
-        no_reconnect: false,
-        reply_match: ReplyMatch::First,
-    };
+    let config = echo_test_config(&target_url)
+        .connections(3)
+        .duration(Duration::from_secs(30))
+        .max_requests(30)
+        .payload_text("req-limit-test");
 
     let start = std::time::Instant::now();
-    let runner = Runner::new(config);
-    let metrics = runner.run().await.unwrap();
+    let metrics = run(config).await;
     let elapsed = start.elapsed();
 
     // Must finish well under the 30s configured duration
@@ -816,35 +685,13 @@ async fn test_requests_limit_enforcement() {
 async fn test_stream_mode_load_run() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
-    let config = LoadTestConfig {
-        target_url,
-        connections: 4,
-        ramp_rate: 0,
-        duration: Duration::from_millis(500),
-        max_requests: None,
-        rate_per_conn: 200,
-        payload: PayloadConfig::from_text("stream-data".to_string()),
-        headers: HeaderMap::new(),
-        subprotocol: None,
-        mode: TestMode::Stream,
-        connect_timeout: Duration::from_secs(2),
-        message_timeout: Duration::from_secs(2),
-        ping_interval: Duration::ZERO,
-        #[cfg(feature = "auth")]
-        auth: None,
-        #[cfg(feature = "graphql-ws")]
-        graphql_ws: None,
-        slo: SloThresholds::default(),
-        output_format: OutputFormat::Text,
-        output_path: None,
-        tui: false,
-        no_progress: true,
-        no_reconnect: false,
-        reply_match: ReplyMatch::First,
-    };
-
-    let runner = Runner::new(config);
-    let metrics = runner.run().await.unwrap();
+    let metrics = run(echo_test_config(&target_url)
+        .connections(4)
+        .duration(Duration::from_millis(500))
+        .rate_per_connection(200)
+        .payload_text("stream-data")
+        .mode(TestMode::Stream))
+    .await;
 
     assert_eq!(metrics.total_connections_established, 4);
     assert!(metrics.total_messages_sent > 10);
@@ -857,35 +704,11 @@ async fn test_stream_mode_load_run() {
 async fn test_binary_payload_dispatch() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
-    let config = LoadTestConfig {
-        target_url,
-        connections: 2,
-        ramp_rate: 0,
-        duration: Duration::from_millis(400),
-        max_requests: None,
-        rate_per_conn: 0,
-        payload: PayloadConfig::Binary(bytes::Bytes::from_static(b"\x00\x01\x02\x03\x04\x05")),
-        headers: HeaderMap::new(),
-        subprotocol: None,
-        mode: TestMode::Echo,
-        connect_timeout: Duration::from_secs(2),
-        message_timeout: Duration::from_secs(2),
-        ping_interval: Duration::ZERO,
-        #[cfg(feature = "auth")]
-        auth: None,
-        #[cfg(feature = "graphql-ws")]
-        graphql_ws: None,
-        slo: SloThresholds::default(),
-        output_format: OutputFormat::Text,
-        output_path: None,
-        tui: false,
-        no_progress: true,
-        no_reconnect: false,
-        reply_match: ReplyMatch::First,
-    };
-
-    let runner = Runner::new(config);
-    let metrics = runner.run().await.unwrap();
+    let metrics = run(echo_test_config(&target_url)
+        .connections(2)
+        .duration(Duration::from_millis(400))
+        .payload_binary(bytes::Bytes::from_static(b"\x00\x01\x02\x03\x04\x05")))
+    .await;
 
     assert_eq!(metrics.total_connections_established, 2);
     assert!(metrics.total_messages_sent > 10);
@@ -934,35 +757,11 @@ async fn test_listen_mode_with_server_broadcast_and_ping() {
         }
     });
 
-    let config = LoadTestConfig {
-        target_url,
-        connections: 1,
-        ramp_rate: 0,
-        duration: Duration::from_millis(500),
-        max_requests: None,
-        rate_per_conn: 0,
-        payload: PayloadConfig::from_text("unused".to_string()),
-        headers: HeaderMap::new(),
-        subprotocol: None,
-        mode: TestMode::Listen,
-        connect_timeout: Duration::from_secs(2),
-        message_timeout: Duration::from_secs(2),
-        ping_interval: Duration::ZERO,
-        #[cfg(feature = "auth")]
-        auth: None,
-        #[cfg(feature = "graphql-ws")]
-        graphql_ws: None,
-        slo: SloThresholds::default(),
-        output_format: OutputFormat::Text,
-        output_path: None,
-        tui: false,
-        no_progress: true,
-        no_reconnect: false,
-        reply_match: ReplyMatch::First,
-    };
-
-    let runner = Runner::new(config);
-    let metrics = runner.run().await.unwrap();
+    let metrics = run(echo_test_config(&target_url)
+        .duration(Duration::from_millis(500))
+        .payload_text("unused")
+        .mode(TestMode::Listen))
+    .await;
 
     assert_eq!(metrics.total_connections_established, 1);
     assert!(metrics.total_messages_recv >= 3);
@@ -971,34 +770,33 @@ async fn test_listen_mode_with_server_broadcast_and_ping() {
     cancel.cancel();
 }
 
+/// Base configuration for scenario runs; each phase overrides sizing,
+/// pacing and payload.
 #[cfg(feature = "scenario")]
-fn scenario_base_config(target_url: Url) -> LoadTestConfig {
-    LoadTestConfig {
-        target_url,
-        connections: 1,
-        ramp_rate: 0,
-        duration: Duration::from_millis(300),
-        max_requests: None,
-        rate_per_conn: 0,
-        payload: PayloadConfig::from_text("default".to_string()),
-        headers: HeaderMap::new(),
-        subprotocol: None,
-        mode: TestMode::Echo,
-        connect_timeout: Duration::from_secs(2),
-        message_timeout: Duration::from_secs(2),
-        ping_interval: Duration::ZERO,
-        #[cfg(feature = "auth")]
-        auth: None,
-        #[cfg(feature = "graphql-ws")]
-        graphql_ws: None,
-        slo: SloThresholds::default(),
-        output_format: OutputFormat::Text,
-        output_path: None,
-        tui: false,
-        no_progress: true,
-        no_reconnect: false,
-        reply_match: ReplyMatch::First,
-    }
+fn scenario_base_config(target_url: &Url) -> LoadTestConfigBuilder {
+    echo_test_config(target_url)
+        .duration(Duration::from_millis(300))
+        .payload_text("default")
+}
+
+/// Parses a scenario whose phases all run against `target_url`. `phases` is
+/// the YAML list under `phases:`, indented by two spaces.
+#[cfg(feature = "scenario")]
+fn scenario(target_url: &Url, phases: &str) -> ScenarioConfig {
+    let yaml = format!(
+        "version: \"1.0\"\ntarget: \"{target_url}\"\nmetadata:\n  name: \"test\"\nphases:\n{phases}"
+    );
+    ScenarioConfig::from_yaml(&yaml).unwrap()
+}
+
+#[cfg(feature = "scenario")]
+async fn run_scenario(scenario: &ScenarioConfig, base: LoadTestConfigBuilder) -> AggregatedMetrics {
+    ScenarioExecutor::new(scenario, base.build().unwrap(), None, None)
+        .unwrap()
+        .run()
+        .await
+        .unwrap()
+        .metrics
 }
 
 #[cfg(feature = "scenario")]
@@ -1006,31 +804,27 @@ fn scenario_base_config(target_url: Url) -> LoadTestConfig {
 async fn test_scenario_action_script_echoes_and_closes() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
-    let phase = ScenarioPhase {
-        name: "scripted".to_string(),
-        target: Some(target_url.clone()),
-        duration: Duration::from_millis(300),
-        connections: 3,
-        ramp_rate: 0,
-        rate_per_conn: 50,
-        payload: None,
-        think_time: Duration::from_millis(5),
-        actions: vec![
-            ScenarioAction::Send {
-                payload: None,
-                count: 2,
-            },
-            ScenarioAction::Wait(Duration::from_millis(10)),
-            ScenarioAction::Ping(Duration::from_millis(20)),
-            ScenarioAction::Close {
-                code: 1000,
-                reason: "finished".to_string(),
-            },
-        ],
-    };
+    let scenario = scenario(
+        &target_url,
+        r#"  - name: "scripted"
+    duration: "300ms"
+    connections: 3
+    rate_per_conn: 50
+    think_time: "5ms"
+    actions:
+      - type: Send
+        count: 2
+      - type: Wait
+        duration: "10ms"
+      - type: Ping
+        interval: "20ms"
+      - type: Close
+        code: 1000
+        reason: "finished"
+"#,
+    );
 
-    let runner = Runner::with_scenario(scenario_base_config(target_url), phase);
-    let metrics = runner.run().await.unwrap();
+    let metrics = run_scenario(&scenario, scenario_base_config(&target_url)).await;
 
     assert_eq!(metrics.total_connections_attempted, 3);
     assert_eq!(metrics.total_connections_established, 3);
@@ -1048,51 +842,47 @@ async fn test_scenario_action_script_echoes_and_closes() {
 async fn test_scenario_executor_runs_every_phase() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
-    let phase = |name: &str, connections: usize| PhaseConfig {
-        name: name.to_string(),
-        target: Some(target_url.to_string()),
-        duration: "80ms".to_string(),
-        connections,
-        ramp_rate: 0,
-        rate_per_conn: 0,
-        payload: None,
-        think_time: None,
-        actions: vec![
-            ActionConfig::Send {
-                payload: None,
-                count: Some(1),
-            },
-            ActionConfig::Close {
-                code: Some(1000),
-                reason: None,
-            },
-        ],
+    let phase = |name: &str, connections: usize| {
+        format!(
+            r#"  - name: "{name}"
+    target: "{target_url}"
+    duration: "80ms"
+    connections: {connections}
+    actions:
+      - type: Send
+        count: 1
+      - type: Close
+        code: 1000
+"#
+        )
     };
-
-    let scenario = ScenarioConfig {
-        version: "1.0".to_string(),
-        target: None,
-        metadata: ScenarioMeta {
-            name: "two-phase".to_string(),
-            description: None,
-            tags: None,
-        },
-        phases: vec![phase("warmup", 2), phase("sustain", 3)],
-    };
-
-    let executor =
-        ScenarioExecutor::new(&scenario, scenario_base_config(target_url), None, None).unwrap();
-    let outcome = executor.run().await.unwrap();
-
-    assert_eq!(outcome.connections, 5);
-    assert_eq!(outcome.worker_metrics.len(), 5);
-    assert!(outcome.elapsed >= Duration::from_millis(160));
-    assert!(
-        outcome
-            .worker_metrics
-            .iter()
-            .all(|metrics| metrics.messages_sent > 0)
+    let yaml = format!(
+        "version: \"1.0\"\nmetadata:\n  name: \"two-phase\"\nphases:\n{}{}",
+        phase("warmup", 2),
+        phase("sustain", 3)
     );
+    let scenario = ScenarioConfig::from_yaml(&yaml).unwrap();
+    assert_eq!(scenario.name(), "two-phase");
+    assert_eq!(
+        scenario.phase_names().collect::<Vec<_>>(),
+        ["warmup", "sustain"]
+    );
+
+    let executor = ScenarioExecutor::new(
+        &scenario,
+        scenario_base_config(&target_url).build().unwrap(),
+        None,
+        None,
+    )
+    .unwrap();
+    let outcome = executor.run().await.unwrap();
+    let metrics = &outcome.metrics;
+
+    assert_eq!(metrics.total_connections_attempted, 5);
+    assert_eq!(metrics.total_connections_established, 5);
+    assert!(metrics.elapsed >= Duration::from_millis(160));
+    // Every worker sends exactly one message before its Close action.
+    assert_eq!(metrics.total_messages_sent, 5, "{metrics:?}");
     let phases: Vec<&str> = outcome
         .phase_targets
         .iter()
@@ -1103,48 +893,16 @@ async fn test_scenario_executor_runs_every_phase() {
     cancel_server.cancel();
 }
 
-/// Baseline echo configuration for regression tests that only vary a few fields.
-fn echo_test_config(target_url: Url) -> LoadTestConfig {
-    LoadTestConfig {
-        target_url,
-        connections: 1,
-        ramp_rate: 0,
-        duration: Duration::from_secs(1),
-        max_requests: None,
-        rate_per_conn: 0,
-        payload: PayloadConfig::from_text("keepalive-test".to_string()),
-        headers: HeaderMap::new(),
-        subprotocol: None,
-        mode: TestMode::Echo,
-        connect_timeout: Duration::from_secs(2),
-        message_timeout: Duration::from_secs(2),
-        ping_interval: Duration::ZERO,
-        #[cfg(feature = "auth")]
-        auth: None,
-        #[cfg(feature = "graphql-ws")]
-        graphql_ws: None,
-        slo: SloThresholds::default(),
-        output_format: OutputFormat::Text,
-        output_path: None,
-        tui: false,
-        no_progress: true,
-        no_reconnect: false,
-        reply_match: ReplyMatch::First,
-    }
-}
-
 #[tokio::test]
 async fn test_echo_ping_interval_does_not_throttle_unpaced_load() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
-    let mut config = echo_test_config(target_url);
-    config.connections = 2;
-    config.duration = Duration::from_secs(1);
+    let config = echo_test_config(&target_url)
+        .connections(2)
+        .duration(Duration::from_secs(1));
 
-    let baseline = Runner::new(config.clone()).run().await.unwrap();
-
-    config.ping_interval = Duration::from_millis(200);
-    let with_ping = Runner::new(config).run().await.unwrap();
+    let baseline = run(config.clone()).await;
+    let with_ping = run(config.ping_interval(Duration::from_millis(200))).await;
 
     assert!(
         with_ping.total_messages_sent > 500,
@@ -1168,12 +926,11 @@ async fn test_echo_ping_interval_does_not_throttle_unpaced_load() {
 async fn test_echo_ping_tick_does_not_add_paced_data_sends() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
-    let mut config = echo_test_config(target_url);
-    config.rate_per_conn = 20;
-    config.ping_interval = Duration::from_millis(25);
-    config.duration = Duration::from_secs(1);
-
-    let metrics = Runner::new(config).run().await.unwrap();
+    let metrics = run(echo_test_config(&target_url)
+        .rate_per_connection(20)
+        .ping_interval(Duration::from_millis(25))
+        .duration(Duration::from_secs(1)))
+    .await;
 
     // 20 msg/s for 1s plus the interval's immediate first tick.
     assert!(
@@ -1191,21 +948,21 @@ async fn test_echo_ping_tick_does_not_add_paced_data_sends() {
 async fn test_stream_and_listen_modes_with_ping_interval() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
-    let mut config = echo_test_config(target_url.clone());
-    config.mode = TestMode::Stream;
-    config.rate_per_conn = 200;
-    config.ping_interval = Duration::from_millis(50);
-    config.duration = Duration::from_millis(500);
-    let stream = Runner::new(config).run().await.unwrap();
+    let stream = run(echo_test_config(&target_url)
+        .mode(TestMode::Stream)
+        .rate_per_connection(200)
+        .ping_interval(Duration::from_millis(50))
+        .duration(Duration::from_millis(500)))
+    .await;
     assert_eq!(stream.total_connections_established, 1);
     assert!(stream.total_messages_sent > 50);
     assert_eq!(stream.error_rate, 0.0);
 
-    let mut config = echo_test_config(target_url);
-    config.mode = TestMode::Listen;
-    config.ping_interval = Duration::from_millis(50);
-    config.duration = Duration::from_millis(300);
-    let listen = Runner::new(config).run().await.unwrap();
+    let listen = run(echo_test_config(&target_url)
+        .mode(TestMode::Listen)
+        .ping_interval(Duration::from_millis(50))
+        .duration(Duration::from_millis(300)))
+    .await;
     assert_eq!(listen.total_connections_established, 1);
     assert_eq!(listen.total_messages_sent, 0);
     assert_eq!(listen.error_rate, 0.0);
@@ -1244,16 +1001,15 @@ async fn spawn_silent_server() -> (Url, tokio_util::sync::CancellationToken) {
 async fn test_echo_cancellation_interrupts_pending_reply() {
     let (target_url, cancel_server) = spawn_silent_server().await;
 
-    let mut config = echo_test_config(target_url);
-    config.connections = 2;
-    config.duration = Duration::from_millis(300);
-    config.message_timeout = Duration::from_secs(10);
+    let config = echo_test_config(&target_url)
+        .connections(2)
+        .duration(Duration::from_millis(300))
+        .message_timeout(Duration::from_secs(10));
 
     let start = std::time::Instant::now();
-    let metrics = tokio::time::timeout(Duration::from_secs(15), Runner::new(config).run())
+    let metrics = tokio::time::timeout(Duration::from_secs(15), run(config))
         .await
-        .expect("runner hung past the message timeout")
-        .unwrap();
+        .expect("runner hung past the message timeout");
     let elapsed = start.elapsed();
 
     assert!(
@@ -1277,32 +1033,21 @@ async fn test_echo_cancellation_interrupts_pending_reply() {
 async fn test_scenario_echo_cancellation_interrupts_pending_reply() {
     let (target_url, cancel_server) = spawn_silent_server().await;
 
-    let phase = ScenarioPhase {
-        name: "silent".to_string(),
-        target: Some(target_url.clone()),
-        duration: Duration::from_millis(300),
-        connections: 2,
-        ramp_rate: 0,
-        rate_per_conn: 0,
-        payload: None,
-        think_time: Duration::ZERO,
-        actions: vec![ScenarioAction::Send {
-            payload: None,
-            count: 1,
-        }],
-    };
-
-    let mut base = scenario_base_config(target_url);
-    base.message_timeout = Duration::from_secs(10);
+    let scenario = scenario(
+        &target_url,
+        r#"  - name: "silent"
+    duration: "300ms"
+    connections: 2
+    actions:
+      - type: Send
+"#,
+    );
+    let base = scenario_base_config(&target_url).message_timeout(Duration::from_secs(10));
 
     let start = std::time::Instant::now();
-    let metrics = tokio::time::timeout(
-        Duration::from_secs(15),
-        Runner::with_scenario(base, phase).run(),
-    )
-    .await
-    .expect("runner hung past the message timeout")
-    .unwrap();
+    let metrics = tokio::time::timeout(Duration::from_secs(15), run_scenario(&scenario, base))
+        .await
+        .expect("runner hung past the message timeout");
     let elapsed = start.elapsed();
 
     assert!(
@@ -1362,12 +1107,13 @@ async fn spawn_closing_echo_server(replies: usize) -> (Url, tokio_util::sync::Ca
 async fn test_worker_reconnects_after_server_close() {
     let (target_url, cancel_server) = spawn_closing_echo_server(3).await;
 
-    let mut config = echo_test_config(target_url);
-    config.connections = 2;
-    config.duration = Duration::from_secs(1);
+    let config = echo_test_config(&target_url)
+        .connections(2)
+        .duration(Duration::from_secs(1))
+        .build()
+        .unwrap();
 
     let runner = Runner::new(config);
-    let live = runner.live_metrics();
     let metrics = runner.run().await.unwrap();
 
     assert!(
@@ -1387,7 +1133,7 @@ async fn test_worker_reconnects_after_server_close() {
         metrics.total_connections_established + metrics.total_reconnects
     );
 
-    let snapshot = live.snapshot();
+    let snapshot = runner.live_snapshot();
     assert_eq!(snapshot.active_connections, 0);
     assert_eq!(snapshot.connections_established, 2);
     assert_eq!(snapshot.reconnects, metrics.total_reconnects);
@@ -1399,13 +1145,14 @@ async fn test_worker_reconnects_after_server_close() {
 async fn test_no_reconnect_keeps_single_session_per_worker() {
     let (target_url, cancel_server) = spawn_closing_echo_server(3).await;
 
-    let mut config = echo_test_config(target_url);
-    config.connections = 2;
-    config.duration = Duration::from_secs(1);
-    config.no_reconnect = true;
+    let config = echo_test_config(&target_url)
+        .connections(2)
+        .duration(Duration::from_secs(1))
+        .reconnect(false)
+        .build()
+        .unwrap();
 
     let runner = Runner::new(config);
-    let live = runner.live_metrics();
     let metrics = runner.run().await.unwrap();
 
     // Each worker gets 3 replies, then sends a fourth request and sees the close.
@@ -1416,7 +1163,7 @@ async fn test_no_reconnect_keeps_single_session_per_worker() {
     assert_eq!(metrics.total_reconnects, 0);
     assert_eq!(metrics.total_connections_established, 2);
     assert_eq!(metrics.handshake_latency.count, 2);
-    assert_eq!(live.snapshot().active_connections, 0);
+    assert_eq!(runner.live_snapshot().active_connections, 0);
 
     cancel_server.cancel();
 }
@@ -1462,23 +1209,19 @@ async fn spawn_echo_then_silent_server(
 
 /// Echo configuration where every worker makes one session and gives up on
 /// the first reply that does not arrive within 50ms.
-fn single_session_echo_config(target_url: Url) -> LoadTestConfig {
-    let mut config = echo_test_config(target_url);
-    config.connections = 3;
-    config.duration = Duration::from_millis(500);
-    config.message_timeout = Duration::from_millis(50);
-    config.no_reconnect = true;
-    config
+fn single_session_echo_config(target_url: &Url) -> LoadTestConfigBuilder {
+    echo_test_config(target_url)
+        .connections(3)
+        .duration(Duration::from_millis(500))
+        .message_timeout(Duration::from_millis(50))
+        .reconnect(false)
 }
 
 #[tokio::test]
 async fn test_error_rate_is_one_when_every_request_times_out() {
     let (target_url, cancel_server) = spawn_silent_server().await;
 
-    let metrics = Runner::new(single_session_echo_config(target_url))
-        .run()
-        .await
-        .unwrap();
+    let metrics = run(single_session_echo_config(&target_url)).await;
 
     assert_eq!(metrics.total_messages_sent, 3, "{metrics:?}");
     assert_eq!(
@@ -1494,10 +1237,7 @@ async fn test_error_rate_is_one_when_every_request_times_out() {
 async fn test_error_rate_is_one_when_the_target_refuses_connections() {
     let dead_url = Url::parse("ws://127.0.0.1:59997").unwrap();
 
-    let metrics = Runner::new(single_session_echo_config(dead_url))
-        .run()
-        .await
-        .unwrap();
+    let metrics = run(single_session_echo_config(&dead_url)).await;
 
     assert_eq!(metrics.total_messages_sent, 0);
     assert_eq!(metrics.error_breakdown.values().sum::<u64>(), 3);
@@ -1508,10 +1248,10 @@ async fn test_error_rate_is_one_when_the_target_refuses_connections() {
 async fn test_error_rate_is_zero_on_a_clean_run() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
-    let mut config = single_session_echo_config(target_url);
-    config.duration = Duration::from_millis(200);
-    config.message_timeout = Duration::from_secs(2);
-    let metrics = Runner::new(config).run().await.unwrap();
+    let metrics = run(single_session_echo_config(&target_url)
+        .duration(Duration::from_millis(200))
+        .message_timeout(Duration::from_secs(2)))
+    .await;
 
     assert!(metrics.total_messages_sent > 0);
     assert!(metrics.error_breakdown.is_empty(), "{metrics:?}");
@@ -1524,10 +1264,7 @@ async fn test_error_rate_is_zero_on_a_clean_run() {
 async fn test_error_rate_counts_a_timed_out_request_once() {
     let (target_url, cancel_server) = spawn_echo_then_silent_server(3).await;
 
-    let metrics = Runner::new(single_session_echo_config(target_url))
-        .run()
-        .await
-        .unwrap();
+    let metrics = run(single_session_echo_config(&target_url)).await;
 
     // Each of the 3 workers gets 3 replies, then its fourth request times out:
     // 3 failed requests out of 12 sent.
@@ -1546,11 +1283,10 @@ async fn test_error_rate_counts_a_timed_out_request_once() {
 async fn test_echo_server_close_is_not_counted_as_reply() {
     let (target_url, cancel_server) = spawn_closing_echo_server(3).await;
 
-    let mut config = echo_test_config(target_url);
-    config.duration = Duration::from_millis(500);
-    config.no_reconnect = true;
-
-    let metrics = Runner::new(config).run().await.unwrap();
+    let metrics = run(echo_test_config(&target_url)
+        .duration(Duration::from_millis(500))
+        .reconnect(false))
+    .await;
 
     // Three echoes, then the fourth request is answered by a Close frame.
     assert_eq!(
@@ -1571,25 +1307,22 @@ async fn test_echo_server_close_is_not_counted_as_reply() {
 async fn test_scenario_echo_server_close_is_not_counted_as_reply() {
     let (target_url, cancel_server) = spawn_closing_echo_server(3).await;
 
-    let phase = ScenarioPhase {
-        name: "closing".to_string(),
-        target: Some(target_url.clone()),
-        duration: Duration::from_millis(500),
-        connections: 1,
-        ramp_rate: 0,
-        rate_per_conn: 0,
-        payload: None,
-        think_time: Duration::ZERO,
-        actions: vec![ScenarioAction::Send {
-            payload: None,
-            count: 10,
-        }],
-    };
+    let scenario = scenario(
+        &target_url,
+        r#"  - name: "closing"
+    duration: "500ms"
+    connections: 1
+    actions:
+      - type: Send
+        count: 10
+"#,
+    );
 
-    let mut base = scenario_base_config(target_url);
-    base.no_reconnect = true;
-
-    let metrics = Runner::with_scenario(base, phase).run().await.unwrap();
+    let metrics = run_scenario(
+        &scenario,
+        scenario_base_config(&target_url).reconnect(false),
+    )
+    .await;
 
     assert_eq!(
         metrics.total_messages_sent, 4,
@@ -1609,18 +1342,13 @@ async fn test_scenario_echo_server_close_is_not_counted_as_reply() {
 async fn test_graphql_ws_cancellation_is_not_an_error() {
     let (target_url, cancel) = spawn_graphql_ws_server(false).await;
 
-    let mut config = echo_test_config(target_url);
-    config.mode = TestMode::GraphQLWS;
-    config.subprotocol = Some("graphql-transport-ws".to_string());
-    config.duration = Duration::from_millis(300);
-    config.graphql_ws = Some(GraphQLWSConfig {
-        operation_name: Some("Price".to_string()),
-        operation: "subscription Price { price }".to_string(),
-        variables: None,
-        extensions: None,
-    });
-
-    let metrics = Runner::new(config).run().await.unwrap();
+    let metrics = run(echo_test_config(&target_url)
+        .mode(TestMode::GraphQLWS)
+        .subprotocol("graphql-transport-ws")
+        .duration(Duration::from_millis(300))
+        .graphql_operation_name("Price")
+        .graphql_operation("subscription Price { price }"))
+    .await;
 
     assert_eq!(metrics.total_connections_established, 1);
     assert!(
@@ -1635,37 +1363,31 @@ async fn test_graphql_ws_cancellation_is_not_an_error() {
 
     cancel.cancel();
 }
+
 #[cfg(feature = "scenario")]
 #[tokio::test]
 async fn test_scenario_executor_cancel_token_skips_remaining_phases() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
-    let phase = |name: &str| PhaseConfig {
-        name: name.to_string(),
-        target: Some(target_url.to_string()),
-        duration: "5s".to_string(),
-        connections: 2,
-        ramp_rate: 0,
-        rate_per_conn: 20,
-        payload: None,
-        think_time: None,
-        actions: Vec::new(),
+    let phase = |name: &str| {
+        format!(
+            r#"  - name: "{name}"
+    duration: "5s"
+    connections: 2
+    rate_per_conn: 20
+"#
+        )
     };
+    let scenario = scenario(&target_url, &(phase("first") + &phase("second")));
 
-    let scenario = ScenarioConfig {
-        version: "1.0".to_string(),
-        target: None,
-        metadata: ScenarioMeta {
-            name: "cancelled".to_string(),
-            description: None,
-            tags: None,
-        },
-        phases: vec![phase("first"), phase("second")],
-    };
-
-    let executor = ScenarioExecutor::new(&scenario, scenario_base_config(target_url), None, None)
-        .unwrap()
-        .with_signal_handling(false);
+    let executor = ScenarioExecutor::new(
+        &scenario,
+        scenario_base_config(&target_url).build().unwrap(),
+        None,
+        None,
+    )
+    .unwrap()
+    .with_signal_handling(false);
     let cancel = executor.cancel_token();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1676,8 +1398,8 @@ async fn test_scenario_executor_cancel_token_skips_remaining_phases() {
     let outcome = executor.run().await.unwrap();
 
     assert!(started.elapsed() < Duration::from_secs(3));
-    assert_eq!(outcome.connections, 2);
-    assert_eq!(outcome.worker_metrics.len(), 2);
+    assert_eq!(outcome.metrics.total_connections_attempted, 2);
+    assert_eq!(outcome.metrics.total_connections_established, 2);
     assert_eq!(
         outcome.phase_targets.len(),
         1,
@@ -1733,12 +1455,11 @@ async fn spawn_chatty_echo_server() -> (Url, tokio_util::sync::CancellationToken
     (target_url, cancel)
 }
 
-fn chatty_config(target_url: Url, reply_match: ReplyMatch) -> LoadTestConfig {
-    let mut config = echo_test_config(target_url);
-    config.duration = CHATTY_RUN;
-    config.payload = PayloadConfig::from_text(r#"{"seq":{{seq}}}"#.to_string());
-    config.reply_match = reply_match;
-    config
+fn chatty_config(target_url: &Url, reply_match: ReplyMatch) -> LoadTestConfigBuilder {
+    echo_test_config(target_url)
+        .duration(CHATTY_RUN)
+        .payload_text(r#"{"seq":{{seq}}}"#)
+        .reply_match(reply_match)
 }
 
 /// Documents the default: the first data frame after a send is the reply,
@@ -1747,10 +1468,7 @@ fn chatty_config(target_url: Url, reply_match: ReplyMatch) -> LoadTestConfig {
 async fn test_first_match_takes_unsolicited_frame_as_reply() {
     let (target_url, cancel_server) = spawn_chatty_echo_server().await;
 
-    let metrics = Runner::new(chatty_config(target_url, ReplyMatch::First))
-        .run()
-        .await
-        .unwrap();
+    let metrics = run(chatty_config(&target_url, ReplyMatch::First)).await;
 
     assert!(
         metrics.total_messages_recv >= CHATTY_MIN_REPLIES,
@@ -1769,10 +1487,7 @@ async fn test_first_match_takes_unsolicited_frame_as_reply() {
 async fn assert_unsolicited_frames_are_skipped(reply_match: ReplyMatch) {
     let (target_url, cancel_server) = spawn_chatty_echo_server().await;
 
-    let metrics = Runner::new(chatty_config(target_url, reply_match.clone()))
-        .run()
-        .await
-        .unwrap();
+    let metrics = run(chatty_config(&target_url, reply_match.clone())).await;
 
     assert_eq!(metrics.error_rate, 0.0, "{reply_match:?}: {metrics:?}");
     assert!(
@@ -1803,7 +1518,7 @@ async fn test_exact_match_skips_unsolicited_frames() {
 
 #[tokio::test]
 async fn test_json_pointer_match_skips_unsolicited_frames() {
-    assert_unsolicited_frames_are_skipped(ReplyMatch::JsonPointer("/seq".to_string())).await;
+    assert_unsolicited_frames_are_skipped("json:/seq".parse().unwrap()).await;
 }
 
 #[cfg(feature = "scenario")]
@@ -1812,30 +1527,25 @@ async fn test_scenario_echo_match_skips_unsolicited_frames() {
     const SENDS: u64 = 5;
     let (target_url, cancel_server) = spawn_chatty_echo_server().await;
 
-    let phase = ScenarioPhase {
-        name: "chatty".to_string(),
-        target: Some(target_url.clone()),
-        duration: Duration::from_secs(5),
-        connections: 1,
-        ramp_rate: 0,
-        rate_per_conn: 0,
-        payload: Some(PayloadConfig::from_text(r#"{"seq":{{seq}}}"#.to_string())),
-        think_time: Duration::ZERO,
-        actions: vec![
-            ScenarioAction::Send {
-                payload: None,
-                count: SENDS,
-            },
-            ScenarioAction::Close {
-                code: 1000,
-                reason: "done".to_string(),
-            },
-        ],
-    };
+    let scenario = scenario(
+        &target_url,
+        r#"  - name: "chatty"
+    duration: "5s"
+    connections: 1
+    payload: '{"seq":{{seq}}}'
+    actions:
+      - type: Send
+        count: 5
+      - type: Close
+        code: 1000
+        reason: "done"
+"#,
+    );
 
-    let mut base = scenario_base_config(target_url);
-    base.reply_match = ReplyMatch::JsonPointer("/seq".to_string());
-    let metrics = Runner::with_scenario(base, phase).run().await.unwrap();
+    let base = scenario_base_config(&target_url)
+        .payload_text(r#"{"seq":{{seq}}}"#)
+        .reply_match("json:/seq".parse().unwrap());
+    let metrics = run_scenario(&scenario, base).await;
 
     assert_eq!(metrics.error_rate, 0.0, "{metrics:?}");
     assert_eq!(metrics.total_messages_recv, SENDS);

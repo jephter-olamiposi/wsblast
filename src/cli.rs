@@ -1,4 +1,5 @@
-//! Command-line argument parsing and flag specifications.
+//! Command-line argument parsing for the `wsblast` binary, plus the mode and
+//! report format enums shared with the library API.
 
 use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,7 @@ use std::path::PathBuf;
     long_about = "wsblast stresses WebSocket targets, computes high-resolution latency percentiles \
                   (p50/p95/p99/p99.9), maps failure taxonomy, and gates CI pipelines via SLO thresholds."
 )]
-pub struct Cli {
+pub(crate) struct Cli {
     /// Target WebSocket endpoint (ws:// or wss://)
     #[arg(
         value_name = "URL",
@@ -253,12 +254,12 @@ pub struct Cli {
 
 impl Cli {
     /// Resolves target URL from either positional or named argument syntax.
-    pub fn resolve_url(&self) -> Option<&str> {
+    pub(crate) fn resolve_url(&self) -> Option<&str> {
         self.url.as_deref().or(self.url_flag.as_deref())
     }
 
     /// Returns true if running in scenario mode
-    pub fn is_scenario_mode(&self) -> bool {
+    pub(crate) fn is_scenario_mode(&self) -> bool {
         self.scenario.is_some()
     }
 }
@@ -266,7 +267,7 @@ impl Cli {
 /// Authentication method for WebSocket handshake.
 #[cfg(feature = "auth")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum AuthType {
+pub(crate) enum AuthType {
     /// No authentication
     None,
     /// Static bearer token
@@ -276,8 +277,11 @@ pub enum AuthType {
     ApiKey,
 }
 
-/// Supported execution patterns for WebSocket load generation.
+/// What each worker does on its connection.
+///
+/// Only [`TestMode::Echo`] measures round-trip time, so latency SLOs require it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[non_exhaustive]
 pub enum TestMode {
     /// Send request frame, await response, and record round-trip latency (RTT).
     Echo,
@@ -291,9 +295,10 @@ pub enum TestMode {
     GraphQLWS,
 }
 
-/// Supported serialisation and presentation formats for test summaries.
+/// Format of the report produced by [`render_report`](crate::render_report).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum OutputFormat {
     /// Human-readable styled terminal tables.
     Text,
