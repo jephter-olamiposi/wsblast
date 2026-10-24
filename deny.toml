@@ -1,0 +1,42 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+# CI runs `cargo deny --all-features --locked check`, so every optional
+# dependency is covered.
+
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerability and unsoundness advisories fail the check for every crate in
+# the graph. Unmaintained advisories only fail for direct dependencies, which
+# are the ones this crate can act on; transitive ones (for example `paste`
+# under ratatui) are fixed by upgrading the parent crate.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Every license here is required by at least one crate in the dependency
+# tree; cargo-deny warns when an entry is no longer used.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate versions are common in a tokio/tonic/ratatui tree; report them
+# without failing the build.
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

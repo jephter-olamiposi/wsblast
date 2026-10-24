@@ -4,48 +4,250 @@ on:
   push:
     branches: ["main"]
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
+  CARGO_INCREMENTAL: 0
 
 jobs:
-  check-and-test:
-    name: Test (${{ matrix.os }})
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The single list of Cargo features CI builds. `default` means no
+        # --features flag; every other entry is passed to --features as is.
+        # When a feature is removed from Cargo.toml, delete its line here.
+        features:
+          - default
+          - scenario
+          - otel
+          - prometheus
+          - compression
+          - auth
+          - graphql-ws
+          - capture
+          - chaos
+          - mock
+          - distributed
+          - compare
+          - tracing-subscriber
+          - full
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy-${{ matrix.features }}
+      - name: cargo clippy
+        shell: bash
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: |
+          args=()
+          if [ "$FEATURES" != "default" ]; then
+            args=(--features "$FEATURES")
+          fi
+          cargo clippy --locked --all-targets "${args[@]}" -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }}, full)
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-
+    env:
+      RUSTFLAGS: "-D warnings"
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
         with:
-          components: rustfmt, clippy
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Unit, integration and bench-target tests
+        run: cargo test --locked --all-targets --features full
+      - name: Doc tests
+        run: cargo test --locked --doc --features full
 
-      - name: Cache cargo dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Format check
-        run: cargo fmt --check
-
-      - name: Static linting (clippy)
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Unit & Integration tests
-        run: cargo test --all-targets
-
-      - name: Benchmark compilation check
-        run: cargo bench --no-run
-
-      - name: Verify CLI binary & echo server integration
+  msrv:
+    name: MSRV (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [default, full]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read rust-version from Cargo.toml
+        id: msrv
         shell: bash
         run: |
-          cargo run --example echo_server &
-          SERVER_PID=$!
-          sleep 2
-          cargo run -- ws://127.0.0.1:9001 -c 10 -d 3s --max-p99 100ms --format text
-          kill $SERVER_PID || true
+          version="$(sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
+          if [ -z "$version" ]; then
+            echo "::error file=Cargo.toml::rust-version is not set"
+            exit 1
+          fi
+          echo "Checking the declared MSRV $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-${{ matrix.features }}
+      # Only the shipped crate (lib and bin) is held to the MSRV; dev-dependencies
+      # such as criterion may need a newer compiler.
+      - name: cargo check on the declared MSRV
+        shell: bash
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: |
+          args=()
+          if [ "$FEATURES" != "default" ]; then
+            args=(--features "$FEATURES")
+          fi
+          cargo check --locked --lib --bins "${args[@]}"
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --locked --no-deps --all-features
+
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: List packaged files
+        run: cargo package --locked --list
+      - name: cargo package
+        run: cargo package --locked
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run --locked
+
+  e2e:
+    name: End-to-end SLO gate
+    runs-on: ubuntu-latest
+    env:
+      ECHO_ADDR: 127.0.0.1:9001
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build wsblast and the echo server
+        run: cargo build --locked --bin wsblast --example echo_server
+      - name: Run the SLO gate against the echo server
+        shell: bash
+        run: |
+          ADDR="$ECHO_ADDR" target/debug/examples/echo_server &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          host="${ECHO_ADDR%:*}"
+          port="${ECHO_ADDR##*:}"
+          for _ in $(seq 1 50); do
+            if (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; then
+              break
+            fi
+            sleep 0.2
+          done
+
+          run_gate() {
+            local expected="$1"
+            shift
+            set +e
+            target/debug/wsblast "ws://$ECHO_ADDR" -c 10 -d 3s --format text "$@"
+            local code=$?
+            set -e
+            if [ "$code" -ne "$expected" ]; then
+              echo "::error::wsblast $* exited with $code, expected $expected"
+              exit 1
+            fi
+            echo "wsblast $* exited with $code as expected"
+          }
+
+          # A generous budget must pass with exit code 0.
+          run_gate 0 --max-p99 100ms
+          # An impossible budget must breach the SLO with exit code 2.
+          run_gate 2 --max-p99 1us
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features --locked
+
+  machete:
+    name: Unused dependencies
+    runs-on: ubuntu-latest
+    # cargo-machete currently reports rand and sha2 (unused today) plus
+    # flate2, prost-types and tower (only referenced through optional
+    # features). The v0.2.0 dependency cleanup removes all five; drop
+    # continue-on-error once it lands.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+      - run: cargo machete
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: wsblast:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test image
+        run: docker run --rm wsblast:ci --version
