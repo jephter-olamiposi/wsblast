@@ -116,13 +116,19 @@ impl Runner {
     /// Returns [`crate::error::WsBlastError::Metrics`] if per-worker telemetry
     /// initialization or histogram aggregation fails.
     pub async fn run(&self) -> crate::error::Result<AggregatedMetrics> {
-        let (worker_metrics, elapsed, attempted) = self.run_and_collect_worker_metrics().await?;
+        let outcome = self.run_and_collect().await?;
 
-        AggregatedMetrics::merge(worker_metrics, elapsed, attempted)
+        Ok(
+            AggregatedMetrics::merge(outcome.worker_metrics, outcome.elapsed, outcome.connections)?
+                .with_not_started(outcome.not_started),
+        )
     }
 
     /// Runs the worker pool and returns raw worker metrics without merging.
     /// Returns (worker_metrics, elapsed_time, total_connections_attempted).
+    ///
+    /// Use [`Runner::run_and_collect`] to also learn how many connection slots
+    /// the ramp never reached.
     ///
     /// # Errors
     ///
@@ -131,6 +137,17 @@ impl Runner {
     pub async fn run_and_collect_worker_metrics(
         &self,
     ) -> crate::error::Result<(Vec<WorkerMetrics>, Duration, u64)> {
+        let outcome = self.run_and_collect().await?;
+        Ok((outcome.worker_metrics, outcome.elapsed, outcome.connections))
+    }
+
+    /// Runs the worker pool and returns the unmerged outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::WsBlastError::Metrics`] if per-worker telemetry
+    /// initialization fails.
+    pub async fn run_and_collect(&self) -> crate::error::Result<RunOutcome> {
         let total_connections = self.config.connections;
         check_file_descriptor_limit(total_connections);
 
@@ -232,6 +249,7 @@ impl Runner {
         }
 
         let elapsed = start_time.elapsed();
+        let not_started = (total_connections - handles.len()) as u64;
 
         let mut worker_metrics = Vec::with_capacity(handles.len());
         for handle in handles {
@@ -240,8 +258,25 @@ impl Runner {
             }
         }
 
-        Ok((worker_metrics, elapsed, total_connections as u64))
+        Ok(RunOutcome {
+            worker_metrics,
+            elapsed,
+            connections: total_connections as u64,
+            not_started,
+        })
     }
+}
+
+/// Raw result of one runner pass, before the worker metrics are merged.
+#[derive(Debug)]
+pub struct RunOutcome {
+    pub worker_metrics: Vec<WorkerMetrics>,
+    pub elapsed: Duration,
+    /// Connection slots the run was configured to open.
+    pub connections: u64,
+    /// Slots the ramp had not reached when the run ended. They have no
+    /// worker metrics and are neither established nor failed.
+    pub not_started: u64,
 }
 
 /// Stops the signal listener task when the owning run ends.
@@ -374,6 +409,8 @@ pub struct ScenarioOutcome {
     pub elapsed: Duration,
     /// Connection slots of every executed phase.
     pub connections: u64,
+    /// Slots of every executed phase that the ramp never reached.
+    pub not_started: u64,
     /// Target of every executed phase, in run order.
     pub phase_targets: Vec<PhaseTarget>,
 }
@@ -461,6 +498,7 @@ impl ScenarioExecutor {
         let mut all_worker_metrics = Vec::new();
         let mut total_elapsed = Duration::ZERO;
         let mut total_connections = 0u64;
+        let mut total_not_started = 0u64;
         let mut phase_targets = Vec::with_capacity(self.phases.len());
 
         let _signal_listener = if self.handle_signals {
@@ -495,12 +533,12 @@ impl ScenarioExecutor {
                 .with_live_metrics(Arc::clone(&self.live_metrics))
                 .with_cancel_token(self.cancel_token.child_token())
                 .with_signal_handling(false);
-            let (worker_metrics, elapsed, connections) =
-                runner.run_and_collect_worker_metrics().await?;
+            let outcome = runner.run_and_collect().await?;
 
-            total_elapsed += elapsed;
-            total_connections += connections;
-            all_worker_metrics.extend(worker_metrics);
+            total_elapsed += outcome.elapsed;
+            total_connections += outcome.connections;
+            total_not_started += outcome.not_started;
+            all_worker_metrics.extend(outcome.worker_metrics);
 
             if phase_idx + 1 < self.phases.len() {
                 tokio::select! {
@@ -514,6 +552,7 @@ impl ScenarioExecutor {
             worker_metrics: all_worker_metrics,
             elapsed: total_elapsed,
             connections: total_connections,
+            not_started: total_not_started,
             phase_targets,
         })
     }
