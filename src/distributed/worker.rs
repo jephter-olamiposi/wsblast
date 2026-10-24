@@ -341,6 +341,7 @@ impl TryFrom<ProtoLoadTestConfig> for LoadTestConfig {
             tui: false,
             no_progress: true,
             no_reconnect: proto.no_reconnect,
+            reply_match: crate::config::ReplyMatch::default(),
         })
     }
 }

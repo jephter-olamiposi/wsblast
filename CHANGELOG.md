@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Baseline comparison (`--compare`) with regression thresholds and `--fail-on-regression`.
 - Record/replay mock server subcommands (`wsblast mock record`, `wsblast mock replay`) with delay and error injection.
 - Wire-config propagation of GraphQL and chaos settings in distributed mode.
+- `--match <first|exact|json:POINTER>` selects how echo mode recognises the reply to a request so unsolicited server pushes no longer skew RTT; skipped frames are reported as `total_unsolicited_frames`.
 
 ### Changed
 - Metric constructors and aggregation are fallible (`WorkerMetrics::new`, `AggregatedMetrics::merge`); runner and executor APIs propagate metrics errors.

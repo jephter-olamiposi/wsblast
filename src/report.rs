@@ -524,6 +524,12 @@ fn render_text_report(
         ),
     ]);
     tput_table.add_row(vec!["Reconnects", &metrics.total_reconnects.to_string()]);
+    if metrics.total_unsolicited_frames > 0 {
+        tput_table.add_row(vec![
+            "Unsolicited Frames (skipped by --match)",
+            &metrics.total_unsolicited_frames.to_string(),
+        ]);
+    }
     tput_table.add_row(vec![
         "Messages Sent / Received",
         &format!(
@@ -716,6 +722,12 @@ fn render_markdown_report(
         metrics.total_connections_failed,
         metrics.total_reconnects
     ));
+    if metrics.total_unsolicited_frames > 0 {
+        md.push_str(&format!(
+            "- **Unsolicited Frames:** `{}` skipped by `--match`\n",
+            metrics.total_unsolicited_frames
+        ));
+    }
     md.push_str(&format!("- **Duration:** `{:.2?}`\n", metrics.elapsed));
     md.push_str(&format!(
         "- **Throughput:** `{:.2}` msg/sec\n",
@@ -816,6 +828,7 @@ mod tests {
             total_connections_established: 10,
             total_connections_failed: 0,
             total_reconnects: 0,
+            total_unsolicited_frames: 0,
             total_messages_sent: 100,
             total_messages_recv: 100,
             total_bytes_sent: 1_000,
@@ -1065,5 +1078,46 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&rendered).expect("comparison JSON must parse");
         assert_eq!(parsed["schema_version"], "1.1.0");
+    }
+
+    fn report_config(format: &str) -> LoadTestConfig {
+        use clap::Parser;
+
+        let cli =
+            crate::cli::Cli::parse_from(["wsblast", "ws://127.0.0.1:9001", "--format", format]);
+        LoadTestConfig::from_cli(cli).expect("valid config")
+    }
+
+    #[test]
+    fn unsolicited_frames_are_reported_only_when_seen() {
+        let slo = evaluate_slos(&SloThresholds::default(), &sample_metrics());
+        let mut metrics = sample_metrics();
+
+        for format in ["text", "markdown"] {
+            let rendered = render_report(&report_config(format), &metrics, &slo);
+            assert!(!rendered.contains("Unsolicited"), "{format}: {rendered}");
+        }
+
+        metrics.total_unsolicited_frames = 42;
+        for format in ["text", "markdown"] {
+            let rendered = render_report(&report_config(format), &metrics, &slo);
+            let line = rendered
+                .lines()
+                .find(|line| line.contains("Unsolicited"))
+                .unwrap_or_else(|| panic!("{format}: {rendered}"));
+            assert!(line.contains("42"), "{format}: {line}");
+        }
+    }
+
+    #[test]
+    fn reports_without_unsolicited_counter_still_parse() {
+        let mut legacy = serde_json::to_value(sample_metrics()).expect("serialize");
+        legacy
+            .as_object_mut()
+            .expect("metrics object")
+            .remove("total_unsolicited_frames");
+
+        let parsed = parse_report_metrics(&legacy.to_string()).expect("legacy report must parse");
+        assert_eq!(parsed.total_unsolicited_frames, 0);
     }
 }

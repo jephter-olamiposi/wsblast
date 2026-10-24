@@ -16,7 +16,7 @@ use wsblast::config::GraphQLWSConfig;
 use wsblast::config::{
     ActionConfig, PhaseConfig, ScenarioAction, ScenarioConfig, ScenarioMeta, ScenarioPhase,
 };
-use wsblast::config::{LoadTestConfig, PayloadConfig, SloThresholds};
+use wsblast::config::{LoadTestConfig, PayloadConfig, ReplyMatch, SloThresholds};
 use wsblast::error::ErrorCategory;
 use wsblast::report::{evaluate_slos, render_report};
 use wsblast::runner::Runner;
@@ -222,6 +222,7 @@ async fn test_echo_mode_load_run() {
         tui: false,
         no_progress: true,
         no_reconnect: false,
+        reply_match: ReplyMatch::First,
     };
 
     let runner = Runner::new(config.clone());
@@ -295,6 +296,7 @@ async fn test_slo_evaluation_pass_and_fail() {
         tui: false,
         no_progress: true,
         no_reconnect: false,
+        reply_match: ReplyMatch::First,
     };
 
     let runner = Runner::new(config.clone());
@@ -362,6 +364,7 @@ async fn test_json_and_markdown_report_formatting() {
         tui: false,
         no_progress: true,
         no_reconnect: false,
+        reply_match: ReplyMatch::First,
     };
 
     let runner = Runner::new(config.clone());
@@ -434,6 +437,7 @@ async fn test_error_taxonomy_when_target_offline() {
         tui: false,
         no_progress: true,
         no_reconnect: false,
+        reply_match: ReplyMatch::First,
     };
 
     let connect_errors = |metrics: &wsblast::metrics::AggregatedMetrics| {
@@ -568,6 +572,7 @@ async fn test_custom_headers_propagation() {
         tui: false,
         no_progress: true,
         no_reconnect: false,
+        reply_match: ReplyMatch::First,
     };
 
     let runner = Runner::new(config);
@@ -703,6 +708,7 @@ async fn test_graphql_ws_subscription_lifecycle() {
         tui: false,
         no_progress: true,
         no_reconnect: false,
+        reply_match: ReplyMatch::First,
     };
 
     let metrics = Runner::new(config).run().await.unwrap();
@@ -770,6 +776,7 @@ async fn test_connection_ramp_rate() {
         tui: false,
         no_progress: true,
         no_reconnect: false,
+        reply_match: ReplyMatch::First,
     };
 
     let runner = Runner::new(config);
@@ -829,6 +836,7 @@ async fn test_duration_includes_connection_ramp() {
         tui: false,
         no_progress: true,
         no_reconnect: false,
+        reply_match: ReplyMatch::First,
     };
 
     let started = std::time::Instant::now();
@@ -908,6 +916,7 @@ async fn test_requests_limit_enforcement() {
         tui: false,
         no_progress: true,
         no_reconnect: false,
+        reply_match: ReplyMatch::First,
     };
 
     let start = std::time::Instant::now();
@@ -971,6 +980,7 @@ async fn test_stream_mode_load_run() {
         tui: false,
         no_progress: true,
         no_reconnect: false,
+        reply_match: ReplyMatch::First,
     };
 
     let runner = Runner::new(config);
@@ -1031,6 +1041,7 @@ async fn test_binary_payload_dispatch() {
         tui: false,
         no_progress: true,
         no_reconnect: false,
+        reply_match: ReplyMatch::First,
     };
 
     let runner = Runner::new(config);
@@ -1127,6 +1138,7 @@ async fn test_listen_mode_with_server_broadcast_and_ping() {
         tui: false,
         no_progress: true,
         no_reconnect: false,
+        reply_match: ReplyMatch::First,
     };
 
     let runner = Runner::new(config);
@@ -1185,6 +1197,7 @@ fn scenario_base_config(target_url: Url) -> LoadTestConfig {
         tui: false,
         no_progress: true,
         no_reconnect: false,
+        reply_match: ReplyMatch::First,
     }
 }
 
@@ -1329,6 +1342,7 @@ fn echo_test_config(target_url: Url) -> LoadTestConfig {
         tui: false,
         no_progress: true,
         no_reconnect: false,
+        reply_match: ReplyMatch::First,
     }
 }
 
@@ -1793,6 +1807,168 @@ async fn test_scenario_executor_cancel_token_skips_remaining_phases() {
     assert!(started.elapsed() < Duration::from_secs(3));
     assert_eq!(connections, 2);
     assert_eq!(worker_metrics.len(), 2);
+
+    cancel_server.cancel();
+}
+
+/// Delay between the unsolicited push and the real echo, so a misattributed
+/// reply shows up as an RTT well below it.
+const CHATTY_ECHO_DELAY: Duration = Duration::from_millis(25);
+const CHATTY_ECHO_DELAY_FLOOR_US: u64 = 24_000;
+const CHATTY_RUN: Duration = Duration::from_millis(300);
+const CHATTY_MIN_REPLIES: u64 = 3;
+
+/// Spawns an echo server that pushes one unsolicited heartbeat frame before
+/// each echo and holds the echo back for [`CHATTY_ECHO_DELAY`].
+async fn spawn_chatty_echo_server() -> (Url, tokio_util::sync::CancellationToken) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let target_url = Url::parse(&format!("ws://127.0.0.1:{}", addr.port())).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_server = cancel.clone();
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Ok((stream, _)) = listener.accept() => {
+                    tokio::spawn(async move {
+                        let Ok(ws_stream) = tokio_tungstenite::accept_async(stream).await else {
+                            return;
+                        };
+                        let (mut sink, mut reader) = ws_stream.split();
+                        while let Some(Ok(msg)) = reader.next().await {
+                            let echo = match msg {
+                                Message::Text(_) | Message::Binary(_) => msg,
+                                Message::Close(_) => break,
+                                _ => continue,
+                            };
+                            let heartbeat = Message::Text(r#"{"event":"heartbeat"}"#.into());
+                            let _ = sink.send(heartbeat).await;
+                            tokio::time::sleep(CHATTY_ECHO_DELAY).await;
+                            let _ = sink.send(echo).await;
+                        }
+                    });
+                }
+                _ = cancel_server.cancelled() => break,
+            }
+        }
+    });
+
+    (target_url, cancel)
+}
+
+fn chatty_config(target_url: Url, reply_match: ReplyMatch) -> LoadTestConfig {
+    let mut config = echo_test_config(target_url);
+    config.duration = CHATTY_RUN;
+    config.payload = PayloadConfig::from_text(r#"{"seq":{{seq}}}"#.to_string());
+    config.reply_match = reply_match;
+    config
+}
+
+/// Documents the default: the first data frame after a send is the reply,
+/// even when it is a server push unrelated to the request.
+#[tokio::test]
+async fn test_first_match_takes_unsolicited_frame_as_reply() {
+    let (target_url, cancel_server) = spawn_chatty_echo_server().await;
+
+    let metrics = Runner::new(chatty_config(target_url, ReplyMatch::First))
+        .run()
+        .await
+        .unwrap();
+
+    assert!(
+        metrics.total_messages_recv >= CHATTY_MIN_REPLIES,
+        "{metrics:?}"
+    );
+    assert_eq!(metrics.total_unsolicited_frames, 0);
+    assert!(
+        metrics.message_rtt.min_us < CHATTY_ECHO_DELAY_FLOOR_US,
+        "the heartbeat should have been taken as a reply: {:?}",
+        metrics.message_rtt
+    );
+
+    cancel_server.cancel();
+}
+
+async fn assert_unsolicited_frames_are_skipped(reply_match: ReplyMatch) {
+    let (target_url, cancel_server) = spawn_chatty_echo_server().await;
+
+    let metrics = Runner::new(chatty_config(target_url, reply_match.clone()))
+        .run()
+        .await
+        .unwrap();
+
+    assert_eq!(metrics.error_rate, 0.0, "{reply_match:?}: {metrics:?}");
+    assert!(
+        metrics.total_messages_recv >= CHATTY_MIN_REPLIES,
+        "{reply_match:?}: {metrics:?}"
+    );
+    assert_eq!(metrics.message_rtt.count, metrics.total_messages_recv);
+    // Each answered request was preceded by one heartbeat; the request still in
+    // flight when the run ended may have seen its heartbeat too.
+    let unsolicited = metrics.total_unsolicited_frames;
+    assert!(
+        (metrics.total_messages_recv..=metrics.total_messages_recv + 1).contains(&unsolicited),
+        "{reply_match:?}: every heartbeat must be counted as unsolicited: {metrics:?}"
+    );
+    assert!(
+        metrics.message_rtt.min_us >= CHATTY_ECHO_DELAY_FLOOR_US,
+        "{reply_match:?}: RTT must come from the delayed echo: {:?}",
+        metrics.message_rtt
+    );
+
+    cancel_server.cancel();
+}
+
+#[tokio::test]
+async fn test_exact_match_skips_unsolicited_frames() {
+    assert_unsolicited_frames_are_skipped(ReplyMatch::Exact).await;
+}
+
+#[tokio::test]
+async fn test_json_pointer_match_skips_unsolicited_frames() {
+    assert_unsolicited_frames_are_skipped(ReplyMatch::JsonPointer("/seq".to_string())).await;
+}
+
+#[cfg(feature = "scenario")]
+#[tokio::test]
+async fn test_scenario_echo_match_skips_unsolicited_frames() {
+    const SENDS: u64 = 5;
+    let (target_url, cancel_server) = spawn_chatty_echo_server().await;
+
+    let phase = ScenarioPhase {
+        name: "chatty".to_string(),
+        target: Some(target_url.clone()),
+        duration: Duration::from_secs(5),
+        connections: 1,
+        ramp_rate: 0,
+        rate_per_conn: 0,
+        payload: Some(PayloadConfig::from_text(r#"{"seq":{{seq}}}"#.to_string())),
+        think_time: Duration::ZERO,
+        actions: vec![
+            ScenarioAction::Send {
+                payload: None,
+                count: SENDS,
+            },
+            ScenarioAction::Close {
+                code: 1000,
+                reason: "done".to_string(),
+            },
+        ],
+    };
+
+    let mut base = scenario_base_config(target_url);
+    base.reply_match = ReplyMatch::JsonPointer("/seq".to_string());
+    let metrics = Runner::with_scenario(base, phase).run().await.unwrap();
+
+    assert_eq!(metrics.error_rate, 0.0, "{metrics:?}");
+    assert_eq!(metrics.total_messages_recv, SENDS);
+    assert_eq!(metrics.total_unsolicited_frames, SENDS);
+    assert!(
+        metrics.message_rtt.min_us >= CHATTY_ECHO_DELAY_FLOOR_US,
+        "RTT must come from the delayed echo: {:?}",
+        metrics.message_rtt
+    );
 
     cancel_server.cancel();
 }
