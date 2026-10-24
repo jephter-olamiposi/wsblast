@@ -4,6 +4,8 @@ use crate::config::LoadTestConfig;
 #[cfg(feature = "scenario")]
 use crate::config::{ScenarioConfig, ScenarioPhase};
 use crate::metrics::{AggregatedMetrics, LiveMetrics, WorkerMetrics};
+#[cfg(feature = "scenario")]
+use crate::report::PhaseTarget;
 use crate::worker::WorkerSession;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -363,13 +365,26 @@ fn check_file_descriptor_limit(required_conns: usize) {
     }
 }
 
+/// Raw result of a scenario run, before the worker metrics are merged.
+#[cfg(feature = "scenario")]
+#[derive(Debug)]
+pub struct ScenarioOutcome {
+    pub worker_metrics: Vec<WorkerMetrics>,
+    /// Sum of every executed phase's elapsed time.
+    pub elapsed: Duration,
+    /// Connection slots of every executed phase.
+    pub connections: u64,
+    /// Target of every executed phase, in run order.
+    pub phase_targets: Vec<PhaseTarget>,
+}
+
 /// Orchestrates multi-phase scenario execution with phase transitions.
 #[cfg(feature = "scenario")]
 pub struct ScenarioExecutor {
     scenario_name: String,
-    cli_target: Option<url::Url>,
-    scenario_target: Option<url::Url>,
     phases: Vec<ScenarioPhase>,
+    /// Resolved endpoint of each entry in `phases`.
+    targets: Vec<url::Url>,
     base_config: LoadTestConfig,
     live_metrics: Arc<LiveMetrics>,
     cancel_token: CancellationToken,
@@ -387,7 +402,8 @@ impl ScenarioExecutor {
     /// # Errors
     ///
     /// Returns [`crate::error::ConfigError::InvalidScenario`] when the requested
-    /// phase is missing or a phase definition fails validation.
+    /// phase is missing, a phase definition fails validation, or a phase has
+    /// no target from the command line, the phase, or the scenario.
     pub fn new(
         scenario: &ScenarioConfig,
         base_config: LoadTestConfig,
@@ -396,14 +412,7 @@ impl ScenarioExecutor {
     ) -> crate::error::Result<Self> {
         Ok(Self {
             scenario_name: scenario.metadata.name.clone(),
-            cli_target: cli_target
-                .map(crate::config::parse_target_url)
-                .transpose()?,
-            scenario_target: scenario
-                .target
-                .as_deref()
-                .map(crate::config::parse_target_url)
-                .transpose()?,
+            targets: scenario.resolve_phase_targets(cli_target, phase)?,
             phases: scenario.compile(phase)?,
             base_config,
             live_metrics: LiveMetrics::new(),
@@ -441,17 +450,18 @@ impl ScenarioExecutor {
     /// Executes every compiled phase sequentially until the scenario ends or
     /// the run-level token is cancelled.
     ///
-    /// Returns merged worker metrics, total elapsed time, and total connection
-    /// attempts across all phases.
+    /// Returns the unmerged worker metrics, total elapsed time, total
+    /// connection slots and the target of every phase that ran.
     ///
     /// # Errors
     ///
     /// Returns [`crate::error::WsBlastError::Metrics`] if per-phase telemetry
     /// initialization fails.
-    pub async fn run(&self) -> crate::error::Result<(Vec<WorkerMetrics>, Duration, u64)> {
+    pub async fn run(&self) -> crate::error::Result<ScenarioOutcome> {
         let mut all_worker_metrics = Vec::new();
         let mut total_elapsed = Duration::ZERO;
         let mut total_connections = 0u64;
+        let mut phase_targets = Vec::with_capacity(self.phases.len());
 
         let _signal_listener = if self.handle_signals {
             spawn_signal_listener(self.cancel_token.clone())
@@ -459,7 +469,7 @@ impl ScenarioExecutor {
             None
         };
 
-        for (phase_idx, phase) in self.phases.iter().enumerate() {
+        for (phase_idx, (phase, target)) in self.phases.iter().zip(&self.targets).enumerate() {
             if self.cancel_token.is_cancelled() {
                 break;
             }
@@ -475,14 +485,11 @@ impl ScenarioExecutor {
             );
 
             let mut config = self.base_config.clone();
-            if let Some(target) = self
-                .cli_target
-                .clone()
-                .or_else(|| phase.target.clone())
-                .or_else(|| self.scenario_target.clone())
-            {
-                config.target_url = target;
-            }
+            config.target_url = target.clone();
+            phase_targets.push(PhaseTarget {
+                phase: phase.name.clone(),
+                target_url: target.clone(),
+            });
 
             let runner = Runner::with_scenario(config, phase.clone())
                 .with_live_metrics(Arc::clone(&self.live_metrics))
@@ -503,6 +510,11 @@ impl ScenarioExecutor {
             }
         }
 
-        Ok((all_worker_metrics, total_elapsed, total_connections))
+        Ok(ScenarioOutcome {
+            worker_metrics: all_worker_metrics,
+            elapsed: total_elapsed,
+            connections: total_connections,
+            phase_targets,
+        })
     }
 }

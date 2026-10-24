@@ -157,7 +157,7 @@ async fn run_app() -> Result<()> {
     let live_metrics = wsblast::metrics::LiveMetrics::new();
 
     // For scenario mode, run the ScenarioExecutor instead of single Runner
-    let metrics = if scenario_mode {
+    let (metrics, phase_targets) = if scenario_mode {
         #[cfg(feature = "scenario")]
         {
             let scenario = scenario.as_ref().ok_or_else(|| {
@@ -172,12 +172,13 @@ async fn run_app() -> Result<()> {
                 cli.resolve_url(),
             )?
             .with_live_metrics(std::sync::Arc::clone(&live_metrics));
-            let (worker_metrics, total_elapsed, total_connections) = executor.run().await?;
-            wsblast::metrics::AggregatedMetrics::merge(
-                worker_metrics,
-                total_elapsed,
-                total_connections,
-            )?
+            let outcome = executor.run().await?;
+            let metrics = wsblast::metrics::AggregatedMetrics::merge(
+                outcome.worker_metrics,
+                outcome.elapsed,
+                outcome.connections,
+            )?;
+            (metrics, outcome.phase_targets)
         }
         #[cfg(not(feature = "scenario"))]
         {
@@ -208,11 +209,12 @@ async fn run_app() -> Result<()> {
                 eprintln!("TUI error: {e}");
             }
 
-            runner_handle
+            let metrics = runner_handle
                 .await
-                .map_err(|e| std::io::Error::other(e.to_string()))??
+                .map_err(|e| std::io::Error::other(e.to_string()))??;
+            (metrics, Vec::new())
         } else {
-            runner.run().await?
+            (runner.run().await?, Vec::new())
         }
     };
 
@@ -231,7 +233,7 @@ async fn run_app() -> Result<()> {
     // Generate report and evaluate SLOs for both modes
     let slo_result = report::evaluate_slos(&config.slo, &metrics);
 
-    report::emit_report(&config, &metrics, &slo_result)
+    report::emit_scenario_report(&config, &metrics, &slo_result, &phase_targets)
         .map_err(wsblast::error::WsBlastError::Io)?;
 
     if !slo_result.passed {

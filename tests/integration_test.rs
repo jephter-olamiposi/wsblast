@@ -1022,16 +1022,23 @@ async fn test_scenario_executor_runs_every_phase() {
 
     let executor =
         ScenarioExecutor::new(&scenario, scenario_base_config(target_url), None, None).unwrap();
-    let (worker_metrics, elapsed, connections) = executor.run().await.unwrap();
+    let outcome = executor.run().await.unwrap();
 
-    assert_eq!(connections, 5);
-    assert_eq!(worker_metrics.len(), 5);
-    assert!(elapsed >= Duration::from_millis(160));
+    assert_eq!(outcome.connections, 5);
+    assert_eq!(outcome.worker_metrics.len(), 5);
+    assert!(outcome.elapsed >= Duration::from_millis(160));
     assert!(
-        worker_metrics
+        outcome
+            .worker_metrics
             .iter()
             .all(|metrics| metrics.messages_sent > 0)
     );
+    let phases: Vec<&str> = outcome
+        .phase_targets
+        .iter()
+        .map(|target| target.phase.as_str())
+        .collect();
+    assert_eq!(phases, ["warmup", "sustain"]);
 
     cancel_server.cancel();
 }
@@ -1606,11 +1613,16 @@ async fn test_scenario_executor_cancel_token_skips_remaining_phases() {
     });
 
     let started = std::time::Instant::now();
-    let (worker_metrics, _, connections) = executor.run().await.unwrap();
+    let outcome = executor.run().await.unwrap();
 
     assert!(started.elapsed() < Duration::from_secs(3));
-    assert_eq!(connections, 2);
-    assert_eq!(worker_metrics.len(), 2);
+    assert_eq!(outcome.connections, 2);
+    assert_eq!(outcome.worker_metrics.len(), 2);
+    assert_eq!(
+        outcome.phase_targets.len(),
+        1,
+        "skipped phases are not listed"
+    );
 
     cancel_server.cancel();
 }

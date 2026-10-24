@@ -279,4 +279,4 @@ SLOs are checked before the "all connections failed" condition. A run where ever
 - **Payload bytes only.** Byte counts exclude framing, TLS and handshake traffic, so they understate wire bandwidth.
 - **Request cap overshoot.** `--requests` can be exceeded by up to about one message per connection.
 - **Slot-based failure count.** `total_connections_failed` includes slots that were never started. Read it together with the ramp warning and `error_breakdown`.
-- **Scenario report header.** In a scenario, the report's `target_url` is the first executed phase's target, even when later phases used other targets.
+- **Scenario report header.** In a scenario, the JSON report's `target_url` is the first executed phase's target. `phase_targets` lists the target of every executed phase.
