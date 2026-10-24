@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-rc.1] - 2026-10-24
+
 v0.2.0 ships a smaller crate in which every feature works end to end. Several features that were developed on `main` after 0.1.1 were removed before release; their code is preserved on the [`archive/v0.1-full-features`](https://github.com/jephter-olamiposi/wsblast/tree/archive/v0.1-full-features) branch, and several of them will return, rebuilt, in later releases.
 
 ### Migrating from 0.1
