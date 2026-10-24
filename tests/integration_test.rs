@@ -619,6 +619,7 @@ async fn test_slots_the_ramp_never_reaches_are_not_failures() {
     assert_eq!(
         metrics.total_connections_established
             + metrics.total_connections_failed
+            + metrics.total_connections_interrupted
             + metrics.total_connections_not_started,
         metrics.total_connections_attempted
     );
@@ -1572,6 +1573,63 @@ async fn test_scenario_echo_match_skips_unsolicited_frames() {
         metrics.message_rtt
     );
 
+    cancel_server.cancel();
+}
+
+/// Accepts TCP connections and never answers the WebSocket upgrade, so every
+/// handshake stays in progress until the client gives up.
+async fn spawn_unresponsive_server() -> (Url, tokio_util::sync::CancellationToken) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("ws://{}", listener.local_addr().unwrap())).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_server = cancel.clone();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            tokio::select! {
+                Ok((stream, _)) = listener.accept() => held.push(stream),
+                _ = cancel_server.cancelled() => break,
+            }
+        }
+    });
+    (url, cancel)
+}
+
+#[tokio::test]
+async fn test_handshakes_cut_off_by_the_run_end_are_interrupted_not_failed() {
+    let (target_url, cancel_server) = spawn_unresponsive_server().await;
+
+    let metrics = run(echo_test_config(&target_url)
+        .connections(3)
+        .duration(Duration::from_millis(300))
+        .connect_timeout(Duration::from_secs(5)))
+    .await;
+
+    assert_eq!(metrics.total_connections_established, 0, "{metrics:?}");
+    assert_eq!(metrics.total_connections_failed, 0, "{metrics:?}");
+    assert_eq!(metrics.total_connections_interrupted, 3, "{metrics:?}");
+    assert!(metrics.error_breakdown.is_empty(), "{metrics:?}");
+    cancel_server.cancel();
+}
+
+#[tokio::test]
+async fn test_a_handshake_that_times_out_is_failed_not_interrupted() {
+    let (target_url, cancel_server) = spawn_unresponsive_server().await;
+
+    let metrics = run(echo_test_config(&target_url)
+        .connections(2)
+        .duration(Duration::from_millis(400))
+        .connect_timeout(Duration::from_millis(100))
+        .reconnect(false))
+    .await;
+
+    assert_eq!(metrics.total_connections_failed, 2, "{metrics:?}");
+    assert_eq!(metrics.total_connections_interrupted, 0, "{metrics:?}");
+    assert_eq!(
+        metrics.error_breakdown.get(&ErrorCategory::Timeout),
+        Some(&2),
+        "{metrics:?}"
+    );
     cancel_server.cancel();
 }
 

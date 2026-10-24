@@ -117,6 +117,9 @@ pub struct WorkerMetrics {
     pub(crate) reconnects: u64,
     /// Data frames skipped while waiting for an echo reply.
     pub(crate) unsolicited_frames: u64,
+    /// The run ended during this worker's first handshake, before it
+    /// succeeded or failed.
+    pub(crate) interrupted: bool,
     pub(crate) live: Arc<LiveMetrics>,
 }
 
@@ -149,6 +152,7 @@ impl WorkerMetrics {
             sent_message_errors: 0,
             reconnects: 0,
             unsolicited_frames: 0,
+            interrupted: false,
             live,
         })
     }
@@ -330,11 +334,15 @@ impl LatencyStats {
 /// total even when workers reconnect:
 /// - `total_connections_attempted`: worker slots the run tried to open.
 /// - `total_connections_established`: slots that completed at least one handshake.
-/// - `total_connections_failed`: started slots that never completed a handshake.
+/// - `total_connections_failed`: started slots that never completed a handshake
+///   and recorded at least one connection error.
+/// - `total_connections_interrupted`: started slots whose first handshake was
+///   still in progress when the run ended, so they neither succeeded nor
+///   failed.
 /// - `total_connections_not_started`: slots the ramp had not reached when the
 ///   run ended, so `total_connections_attempted` equals
 ///   `total_connections_established + total_connections_failed +
-///   total_connections_not_started`.
+///   total_connections_interrupted + total_connections_not_started`.
 /// - `total_reconnects`: extra handshakes that re-established a slot after its
 ///   connection was lost, so `handshake_latency.count` equals
 ///   `total_connections_established + total_reconnects`.
@@ -345,8 +353,13 @@ pub struct AggregatedMetrics {
     pub total_connections_attempted: u64,
     /// Slots that completed at least one handshake.
     pub total_connections_established: u64,
-    /// Started slots that never completed a handshake.
+    /// Started slots that never completed a handshake and recorded a
+    /// connection error.
     pub total_connections_failed: u64,
+    /// Started slots whose first handshake was still in progress when the
+    /// run ended.
+    #[serde(default)]
+    pub total_connections_interrupted: u64,
     /// Slots the ramp had not reached when the run ended.
     #[serde(default)]
     pub total_connections_not_started: u64,
@@ -401,6 +414,7 @@ impl AggregatedMetrics {
         let mut total_bytes_recv = 0u64;
         let mut total_reconnects = 0u64;
         let mut total_unsolicited_frames = 0u64;
+        let mut total_connections_interrupted = 0u64;
         let mut sent_message_errors = 0u64;
         let mut error_breakdown = HashMap::new();
 
@@ -414,6 +428,7 @@ impl AggregatedMetrics {
             total_reconnects += w.reconnects;
             total_unsolicited_frames += w.unsolicited_frames;
             sent_message_errors += w.sent_message_errors;
+            total_connections_interrupted += u64::from(w.interrupted);
 
             for (category, count) in w.errors {
                 *error_breakdown.entry(category).or_insert(0) += count;
@@ -442,13 +457,17 @@ impl AggregatedMetrics {
             .len()
             .saturating_sub(total_reconnects)
             .min(attempted_conns);
-        let total_connections_failed =
-            attempted_conns.saturating_sub(total_connections_established);
+        let total_connections_interrupted = total_connections_interrupted
+            .min(attempted_conns.saturating_sub(total_connections_established));
+        let total_connections_failed = attempted_conns
+            .saturating_sub(total_connections_established)
+            .saturating_sub(total_connections_interrupted);
 
         Ok(Self {
             total_connections_attempted: attempted_conns,
             total_connections_established,
             total_connections_failed,
+            total_connections_interrupted,
             total_connections_not_started: 0,
             total_reconnects,
             total_unsolicited_frames,

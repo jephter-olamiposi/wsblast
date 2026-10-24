@@ -185,14 +185,16 @@ Connection counts are per worker slot, not per handshake:
 | :--- | :--- |
 | `total_connections_attempted` | Worker slots the run was configured to open: `-c`, or the sum over scenario phases. |
 | `total_connections_established` | Slots that completed at least one handshake. |
-| `total_connections_failed` | Started slots that never completed a handshake. |
+| `total_connections_failed` | Started slots that never completed a handshake and recorded a connection error. |
+| `total_connections_interrupted` | Started slots whose first handshake was still in progress when the run ended. |
 | `total_connections_not_started` | Slots the ramp had not reached when the run ended. |
 | `total_reconnects` | Extra handshakes that re-established a slot after it lost its connection. |
 
-`total_connections_attempted = total_connections_established + total_connections_failed + total_connections_not_started`, and `handshake_latency.count = total_connections_established + total_reconnects`.
+`total_connections_attempted = total_connections_established + total_connections_failed + total_connections_interrupted + total_connections_not_started`, and `handshake_latency.count = total_connections_established + total_reconnects`.
 
 A slot is not started when the run ends before the ramp reaches it, usually because `--duration` is shorter than `-c / --ramp-rate` (wsblast warns about this at start) or because the run was interrupted. Such a slot never tried to connect, so it is not a failure and has no entry in `error_breakdown`. A local run with `-c 10 --ramp-rate 5 -d 600ms` reports 10 attempted, 3 established, 0 failed and 7 not started. The text and Markdown reports show the not-started count only when it is non-zero.
 
+A slot is interrupted when the run ends while its first handshake is still in progress: it neither succeeded nor failed, so it has no entry in `error_breakdown` and does not count toward `error_rate`. A slot that recorded a connection error before the run ended, for example a `timeout` followed by a reconnect attempt still in progress, counts as failed. Interrupted slots usually mean `--duration` is too short for the target's handshake time or that the target is accepting TCP connections without completing the upgrade; check `--connect-timeout` and the target. The text and Markdown reports show the interrupted count only when it is non-zero, and a run in which every slot was interrupted exits with code 1, like a run in which every slot failed.
 
 ### 7.1 Reconnect policy
 

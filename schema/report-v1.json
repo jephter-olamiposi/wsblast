@@ -168,7 +168,11 @@
           "$ref": "#/$defs/count"
         },
         "total_connections_failed": {
-          "description": "Started worker slots that never completed a handshake. total_connections_attempted equals total_connections_established + total_connections_failed + total_connections_not_started.",
+          "description": "Started worker slots that never completed a handshake and recorded a connection error. total_connections_attempted equals total_connections_established + total_connections_failed + total_connections_interrupted + total_connections_not_started.",
+          "$ref": "#/$defs/count"
+        },
+        "total_connections_interrupted": {
+          "description": "Started worker slots whose first handshake was still in progress when the run ended, so they neither succeeded nor failed and have no error recorded. Absent from reports written before this field was added; readers should treat a missing value as 0.",
           "$ref": "#/$defs/count"
         },
         "total_connections_not_started": {

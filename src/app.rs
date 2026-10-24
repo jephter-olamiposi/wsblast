@@ -282,10 +282,17 @@ async fn run_app() -> Result<()> {
     }
 
     if metrics.total_connections_attempted > 0 && metrics.total_connections_established == 0 {
-        eprintln!(
-            "{} All connection attempts failed. Target may be unreachable.",
-            "Failure:".bold().red()
-        );
+        if metrics.total_connections_failed == 0 && metrics.total_connections_interrupted > 0 {
+            eprintln!(
+                "{} No connection finished its handshake before the run ended. Increase --duration or check the target.",
+                "Failure:".bold().red()
+            );
+        } else {
+            eprintln!(
+                "{} All connection attempts failed. Target may be unreachable.",
+                "Failure:".bold().red()
+            );
+        }
         std::process::exit(1);
     }
 

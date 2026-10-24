@@ -624,6 +624,12 @@ fn render_text_report(
             metrics.total_connections_established, metrics.total_connections_failed
         ),
     ]);
+    if metrics.total_connections_interrupted > 0 {
+        tput_table.add_row(vec![
+            "Connections Interrupted (still connecting at end of run)",
+            &metrics.total_connections_interrupted.to_string(),
+        ]);
+    }
     if metrics.total_connections_not_started > 0 {
         tput_table.add_row(vec![
             "Connections Not Started (ramp cut short by --duration)",
@@ -845,6 +851,12 @@ fn render_markdown_report(
         metrics.total_connections_failed,
         metrics.total_reconnects
     ));
+    if metrics.total_connections_interrupted > 0 {
+        md.push_str(&format!(
+            "- **Connections Interrupted:** `{}` (still connecting at end of run)\n",
+            metrics.total_connections_interrupted
+        ));
+    }
     if metrics.total_connections_not_started > 0 {
         md.push_str(&format!(
             "- **Connections Not Started:** `{}` (ramp cut short by `--duration`)\n",
@@ -957,6 +969,7 @@ mod tests {
             total_connections_attempted: 10,
             total_connections_established: 10,
             total_connections_failed: 0,
+            total_connections_interrupted: 0,
             total_connections_not_started: 0,
             total_reconnects: 0,
             total_unsolicited_frames: 0,
@@ -1271,6 +1284,28 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_connections_are_reported_only_when_present() {
+        let slo = evaluate_slos(&SloThresholds::default(), &sample_metrics());
+        let mut metrics = sample_metrics();
+
+        for format in ["text", "markdown"] {
+            let rendered = render_report(&report_config(format), &metrics, &slo);
+            assert!(!rendered.contains("Interrupted"), "{format}: {rendered}");
+        }
+
+        metrics.total_connections_established = 6;
+        metrics.total_connections_interrupted = 4;
+        for format in ["text", "markdown"] {
+            let rendered = render_report(&report_config(format), &metrics, &slo);
+            let line = rendered
+                .lines()
+                .find(|line| line.contains("Interrupted"))
+                .unwrap_or_else(|| panic!("{format}: {rendered}"));
+            assert!(line.contains('4'), "{format}: {line}");
+        }
+    }
+
+    #[test]
     fn scenario_reports_list_every_phase_target() {
         let slo = evaluate_slos(&SloThresholds::default(), &sample_metrics());
         let phases = [
@@ -1336,5 +1371,18 @@ mod tests {
 
         let parsed = parse_report_metrics(&legacy.to_string()).expect("legacy report must parse");
         assert_eq!(parsed.total_connections_not_started, 0);
+    }
+
+    #[cfg(feature = "compare")]
+    #[test]
+    fn reports_without_interrupted_counter_still_parse() {
+        let mut legacy = serde_json::to_value(sample_metrics()).expect("serialize");
+        legacy
+            .as_object_mut()
+            .expect("metrics object")
+            .remove("total_connections_interrupted");
+
+        let parsed = parse_report_metrics(&legacy.to_string()).expect("legacy report must parse");
+        assert_eq!(parsed.total_connections_interrupted, 0);
     }
 }

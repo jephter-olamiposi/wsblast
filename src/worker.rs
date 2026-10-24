@@ -91,7 +91,14 @@ impl WorkerSession {
             );
             let connect_result = tokio::select! {
                 biased;
-                _ = self.cancel_token.cancelled() => break,
+                _ = self.cancel_token.cancelled() => {
+                    // The run ended during this slot's first handshake, before
+                    // it could succeed or fail: report it apart from failures.
+                    if !connected_before && self.metrics.errors.is_empty() {
+                        self.metrics.interrupted = true;
+                    }
+                    break;
+                }
                 res = connect_fut => res,
             };
 
