@@ -187,29 +187,8 @@ pub struct SloThresholds {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 pub enum AuthConfig {
-    Static {
-        token: String,
-        header: String,
-    },
-    Jwt {
-        endpoint: Url,
-        client_id: String,
-        secret: String,
-        scopes: Vec<String>,
-    },
-    OAuth2 {
-        token_url: Url,
-        client_id: String,
-        client_secret: String,
-        scopes: Vec<String>,
-    },
-    ApiKey {
-        key: String,
-        header: String,
-    },
-    Custom {
-        refresh_fn: String,
-    },
+    Static { token: String, header: String },
+    ApiKey { key: String, header: String },
 }
 
 #[cfg(feature = "graphql-ws")]
@@ -818,11 +797,7 @@ impl LoadTestConfig {
             use crate::cli::AuthType;
             match cli.auth_type {
                 AuthType::None => {
-                    if cli.auth_token.is_some()
-                        || cli.auth_apikey.is_some()
-                        || cli.auth_jwt_endpoint.is_some()
-                        || cli.auth_oauth2_token_url.is_some()
-                    {
+                    if cli.auth_token.is_some() || cli.auth_apikey.is_some() {
                         return Err(ConfigError::InvalidThreshold(
                             "authentication options require an explicit --auth-type".to_string(),
                         )
@@ -843,62 +818,6 @@ impl LoadTestConfig {
                     Some(AuthConfig::Static {
                         token: token.to_string(),
                         header: cli.auth_header.clone(),
-                    })
-                }
-                AuthType::Jwt => {
-                    let endpoint = cli.auth_jwt_endpoint.as_ref().ok_or_else(|| {
-                        ConfigError::InvalidThreshold(
-                            "JWT authentication requires --auth-jwt-endpoint".to_string(),
-                        )
-                    })?;
-                    let client_id = cli.auth_jwt_client_id.as_ref().ok_or_else(|| {
-                        ConfigError::InvalidThreshold(
-                            "JWT authentication requires --auth-jwt-client-id".to_string(),
-                        )
-                    })?;
-                    let secret = cli.auth_jwt_secret.as_ref().ok_or_else(|| {
-                        ConfigError::InvalidThreshold(
-                            "JWT authentication requires --auth-jwt-secret".to_string(),
-                        )
-                    })?;
-                    let scopes = cli.auth_jwt_scopes.clone();
-                    let endpoint_url = Url::parse(endpoint).map_err(|e| {
-                        ConfigError::InvalidUrl(endpoint.to_string(), e.to_string())
-                    })?;
-                    Some(AuthConfig::Jwt {
-                        endpoint: endpoint_url,
-                        client_id: client_id.clone(),
-                        secret: secret.clone(),
-                        scopes,
-                    })
-                }
-                AuthType::OAuth2 => {
-                    let token_url = cli.auth_oauth2_token_url.as_ref().ok_or_else(|| {
-                        ConfigError::InvalidThreshold(
-                            "OAuth2 authentication requires --auth-oauth2-token-url".to_string(),
-                        )
-                    })?;
-                    let client_id = cli.auth_oauth2_client_id.as_ref().ok_or_else(|| {
-                        ConfigError::InvalidThreshold(
-                            "OAuth2 authentication requires --auth-oauth2-client-id".to_string(),
-                        )
-                    })?;
-                    let client_secret =
-                        cli.auth_oauth2_client_secret.as_ref().ok_or_else(|| {
-                            ConfigError::InvalidThreshold(
-                                "OAuth2 authentication requires --auth-oauth2-client-secret"
-                                    .to_string(),
-                            )
-                        })?;
-                    let scopes = cli.auth_oauth2_scopes.clone();
-                    let token_url_parsed = Url::parse(token_url).map_err(|e| {
-                        ConfigError::InvalidUrl(token_url.to_string(), e.to_string())
-                    })?;
-                    Some(AuthConfig::OAuth2 {
-                        token_url: token_url_parsed,
-                        client_id: client_id.clone(),
-                        client_secret: client_secret.clone(),
-                        scopes,
                     })
                 }
                 AuthType::ApiKey => {
