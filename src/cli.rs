@@ -393,6 +393,10 @@ pub struct Cli {
     #[arg(long = "no-progress", default_value_t = false)]
     pub no_progress: bool,
 
+    /// End a connection's worker after a timeout, I/O error or server close instead of reconnecting with backoff
+    #[arg(long = "no-reconnect", default_value_t = false)]
+    pub no_reconnect: bool,
+
     /// Path to scenario YAML file defining multi-phase test (conflicts with individual flags)
     #[arg(long = "scenario", value_name = "FILE", conflicts_with_all = ["connections", "duration", "rate", "payload", "payload_file"])]
     pub scenario: Option<PathBuf>,
