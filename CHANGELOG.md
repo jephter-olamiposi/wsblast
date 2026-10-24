@@ -27,6 +27,7 @@ v0.2.0 ships a smaller crate in which every feature works end to end. Several fe
 - Metric constructors and aggregation are fallible (`WorkerMetrics::new`, `AggregatedMetrics::merge`); runner and executor APIs propagate metrics errors.
 - Configuration errors that are not thresholds have accurate variants: `ConfigError::InvalidAuth` for authentication options, and `ConfigError::InvalidOption` for a zero `--requests` limit, a missing `--graphql-ws-operation`, GraphQL WS variables or extensions that are not a JSON object, and `--compare` without exactly two files. `ConfigError::InvalidThreshold` now only covers `--max-error-rate` and `--compare-threshold`.
 - README documents feature flags, scenario targets, authentication lifetime, GraphQL WS and comparison workflows.
+- The minimum supported Rust version is now 1.88 (`rust-version` in `Cargo.toml`), for the default build and for `--features full`. The locked dependency graph needs it: `comfy-table` 7.2 uses let chains, which Rust 1.88 stabilised, so the previously declared 1.85 no longer builds the crate. The Docker image and the GitLab CI example now use `rust:1.88`.
 
 ### Removed
 - Distributed coordinator/worker execution over gRPC (`distributed` feature, `--distributed-mode` and the coordinator and worker flags), with its protobuf definitions and build script. Building the crate no longer needs `protoc`.

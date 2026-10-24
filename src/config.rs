@@ -768,13 +768,13 @@ impl LoadTestConfig {
             min_throughput: cli.min_throughput,
         };
 
-        if let Some(err_rate) = slo.max_error_rate {
-            if !(0.0..=1.0).contains(&err_rate) {
-                return Err(ConfigError::InvalidThreshold(format!(
-                    "max_error_rate must be between 0.0 and 1.0, received {err_rate}"
-                ))
-                .into());
-            }
+        if let Some(err_rate) = slo.max_error_rate
+            && !(0.0..=1.0).contains(&err_rate)
+        {
+            return Err(ConfigError::InvalidThreshold(format!(
+                "max_error_rate must be between 0.0 and 1.0, received {err_rate}"
+            ))
+            .into());
         }
 
         // Only echo mode measures round-trip time; any other mode would leave the

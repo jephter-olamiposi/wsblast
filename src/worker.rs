@@ -138,10 +138,10 @@ impl WorkerSession {
         >,
     ) -> SessionEnd {
         #[cfg(feature = "scenario")]
-        if let Some(phase) = self.scenario.clone() {
-            if !phase.actions.is_empty() {
-                return self.run_action_loop(ws_stream, phase).await;
-            }
+        if let Some(phase) = self.scenario.clone()
+            && !phase.actions.is_empty()
+        {
+            return self.run_action_loop(ws_stream, phase).await;
         }
 
         match self.config.mode {
@@ -174,13 +174,13 @@ impl WorkerSession {
 
         req.headers_mut().extend(self.config.headers.clone());
 
-        if let Some(subproto) = &self.config.subprotocol {
-            if let Ok(val) = http::HeaderValue::from_str(subproto) {
-                req.headers_mut().insert(
-                    http::header::HeaderName::from_static("sec-websocket-protocol"),
-                    val,
-                );
-            }
+        if let Some(subproto) = &self.config.subprotocol
+            && let Ok(val) = http::HeaderValue::from_str(subproto)
+        {
+            req.headers_mut().insert(
+                http::header::HeaderName::from_static("sec-websocket-protocol"),
+                val,
+            );
         }
 
         Ok(req)
@@ -218,12 +218,12 @@ impl WorkerSession {
                 break;
             }
 
-            if let Some(max_reqs) = self.config.max_requests {
-                if self.metrics.live.messages_sent.load(Ordering::Relaxed) >= max_reqs {
-                    self.cancel_token.cancel();
-                    let _ = sink.send(Message::Close(None)).await;
-                    break;
-                }
+            if let Some(max_reqs) = self.config.max_requests
+                && self.metrics.live.messages_sent.load(Ordering::Relaxed) >= max_reqs
+            {
+                self.cancel_token.cancel();
+                let _ = sink.send(Message::Close(None)).await;
+                break;
             }
 
             if let Some(ref mut t) = ticker {
@@ -341,12 +341,12 @@ impl WorkerSession {
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
-            if let Some(max_reqs) = self.config.max_requests {
-                if self.metrics.live.messages_sent.load(Ordering::Relaxed) >= max_reqs {
-                    self.cancel_token.cancel();
-                    let _ = sink.send(Message::Close(None)).await;
-                    break;
-                }
+            if let Some(max_reqs) = self.config.max_requests
+                && self.metrics.live.messages_sent.load(Ordering::Relaxed) >= max_reqs
+            {
+                self.cancel_token.cancel();
+                let _ = sink.send(Message::Close(None)).await;
+                break;
             }
 
             tokio::select! {

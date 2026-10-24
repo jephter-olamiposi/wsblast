@@ -124,21 +124,20 @@ impl TuiApp {
                 );
             })?;
 
-            if event::poll(Duration::from_millis(80))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        match (key.code, key.modifiers) {
-                            (KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc, _) => {
-                                self.cancel_token.cancel();
-                                break;
-                            }
-                            (KeyCode::Char('c'), crossterm::event::KeyModifiers::CONTROL) => {
-                                self.cancel_token.cancel();
-                                break;
-                            }
-                            _ => {}
-                        }
+            if event::poll(Duration::from_millis(80))?
+                && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
+                match (key.code, key.modifiers) {
+                    (KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc, _) => {
+                        self.cancel_token.cancel();
+                        break;
                     }
+                    (KeyCode::Char('c'), crossterm::event::KeyModifiers::CONTROL) => {
+                        self.cancel_token.cancel();
+                        break;
+                    }
+                    _ => {}
                 }
             }
 
