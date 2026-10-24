@@ -317,11 +317,6 @@ impl TryFrom<ProtoLoadTestConfig> for LoadTestConfig {
             connect_timeout: Duration::from_millis(proto.connect_timeout_ms),
             message_timeout: Duration::from_millis(proto.message_timeout_ms),
             ping_interval: Duration::from_millis(proto.ping_interval_ms),
-            #[cfg(feature = "compression")]
-            compression: crate::config::CompressionConfig {
-                enabled: false,
-                level: 6,
-            },
             #[cfg(feature = "auth")]
             auth: None,
             #[cfg(feature = "graphql-ws")]

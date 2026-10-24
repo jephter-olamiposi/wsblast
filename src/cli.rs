@@ -189,16 +189,6 @@ pub struct Cli {
     )]
     pub prometheus_listen: String,
 
-    /// Enable permessage-deflate compression (unavailable with tungstenite 0.26)
-    #[cfg(feature = "compression")]
-    #[arg(long = "compression", default_value_t = false)]
-    pub compression: bool,
-
-    /// Compression level (1-9)
-    #[cfg(feature = "compression")]
-    #[arg(long = "compression-level", value_name = "LEVEL", default_value_t = 6)]
-    pub compression_level: u8,
-
     /// Authentication type (static, jwt, oauth2, apikey)
     #[cfg(feature = "auth")]
     #[arg(long = "auth-type", value_name = "TYPE", value_enum, default_value_t = AuthType::None)]

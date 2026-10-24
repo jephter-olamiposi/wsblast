@@ -42,7 +42,6 @@ jobs:
           - scenario
           - otel
           - prometheus
-          - compression
           - auth
           - graphql-ws
           - capture

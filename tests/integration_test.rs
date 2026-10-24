@@ -192,11 +192,6 @@ async fn test_echo_mode_load_run() {
         connect_timeout: Duration::from_secs(2),
         message_timeout: Duration::from_secs(2),
         ping_interval: Duration::ZERO,
-        #[cfg(feature = "compression")]
-        compression: wsblast::config::CompressionConfig {
-            enabled: false,
-            level: 6,
-        },
         #[cfg(feature = "auth")]
         auth: None,
         #[cfg(feature = "graphql-ws")]
@@ -259,11 +254,6 @@ async fn test_slo_evaluation_pass_and_fail() {
         connect_timeout: Duration::from_secs(2),
         message_timeout: Duration::from_secs(2),
         ping_interval: Duration::ZERO,
-        #[cfg(feature = "compression")]
-        compression: wsblast::config::CompressionConfig {
-            enabled: false,
-            level: 6,
-        },
         #[cfg(feature = "auth")]
         auth: None,
         #[cfg(feature = "graphql-ws")]
@@ -334,11 +324,6 @@ async fn test_json_and_markdown_report_formatting() {
         connect_timeout: Duration::from_secs(1),
         message_timeout: Duration::from_secs(1),
         ping_interval: Duration::ZERO,
-        #[cfg(feature = "compression")]
-        compression: wsblast::config::CompressionConfig {
-            enabled: false,
-            level: 6,
-        },
         #[cfg(feature = "auth")]
         auth: None,
         #[cfg(feature = "graphql-ws")]
@@ -407,11 +392,6 @@ async fn test_error_taxonomy_when_target_offline() {
         connect_timeout: Duration::from_millis(200),
         message_timeout: Duration::from_millis(200),
         ping_interval: Duration::ZERO,
-        #[cfg(feature = "compression")]
-        compression: wsblast::config::CompressionConfig {
-            enabled: false,
-            level: 6,
-        },
         #[cfg(feature = "auth")]
         auth: None,
         #[cfg(feature = "graphql-ws")]
@@ -542,11 +522,6 @@ async fn test_custom_headers_propagation() {
         connect_timeout: Duration::from_secs(1),
         message_timeout: Duration::from_secs(1),
         ping_interval: Duration::ZERO,
-        #[cfg(feature = "compression")]
-        compression: wsblast::config::CompressionConfig {
-            enabled: false,
-            level: 6,
-        },
         #[cfg(feature = "auth")]
         auth: None,
         #[cfg(feature = "graphql-ws")]
@@ -674,11 +649,6 @@ async fn test_graphql_ws_subscription_lifecycle() {
         connect_timeout: Duration::from_secs(2),
         message_timeout: Duration::from_secs(2),
         ping_interval: Duration::ZERO,
-        #[cfg(feature = "compression")]
-        compression: wsblast::config::CompressionConfig {
-            enabled: false,
-            level: 6,
-        },
         #[cfg(feature = "auth")]
         auth: None,
         graphql_ws: Some(GraphQLWSConfig {
@@ -746,11 +716,6 @@ async fn test_connection_ramp_rate() {
         connect_timeout: Duration::from_secs(2),
         message_timeout: Duration::from_secs(2),
         ping_interval: Duration::ZERO,
-        #[cfg(feature = "compression")]
-        compression: wsblast::config::CompressionConfig {
-            enabled: false,
-            level: 6,
-        },
         #[cfg(feature = "auth")]
         auth: None,
         #[cfg(feature = "graphql-ws")]
@@ -806,11 +771,6 @@ async fn test_duration_includes_connection_ramp() {
         connect_timeout: Duration::from_secs(2),
         message_timeout: Duration::from_secs(2),
         ping_interval: Duration::ZERO,
-        #[cfg(feature = "compression")]
-        compression: wsblast::config::CompressionConfig {
-            enabled: false,
-            level: 6,
-        },
         #[cfg(feature = "auth")]
         auth: None,
         #[cfg(feature = "graphql-ws")]
@@ -886,11 +846,6 @@ async fn test_requests_limit_enforcement() {
         connect_timeout: Duration::from_secs(2),
         message_timeout: Duration::from_secs(2),
         ping_interval: Duration::ZERO,
-        #[cfg(feature = "compression")]
-        compression: wsblast::config::CompressionConfig {
-            enabled: false,
-            level: 6,
-        },
         #[cfg(feature = "auth")]
         auth: None,
         #[cfg(feature = "graphql-ws")]
@@ -950,11 +905,6 @@ async fn test_stream_mode_load_run() {
         connect_timeout: Duration::from_secs(2),
         message_timeout: Duration::from_secs(2),
         ping_interval: Duration::ZERO,
-        #[cfg(feature = "compression")]
-        compression: wsblast::config::CompressionConfig {
-            enabled: false,
-            level: 6,
-        },
         #[cfg(feature = "auth")]
         auth: None,
         #[cfg(feature = "graphql-ws")]
@@ -1011,11 +961,6 @@ async fn test_binary_payload_dispatch() {
         connect_timeout: Duration::from_secs(2),
         message_timeout: Duration::from_secs(2),
         ping_interval: Duration::ZERO,
-        #[cfg(feature = "compression")]
-        compression: wsblast::config::CompressionConfig {
-            enabled: false,
-            level: 6,
-        },
         #[cfg(feature = "auth")]
         auth: None,
         #[cfg(feature = "graphql-ws")]
@@ -1108,11 +1053,6 @@ async fn test_listen_mode_with_server_broadcast_and_ping() {
         connect_timeout: Duration::from_secs(2),
         message_timeout: Duration::from_secs(2),
         ping_interval: Duration::ZERO,
-        #[cfg(feature = "compression")]
-        compression: wsblast::config::CompressionConfig {
-            enabled: false,
-            level: 6,
-        },
         #[cfg(feature = "auth")]
         auth: None,
         #[cfg(feature = "graphql-ws")]
@@ -1167,11 +1107,6 @@ fn scenario_base_config(target_url: Url) -> LoadTestConfig {
         connect_timeout: Duration::from_secs(2),
         message_timeout: Duration::from_secs(2),
         ping_interval: Duration::ZERO,
-        #[cfg(feature = "compression")]
-        compression: wsblast::config::CompressionConfig {
-            enabled: false,
-            level: 6,
-        },
         #[cfg(feature = "auth")]
         auth: None,
         #[cfg(feature = "graphql-ws")]
@@ -1312,11 +1247,6 @@ fn echo_test_config(target_url: Url) -> LoadTestConfig {
         connect_timeout: Duration::from_secs(2),
         message_timeout: Duration::from_secs(2),
         ping_interval: Duration::ZERO,
-        #[cfg(feature = "compression")]
-        compression: wsblast::config::CompressionConfig {
-            enabled: false,
-            level: 6,
-        },
         #[cfg(feature = "auth")]
         auth: None,
         #[cfg(feature = "graphql-ws")]

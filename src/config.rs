@@ -33,8 +33,6 @@ pub struct LoadTestConfig {
     pub connect_timeout: Duration,
     pub message_timeout: Duration,
     pub ping_interval: Duration,
-    #[cfg(feature = "compression")]
-    pub compression: CompressionConfig,
     #[cfg(feature = "auth")]
     pub auth: Option<AuthConfig>,
     #[cfg(feature = "graphql-ws")]
@@ -200,13 +198,6 @@ pub struct OtelConfig {
 #[derive(Debug, Clone)]
 pub struct PrometheusConfig {
     pub listen_addr: String,
-}
-
-#[cfg(feature = "compression")]
-#[derive(Debug, Clone)]
-pub struct CompressionConfig {
-    pub enabled: bool,
-    pub level: u8,
 }
 
 #[cfg(feature = "auth")]
@@ -775,11 +766,6 @@ impl LoadTestConfig {
             return Err(ConfigError::ZeroConcurrency(0).into());
         }
 
-        #[cfg(feature = "compression")]
-        if cli.compression {
-            return Err(ConfigError::CompressionUnsupported.into());
-        }
-
         #[cfg(feature = "chaos")]
         {
             validate_percentage("loss", cli.chaos_loss)?;
@@ -1006,11 +992,6 @@ impl LoadTestConfig {
             connect_timeout,
             message_timeout,
             ping_interval,
-            #[cfg(feature = "compression")]
-            compression: CompressionConfig {
-                enabled: cli.compression,
-                level: cli.compression_level.clamp(1, 9),
-            },
             #[cfg(feature = "auth")]
             auth,
             #[cfg(feature = "graphql-ws")]
@@ -1347,16 +1328,6 @@ mod tests {
             "10",
         ]);
         assert!(LoadTestConfig::from_cli(cli).is_ok());
-    }
-
-    #[cfg(feature = "compression")]
-    #[test]
-    fn compression_flag_is_rejected() {
-        use clap::Parser;
-
-        let cli = Cli::parse_from(["wsblast", "ws://127.0.0.1:9001", "--compression"]);
-        let error = LoadTestConfig::from_cli(cli).unwrap_err();
-        assert!(error.to_string().contains("permessage-deflate"));
     }
 
     #[cfg(feature = "chaos")]

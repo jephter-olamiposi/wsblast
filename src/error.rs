@@ -63,11 +63,6 @@ pub enum ConfigError {
     #[error("Unsupported option combination: {0}")]
     UnsupportedOption(String),
 
-    #[error(
-        "permessage-deflate is unavailable: tungstenite 0.26 does not implement RFC 7692 extensions"
-    )]
-    CompressionUnsupported,
-
     #[error("Payload file error at '{path}': {source}")]
     PayloadFile {
         path: String,
