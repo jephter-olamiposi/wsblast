@@ -37,7 +37,9 @@ pub enum ConfigError {
     #[error("Unsupported WebSocket scheme '{0}': only 'ws://' and 'wss://' are supported")]
     UnsupportedScheme(String),
 
-    #[error("Invalid duration '{0}': must be formatted like '10s', '2m', '500ms'")]
+    #[error(
+        "Invalid duration '{0}': expected a non-negative number with a unit of ns, us, ms, s, m or h (e.g. '500ms', '1.5s', '2m'), or bare integer seconds"
+    )]
     InvalidDuration(String),
 
     #[error("Invalid header format '{0}': expected 'Header-Name: value'")]
