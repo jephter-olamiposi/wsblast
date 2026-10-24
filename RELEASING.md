@@ -15,7 +15,7 @@ Pushing a tag `vX.Y.Z` whose version matches `version` in `Cargo.toml` runs
 1. builds `wsblast` with the `dist` profile (defined in `.cargo/config.toml`,
    identical to `[profile.release]`) for:
    - `x86_64-unknown-linux-gnu`
-   - `aarch64-unknown-linux-gnu` (native `ubuntu-24.04-arm` runner)
+   - `aarch64-unknown-linux-gnu` (native `ubuntu-22.04-arm` runner, glibc 2.35)
    - `x86_64-apple-darwin`
    - `aarch64-apple-darwin`
    - `x86_64-pc-windows-msvc`
