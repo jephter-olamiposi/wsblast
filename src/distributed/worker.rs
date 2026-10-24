@@ -110,8 +110,6 @@ impl WorkerNode {
                     let collected = runner.run_and_collect_worker_metrics().await;
                     heartbeat_task.abort();
                     let (worker_metrics, elapsed, attempted) = collected?;
-                    #[cfg(feature = "capture")]
-                    runner.write_capture();
 
                     let submitted = telemetry::worker_metrics_to_proto(&worker_id, &worker_metrics);
                     report_metrics(&worker_id, &mut coordinator_client, submitted).await?;
@@ -311,13 +309,6 @@ impl TryFrom<ProtoLoadTestConfig> for LoadTestConfig {
             auth: None,
             #[cfg(feature = "graphql-ws")]
             graphql_ws,
-            #[cfg(feature = "capture")]
-            capture: crate::config::CaptureConfig {
-                enabled: false,
-                output_path: Default::default(),
-                format: crate::config::CaptureFormat::PcapNg,
-                max_frames: 0,
-            },
             slo: crate::config::SloThresholds::default(),
             output_format: crate::cli::OutputFormat::Text,
             output_path: None,
