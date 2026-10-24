@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-rc.2] - 2026-10-24
+
+### Fixed
+- Two integration tests that failed on Windows. The refused-connection test now sets a short connect timeout, because Windows retries a connection to a closed local port for about two seconds before refusing it. The stream and ping test now compares against a run without pings on the same machine instead of a fixed message count.
+- The TLS tests on Windows. Their echo server now listens on the address `localhost` resolves to first, which is `::1` on Windows runners.
+- The `evaluate_slos` doc example on Windows. It now sets a short connect timeout so its connection to a closed port fails inside the run.
+
+### Documentation
+- METHODOLOGY.md notes that Windows timer resolution (about 15.6 ms) limits each paced connection to about 64 msg/s.
+
 ## [0.2.0-rc.1] - 2026-10-24
 
 v0.2.0 ships a smaller crate in which every feature works end to end. Several features that were developed on `main` after 0.1.1 were removed before release; their code is preserved on the [`archive/v0.1-full-features`](https://github.com/jephter-olamiposi/wsblast/tree/archive/v0.1-full-features) branch, and several of them will return, rebuilt, in later releases.
