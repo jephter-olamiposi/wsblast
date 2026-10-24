@@ -263,7 +263,7 @@ stages:
 
 websocket-slo:
   stage: perf
-  image: rust:1.85
+  image: rust:1.88
   variables:
     TARGET_URL: "wss://staging.example.com/ws"
   cache:
