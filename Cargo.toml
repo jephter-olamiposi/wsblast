@@ -56,14 +56,6 @@ tokio-util = "0.7"
 url = { version = "2.5", features = ["serde"] }
 http = "1.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-axum = { version = "0.7", optional = true }
-tower = { version = "0.4", optional = true }
-
-# Observability
-opentelemetry = { version = "0.27", features = ["metrics"], optional = true }
-opentelemetry-otlp = { version = "0.27", features = ["tonic", "metrics"], optional = true }
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
-prometheus-client = { version = "0.25", optional = true }
 tracing = { version = "0.1", optional = true }
 jsonwebtoken = { version = "9", optional = true }
 oauth2 = { version = "5", optional = true }
@@ -75,14 +67,12 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"], optional =
 [features]
 default = []
 scenario = ["serde_yaml"]
-otel = ["opentelemetry", "opentelemetry-otlp", "opentelemetry_sdk"]
-prometheus = ["prometheus-client", "axum", "tower"]
 auth = ["jsonwebtoken", "oauth2", "chrono", "reqwest"]
 graphql-ws = []
 mock = ["tokio-tungstenite/native-tls"]
 distributed = ["tonic", "prost", "prost-types", "uuid", "tracing", "tracing-subscriber"]
 compare = []
-full = ["scenario", "otel", "prometheus", "auth", "graphql-ws", "compare", "mock", "distributed"]
+full = ["scenario", "auth", "graphql-ws", "compare", "mock", "distributed"]
 tracing-subscriber = ["dep:tracing-subscriber"]
 
 [target.'cfg(unix)'.dependencies]

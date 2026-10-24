@@ -29,10 +29,6 @@ pub use distributed::{DistributedConfig, DistributedMode};
 #[cfg(feature = "distributed")]
 pub use distributed::{run_coordinator, run_worker};
 pub use error::{ConfigError, ErrorCategory, Result, WorkerError, WsBlastError};
-#[cfg(feature = "otel")]
-pub use metrics::OtelExporter;
-#[cfg(feature = "prometheus")]
-pub use metrics::PrometheusExporter;
 pub use metrics::{AggregatedMetrics, LatencyStats, LiveMetrics, LiveSnapshot, WorkerMetrics};
 #[cfg(feature = "mock")]
 pub use mock::{ErrorInjectionConfig, FrameDirection, MockConfig, MockServer, RecordedFrame};

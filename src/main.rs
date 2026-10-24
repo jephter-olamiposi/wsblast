@@ -17,9 +17,6 @@ use wsblast::tui::TuiApp;
 #[cfg(feature = "distributed")]
 use wsblast::distributed::{DistributedConfig, DistributedMode};
 
-#[cfg(feature = "prometheus")]
-use axum::response::IntoResponse;
-
 /// Resolves configured authentication once and merges it into handshake headers.
 #[cfg(feature = "auth")]
 fn apply_auth(config: &mut LoadTestConfig) -> Result<()> {
@@ -132,22 +129,6 @@ async fn run_app() -> Result<()> {
                 ),
             ));
         }
-        #[cfg(feature = "otel")]
-        if cli.enable_otel {
-            return Err(wsblast::error::WsBlastError::Config(
-                wsblast::error::ConfigError::UnsupportedOption(
-                    "OpenTelemetry export is only available in standalone mode".to_string(),
-                ),
-            ));
-        }
-        #[cfg(feature = "prometheus")]
-        if cli.enable_prometheus {
-            return Err(wsblast::error::WsBlastError::Config(
-                wsblast::error::ConfigError::UnsupportedOption(
-                    "Prometheus export is only available in standalone mode".to_string(),
-                ),
-            ));
-        }
         if cli.reply_match.parse::<wsblast::config::ReplyMatch>()?
             != wsblast::config::ReplyMatch::First
         {
@@ -199,20 +180,6 @@ async fn run_app() -> Result<()> {
         };
     }
 
-    // Extract values needed for observability before cli is potentially moved
-    #[cfg(feature = "otel")]
-    let otel_endpoint = cli.otel_endpoint.clone();
-    #[cfg(feature = "otel")]
-    let otel_service_name = cli.otel_service_name.clone();
-    #[cfg(feature = "prometheus")]
-    let prometheus_listen = cli.prometheus_listen.clone();
-    #[cfg(not(feature = "otel"))]
-    let _otel_endpoint = String::new();
-    #[cfg(not(feature = "otel"))]
-    let _otel_service_name = String::new();
-    #[cfg(not(feature = "prometheus"))]
-    let _prometheus_listen = String::new();
-
     let scenario_mode = cli.is_scenario_mode();
     let cli_for_config = cli.clone();
 
@@ -250,88 +217,7 @@ async fn run_app() -> Result<()> {
     #[cfg(feature = "auth")]
     apply_auth(&mut config)?;
 
-    // Observability exporters must start before load so Prometheus scrapes and
-    // OTLP pushes cover the live run.
     let live_metrics = wsblast::metrics::LiveMetrics::new();
-
-    #[cfg(feature = "otel")]
-    let otel_exporter = if cli.enable_otel {
-        Some(std::sync::Arc::new(
-            wsblast::OtelExporter::new(&otel_endpoint, &otel_service_name).map_err(|e| {
-                wsblast::error::WsBlastError::Config(wsblast::error::ConfigError::InvalidThreshold(
-                    e.to_string(),
-                ))
-            })?,
-        ))
-    } else {
-        None
-    };
-
-    #[cfg(feature = "otel")]
-    let otel_task = otel_exporter.as_ref().map(|exporter| {
-        let exporter = std::sync::Arc::clone(exporter);
-        let live = std::sync::Arc::clone(&live_metrics);
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
-            loop {
-                ticker.tick().await;
-                exporter.refresh_live(&live.snapshot());
-            }
-        })
-    });
-
-    #[cfg(feature = "prometheus")]
-    let prometheus_exporter = if cli.enable_prometheus {
-        let exporter = std::sync::Arc::new(wsblast::PrometheusExporter::new().map_err(|e| {
-            wsblast::error::WsBlastError::Config(wsblast::error::ConfigError::InvalidThreshold(
-                e.to_string(),
-            ))
-        })?);
-        let registry = std::sync::Arc::new(exporter.build_registry());
-        let listener = tokio::net::TcpListener::bind(&prometheus_listen)
-            .await
-            .map_err(|e| {
-                wsblast::error::WsBlastError::Io(std::io::Error::other(format!(
-                    "failed to bind Prometheus listener on {prometheus_listen}: {e}"
-                )))
-            })?;
-        let exporter_for_server = std::sync::Arc::clone(&exporter);
-        let live_for_server = std::sync::Arc::clone(&live_metrics);
-        let server = tokio::spawn(async move {
-            let router = axum::Router::new().route(
-                "/metrics",
-                axum::routing::get(move || {
-                    let exporter = std::sync::Arc::clone(&exporter_for_server);
-                    let live = std::sync::Arc::clone(&live_for_server);
-                    let registry = std::sync::Arc::clone(&registry);
-                    async move {
-                        exporter.refresh_live(&live.snapshot());
-                        let mut buffer = String::new();
-                        match prometheus_client::encoding::text::encode(
-                            &mut buffer,
-                            registry.as_ref(),
-                        ) {
-                            Ok(()) => buffer.into_response(),
-                            Err(err) => {
-                                eprintln!("Prometheus encoding failed: {err}");
-                                (
-                                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                    "metrics encoding failed",
-                                )
-                                    .into_response()
-                            }
-                        }
-                    }
-                }),
-            );
-            if let Err(err) = axum::serve(listener, router).await {
-                eprintln!("Prometheus metrics server failed: {err}");
-            }
-        });
-        Some((exporter, server))
-    } else {
-        None
-    };
 
     // For scenario mode, run the ScenarioExecutor instead of single Runner
     let metrics = if scenario_mode {
@@ -410,26 +296,6 @@ async fn run_app() -> Result<()> {
 
     report::emit_report(&config, &metrics, &slo_result)
         .map_err(wsblast::error::WsBlastError::Io)?;
-
-    // Flush observability before any process exit so CI failures still export.
-    #[cfg(feature = "otel")]
-    {
-        if let Some(task) = otel_task {
-            task.abort();
-        }
-        if let Some(exporter) = &otel_exporter {
-            exporter.refresh_live(&live_metrics.snapshot());
-            exporter.export_final(&metrics);
-            let _ = exporter.shutdown();
-        }
-    }
-
-    #[cfg(feature = "prometheus")]
-    if let Some((exporter, server)) = prometheus_exporter {
-        exporter.refresh_live(&live_metrics.snapshot());
-        exporter.export_final(&metrics);
-        server.abort();
-    }
 
     if !slo_result.passed {
         std::process::exit(2);

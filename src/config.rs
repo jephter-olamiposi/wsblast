@@ -183,19 +183,6 @@ pub struct SloThresholds {
     pub min_throughput: Option<f64>,
 }
 
-#[cfg(feature = "otel")]
-#[derive(Debug, Clone)]
-pub struct OtelConfig {
-    pub endpoint: String,
-    pub service_name: String,
-}
-
-#[cfg(feature = "prometheus")]
-#[derive(Debug, Clone)]
-pub struct PrometheusConfig {
-    pub listen_addr: String,
-}
-
 #[cfg(feature = "auth")]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
