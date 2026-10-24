@@ -1,6 +1,6 @@
 //! Interactive Terminal User Interface (TUI) powered by ratatui.
 
-pub mod app;
-pub mod widgets;
+mod app;
+mod widgets;
 
-pub use app::TuiApp;
+pub(crate) use app::TuiApp;

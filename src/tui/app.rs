@@ -31,7 +31,8 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub struct TuiApp {
+/// Live dashboard drawn while a single-phase run is in progress.
+pub(crate) struct TuiApp {
     config: Arc<LoadTestConfig>,
     live_metrics: Arc<LiveMetrics>,
     cancel_token: CancellationToken,
@@ -41,7 +42,7 @@ pub struct TuiApp {
 }
 
 impl TuiApp {
-    pub fn new(
+    pub(crate) fn new(
         config: Arc<LoadTestConfig>,
         live_metrics: Arc<LiveMetrics>,
         cancel_token: CancellationToken,
@@ -61,7 +62,7 @@ impl TuiApp {
     /// # Errors
     ///
     /// Returns [`std::io::Error`] if terminal raw mode configuration or alternate screen transitions fail.
-    pub async fn run(&mut self) -> io::Result<()> {
+    pub(crate) async fn run(&mut self) -> io::Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;

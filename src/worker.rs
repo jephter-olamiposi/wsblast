@@ -27,17 +27,17 @@ use crate::config::{GraphQLWSMessage, GraphQLWSStartPayload};
 use crate::config::{ScenarioAction, ScenarioPhase};
 
 /// Represents a single asynchronous WebSocket client worker session.
-pub struct WorkerSession {
-    pub worker_id: usize,
-    pub config: Arc<LoadTestConfig>,
-    pub cancel_token: CancellationToken,
-    pub metrics: WorkerMetrics,
+pub(crate) struct WorkerSession {
+    worker_id: usize,
+    config: Arc<LoadTestConfig>,
+    cancel_token: CancellationToken,
+    metrics: WorkerMetrics,
     #[cfg(feature = "scenario")]
     scenario: Option<Arc<ScenarioPhase>>,
 }
 
 impl WorkerSession {
-    pub fn new(
+    pub(crate) fn new(
         worker_id: usize,
         config: Arc<LoadTestConfig>,
         cancel_token: CancellationToken,
@@ -55,7 +55,7 @@ impl WorkerSession {
 
     /// Attaches a compiled scenario phase that drives think-time and actions.
     #[cfg(feature = "scenario")]
-    pub fn with_scenario(mut self, phase: Arc<ScenarioPhase>) -> Self {
+    pub(crate) fn with_scenario(mut self, phase: Arc<ScenarioPhase>) -> Self {
         self.scenario = Some(phase);
         self
     }
@@ -66,7 +66,7 @@ impl WorkerSession {
     /// followed by a fresh handshake after an exponential backoff, until the
     /// run is cancelled. Echo mode needs the fresh socket: a late reply on the
     /// old one would be attributed to the next request.
-    pub async fn run(mut self) -> WorkerMetrics {
+    pub(crate) async fn run(mut self) -> WorkerMetrics {
         let client_req = match self.build_handshake_request() {
             Ok(req) => req,
             Err(cat) => {
@@ -1148,7 +1148,7 @@ fn categorize_session_error(err: &TungsteniteError, direction: ErrorDirection) -
 }
 
 /// Normalizes connection-establishment errors into canonical taxonomy categories.
-pub fn categorize_tungstenite_error(err: &TungsteniteError) -> ErrorCategory {
+fn categorize_tungstenite_error(err: &TungsteniteError) -> ErrorCategory {
     categorize_session_error(err, ErrorDirection::Connect)
 }
 

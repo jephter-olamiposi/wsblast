@@ -11,6 +11,7 @@ use std::time::Duration;
 /// Atomic counters queried during execution for live terminal and TUI progress updates.
 #[derive(Debug, Default)]
 pub struct LiveMetrics {
+    /// Connections currently open.
     pub active_connections: AtomicU64,
     /// Workers that completed their first handshake.
     pub connections_established: AtomicU64,
@@ -18,16 +19,22 @@ pub struct LiveMetrics {
     pub connections_failed: AtomicU64,
     /// Handshakes that re-established a worker's connection after it was lost.
     pub reconnects: AtomicU64,
+    /// Data frames sent.
     pub messages_sent: AtomicU64,
+    /// Data frames received.
     pub messages_received: AtomicU64,
+    /// Payload bytes sent.
     pub bytes_sent: AtomicU64,
+    /// Payload bytes received.
     pub bytes_received: AtomicU64,
+    /// Errors of every category.
     pub total_errors: AtomicU64,
     /// Data frames an echo wait skipped because they did not match the reply rule.
     pub unsolicited_frames: AtomicU64,
 }
 
 impl LiveMetrics {
+    /// Returns a zeroed registry ready to share between workers.
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
@@ -49,25 +56,40 @@ impl LiveMetrics {
     }
 }
 
-/// Instantaneous metric snapshot consumed by TUI and progress indicators.
-#[derive(Debug, Clone, Copy, Default)]
+/// Point-in-time view of the live counters of a run in progress.
+///
+/// The counters are read one by one with relaxed ordering, so a snapshot taken
+/// while workers run can be slightly inconsistent across fields. The final
+/// report comes from [`AggregatedMetrics`], not from these counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LiveSnapshot {
+    /// Connections currently open.
     pub active_connections: u64,
+    /// Workers that completed their first handshake.
     pub connections_established: u64,
+    /// Failed handshake attempts, including failed reconnect attempts.
     pub connections_failed: u64,
+    /// Handshakes that re-established a lost connection.
     pub reconnects: u64,
+    /// Data frames sent.
     pub messages_sent: u64,
+    /// Data frames received.
     pub messages_received: u64,
+    /// Payload bytes sent.
     pub bytes_sent: u64,
+    /// Payload bytes received.
     pub bytes_received: u64,
+    /// Errors of every category.
     pub total_errors: u64,
+    /// Data frames an echo wait skipped because they did not match the reply rule.
     pub unsolicited_frames: u64,
 }
 
 /// How a recorded error relates to the attempted operations that form the
 /// error-rate denominator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ErrorScope {
+pub(crate) enum ErrorScope {
     /// The failed operation never produced a sent message (a handshake, a
     /// write, a stream read), so it counts as an attempted operation itself.
     Attempt,
@@ -80,21 +102,21 @@ pub enum ErrorScope {
 /// Task-local metrics container owned by a single worker to eliminate mutex contention.
 #[derive(Clone, Debug)]
 pub struct WorkerMetrics {
-    pub handshake_hist: Histogram<u64>,
-    pub rtt_hist: Histogram<u64>,
-    pub messages_sent: u64,
-    pub messages_recv: u64,
-    pub bytes_sent: u64,
-    pub bytes_recv: u64,
-    pub errors: HashMap<ErrorCategory, u64>,
+    pub(crate) handshake_hist: Histogram<u64>,
+    pub(crate) rtt_hist: Histogram<u64>,
+    pub(crate) messages_sent: u64,
+    pub(crate) messages_recv: u64,
+    pub(crate) bytes_sent: u64,
+    pub(crate) bytes_recv: u64,
+    pub(crate) errors: HashMap<ErrorCategory, u64>,
     /// Errors in `errors` recorded with [`ErrorScope::SentMessage`].
-    pub sent_message_errors: u64,
+    pub(crate) sent_message_errors: u64,
     /// Handshakes recorded after this worker's first one; every other entry in
     /// `handshake_hist` is a first handshake.
-    pub reconnects: u64,
+    pub(crate) reconnects: u64,
     /// Data frames skipped while waiting for an echo reply.
-    pub unsolicited_frames: u64,
-    pub live: Arc<LiveMetrics>,
+    pub(crate) unsolicited_frames: u64,
+    pub(crate) live: Arc<LiveMetrics>,
 }
 
 fn latency_histogram() -> WsResult<Histogram<u64>> {
@@ -142,7 +164,7 @@ impl WorkerMetrics {
     /// Records a handshake that replaced a connection this worker had already
     /// established and lost.
     #[inline]
-    pub fn record_reconnect(&mut self, duration: Duration) {
+    pub(crate) fn record_reconnect(&mut self, duration: Duration) {
         self.record_handshake_latency(duration);
         self.reconnects += 1;
         self.live.reconnects.fetch_add(1, Ordering::Relaxed);
@@ -156,18 +178,18 @@ impl WorkerMetrics {
     }
 
     #[inline]
-    pub fn record_connection_failed(&mut self, err: ErrorCategory) {
+    pub(crate) fn record_connection_failed(&mut self, err: ErrorCategory) {
         self.record_error(err, ErrorScope::Attempt);
         self.live.connections_failed.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]
-    pub fn record_connection_closed(&mut self) {
+    pub(crate) fn record_connection_closed(&mut self) {
         self.live.active_connections.fetch_sub(1, Ordering::Relaxed);
     }
 
     #[inline]
-    pub fn record_message_sent(&mut self, bytes: usize) {
+    pub(crate) fn record_message_sent(&mut self, bytes: usize) {
         self.messages_sent += 1;
         self.bytes_sent += bytes as u64;
         self.live.messages_sent.fetch_add(1, Ordering::Relaxed);
@@ -176,6 +198,7 @@ impl WorkerMetrics {
             .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
+    /// Records a received data frame and, in echo mode, its round-trip time.
     #[inline]
     pub fn record_message_recv(&mut self, bytes: usize, rtt: Option<Duration>) {
         self.messages_recv += 1;
@@ -191,7 +214,7 @@ impl WorkerMetrics {
     }
 
     #[inline]
-    pub fn record_unsolicited_frames(&mut self, count: u64) {
+    pub(crate) fn record_unsolicited_frames(&mut self, count: u64) {
         if count == 0 {
             return;
         }
@@ -202,7 +225,7 @@ impl WorkerMetrics {
     }
 
     #[inline]
-    pub fn record_error(&mut self, err: ErrorCategory, scope: ErrorScope) {
+    pub(crate) fn record_error(&mut self, err: ErrorCategory, scope: ErrorScope) {
         *self.errors.entry(err).or_insert(0) += 1;
         if scope == ErrorScope::SentMessage {
             self.sent_message_errors += 1;
@@ -211,25 +234,41 @@ impl WorkerMetrics {
     }
 }
 
-/// Statistical summary computed from an HDR latency histogram.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Summary of one latency distribution, in microseconds.
+///
+/// Values come from an HDR histogram covering 1 µs to 60 s at three
+/// significant figures. With no samples every field is zero.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct LatencyStats {
+    /// Number of samples.
     pub count: u64,
+    /// Smallest sample.
     pub min_us: u64,
+    /// Arithmetic mean.
     pub mean_us: f64,
+    /// Largest sample.
     pub max_us: u64,
+    /// Standard deviation.
     pub std_dev_us: f64,
+    /// Median.
     pub p50_us: u64,
+    /// 75th percentile.
     pub p75_us: u64,
+    /// 90th percentile.
     pub p90_us: u64,
+    /// 95th percentile.
     pub p95_us: u64,
+    /// 99th percentile.
     pub p99_us: u64,
+    /// 99.9th percentile.
     pub p999_us: u64,
+    /// 99.99th percentile.
     pub p9999_us: u64,
 }
 
 impl LatencyStats {
-    pub fn from_histogram(hist: &Histogram<u64>) -> Self {
+    pub(crate) fn from_histogram(hist: &Histogram<u64>) -> Self {
         if hist.is_empty() {
             return Self {
                 count: 0,
@@ -263,24 +302,28 @@ impl LatencyStats {
         }
     }
 
+    /// Median as a [`Duration`].
     pub fn p50_duration(&self) -> Duration {
         Duration::from_micros(self.p50_us)
     }
 
+    /// 95th percentile as a [`Duration`].
     pub fn p95_duration(&self) -> Duration {
         Duration::from_micros(self.p95_us)
     }
 
+    /// 99th percentile as a [`Duration`].
     pub fn p99_duration(&self) -> Duration {
         Duration::from_micros(self.p99_us)
     }
 
+    /// 99.9th percentile as a [`Duration`].
     pub fn p999_duration(&self) -> Duration {
         Duration::from_micros(self.p999_us)
     }
 }
 
-/// Consolidated metrics combining all worker sessions, transfer statistics, and rates.
+/// Final metrics of a run, merged from every worker.
 ///
 /// Connection counts are per worker slot, so they never exceed the attempted
 /// total even when workers reconnect:
@@ -294,28 +337,45 @@ impl LatencyStats {
 /// - `total_reconnects`: extra handshakes that re-established a slot after its
 ///   connection was lost, so `handshake_latency.count` equals
 ///   `total_connections_established + total_reconnects`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AggregatedMetrics {
+    /// Connection slots the run was configured to open.
     pub total_connections_attempted: u64,
+    /// Slots that completed at least one handshake.
     pub total_connections_established: u64,
+    /// Started slots that never completed a handshake.
     pub total_connections_failed: u64,
+    /// Slots the ramp had not reached when the run ended.
     #[serde(default)]
     pub total_connections_not_started: u64,
+    /// Handshakes that re-established a slot after its connection was lost.
     #[serde(default)]
     pub total_reconnects: u64,
     /// Data frames that did not match `--match` while an echo reply was awaited.
     #[serde(default)]
     pub total_unsolicited_frames: u64,
+    /// Data frames sent.
     pub total_messages_sent: u64,
+    /// Data frames received.
     pub total_messages_recv: u64,
+    /// Payload bytes sent.
     pub total_bytes_sent: u64,
+    /// Payload bytes received.
     pub total_bytes_recv: u64,
+    /// Wall-clock run time, including the connection ramp.
     pub elapsed: Duration,
+    /// The larger of messages sent and received, per second of `elapsed`.
     pub throughput_msg_per_sec: f64,
+    /// Bytes sent plus bytes received, per second of `elapsed`.
     pub throughput_bytes_per_sec: f64,
+    /// Failed operations over attempted operations, between 0.0 and 1.0.
     pub error_rate: f64,
+    /// Time from connect to a completed WebSocket handshake.
     pub handshake_latency: LatencyStats,
+    /// Echo round-trip time; empty outside echo mode.
     pub message_rtt: LatencyStats,
+    /// Error counts by category.
     pub error_breakdown: HashMap<ErrorCategory, u64>,
 }
 
@@ -326,7 +386,7 @@ impl AggregatedMetrics {
     ///
     /// Returns [`WsBlastError::Metrics`] if the merged histogram configuration is
     /// rejected by the underlying implementation.
-    pub fn merge(
+    pub(crate) fn merge(
         workers: Vec<WorkerMetrics>,
         elapsed: Duration,
         attempted_conns: u64,
@@ -409,7 +469,7 @@ impl AggregatedMetrics {
     /// failed to not started. [`AggregatedMetrics::merge`] counts every slot
     /// without a handshake as failed because it only sees started workers.
     #[must_use]
-    pub fn with_not_started(mut self, not_started: u64) -> Self {
+    pub(crate) fn with_not_started(mut self, not_started: u64) -> Self {
         let not_started = not_started.min(self.total_connections_failed);
         self.total_connections_failed -= not_started;
         self.total_connections_not_started = not_started;

@@ -3,8 +3,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use wsblast::config::parse_human_duration;
-use wsblast::metrics::{AggregatedMetrics, LiveMetrics, WorkerMetrics};
+use wsblast::__private::{LiveMetrics, WorkerMetrics, merge_worker_metrics, parse_human_duration};
 
 fn bench_histogram_recording(c: &mut Criterion) {
     let live = LiveMetrics::new();
@@ -59,7 +58,7 @@ fn bench_histogram_merge(c: &mut Criterion) {
 
     c.bench_function("merge_50_worker_histograms", |b| {
         b.iter(|| {
-            let _ = AggregatedMetrics::merge(
+            let _ = merge_worker_metrics(
                 black_box(workers.clone()),
                 black_box(Duration::from_secs(10)),
                 black_box(50),

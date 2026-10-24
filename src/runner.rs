@@ -3,7 +3,7 @@
 use crate::config::LoadTestConfig;
 #[cfg(feature = "scenario")]
 use crate::config::{ScenarioConfig, ScenarioPhase};
-use crate::metrics::{AggregatedMetrics, LiveMetrics, WorkerMetrics};
+use crate::metrics::{AggregatedMetrics, LiveMetrics, LiveSnapshot, WorkerMetrics};
 #[cfg(feature = "scenario")]
 use crate::report::PhaseTarget;
 use crate::worker::WorkerSession;
@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-/// Orchestrates the lifecycle of concurrent WebSocket load sessions.
+/// Runs one load test: opens the configured connections, drives them until
+/// the duration or request limit is reached, and merges their metrics.
 pub struct Runner {
     config: Arc<LoadTestConfig>,
     live_metrics: Arc<LiveMetrics>,
@@ -24,6 +25,7 @@ pub struct Runner {
 }
 
 impl Runner {
+    /// Creates a runner for `config`. Nothing connects until [`Runner::run`].
     pub fn new(config: LoadTestConfig) -> Self {
         Self {
             config: Arc::new(config),
@@ -42,7 +44,7 @@ impl Runner {
     /// endpoint selection stays with the caller because CLI URLs take
     /// precedence over scenario endpoints.
     #[cfg(feature = "scenario")]
-    pub fn with_scenario(mut config: LoadTestConfig, phase: ScenarioPhase) -> Self {
+    pub(crate) fn with_scenario(mut config: LoadTestConfig, phase: ScenarioPhase) -> Self {
         config.connections = phase.connections;
         config.duration = phase.duration;
         config.ramp_rate = phase.ramp_rate;
@@ -73,17 +75,21 @@ impl Runner {
         session
     }
 
-    pub fn live_metrics(&self) -> Arc<LiveMetrics> {
-        Arc::clone(&self.live_metrics)
+    /// Reads the live counters of this runner, for progress display while
+    /// [`Runner::run`] is in progress.
+    pub fn live_snapshot(&self) -> LiveSnapshot {
+        self.live_metrics.snapshot()
     }
 
-    /// Shares an existing live-metrics registry, allowing observability
-    /// exporters and the TUI to sample this runner's telemetry.
-    pub fn with_live_metrics(mut self, live_metrics: Arc<LiveMetrics>) -> Self {
+    /// Shares an existing live-metrics registry, allowing the TUI to sample
+    /// this runner's telemetry.
+    pub(crate) fn with_live_metrics(mut self, live_metrics: Arc<LiveMetrics>) -> Self {
         self.live_metrics = live_metrics;
         self
     }
 
+    /// Returns the token that stops this runner. Cancelling it ends the run
+    /// early; [`Runner::run`] still returns the metrics collected so far.
     pub fn cancel_token(&self) -> CancellationToken {
         self.cancel_token.clone()
     }
@@ -91,7 +97,8 @@ impl Runner {
     /// Drives this runner from a caller-owned token, typically a child of a
     /// run-level token so that cancelling the parent stops this runner while
     /// this runner's own duration and request limits stay local to it.
-    pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
+    #[cfg(feature = "scenario")]
+    pub(crate) fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
         self.cancel_token = cancel_token;
         self
     }
@@ -101,6 +108,7 @@ impl Runner {
     /// Enabled by default. Disable it when the caller owns signal handling,
     /// for example a library host or an orchestrator that cancels a parent of
     /// this runner's token.
+    #[must_use]
     pub fn with_signal_handling(mut self, enabled: bool) -> Self {
         self.handle_signals = enabled;
         self
@@ -124,30 +132,13 @@ impl Runner {
         )
     }
 
-    /// Runs the worker pool and returns raw worker metrics without merging.
-    /// Returns (worker_metrics, elapsed_time, total_connections_attempted).
-    ///
-    /// Use [`Runner::run_and_collect`] to also learn how many connection slots
-    /// the ramp never reached.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`crate::error::WsBlastError::Metrics`] if per-worker telemetry
-    /// initialization fails.
-    pub async fn run_and_collect_worker_metrics(
-        &self,
-    ) -> crate::error::Result<(Vec<WorkerMetrics>, Duration, u64)> {
-        let outcome = self.run_and_collect().await?;
-        Ok((outcome.worker_metrics, outcome.elapsed, outcome.connections))
-    }
-
     /// Runs the worker pool and returns the unmerged outcome.
     ///
     /// # Errors
     ///
     /// Returns [`crate::error::WsBlastError::Metrics`] if per-worker telemetry
     /// initialization fails.
-    pub async fn run_and_collect(&self) -> crate::error::Result<RunOutcome> {
+    pub(crate) async fn run_and_collect(&self) -> crate::error::Result<RunOutcome> {
         let total_connections = self.config.connections;
         check_file_descriptor_limit(total_connections);
 
@@ -277,14 +268,14 @@ impl Runner {
 
 /// Raw result of one runner pass, before the worker metrics are merged.
 #[derive(Debug)]
-pub struct RunOutcome {
-    pub worker_metrics: Vec<WorkerMetrics>,
-    pub elapsed: Duration,
+pub(crate) struct RunOutcome {
+    pub(crate) worker_metrics: Vec<WorkerMetrics>,
+    pub(crate) elapsed: Duration,
     /// Connection slots the run was configured to open.
-    pub connections: u64,
+    pub(crate) connections: u64,
     /// Slots the ramp had not reached when the run ended. They have no
     /// worker metrics and are neither established nor failed.
-    pub not_started: u64,
+    pub(crate) not_started: u64,
 }
 
 /// Stops the signal listener task when the owning run ends.
@@ -386,7 +377,10 @@ fn check_file_descriptor_limit(required_conns: usize) {
             rlim_max: 0,
         };
 
-        // SAFETY: getrlimit is invoked with a valid pointer to stack-allocated rlimit struct.
+        // SAFETY: `rlim` is a valid, writable `rlimit` on this stack frame and
+        // outlives the call; getrlimit only writes into it and has no other
+        // preconditions.
+        #[allow(unsafe_code)]
         let res = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
         if res == 0 {
             let soft_limit = rlim.rlim_cur as usize;
@@ -408,22 +402,20 @@ fn check_file_descriptor_limit(required_conns: usize) {
     }
 }
 
-/// Raw result of a scenario run, before the worker metrics are merged.
+/// Result of a scenario run.
 #[cfg(feature = "scenario")]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ScenarioOutcome {
-    pub worker_metrics: Vec<WorkerMetrics>,
-    /// Sum of every executed phase's elapsed time.
-    pub elapsed: Duration,
-    /// Connection slots of every executed phase.
-    pub connections: u64,
-    /// Slots of every executed phase that the ramp never reached.
-    pub not_started: u64,
-    /// Target of every executed phase, in run order.
+    /// Metrics merged over every executed phase. `elapsed` is the sum of the
+    /// phases' run times and the connection counts add up across phases.
+    pub metrics: AggregatedMetrics,
+    /// Target of every executed phase, in run order. Phases skipped after a
+    /// cancellation are not listed.
     pub phase_targets: Vec<PhaseTarget>,
 }
 
-/// Orchestrates multi-phase scenario execution with phase transitions.
+/// Runs the phases of a [`ScenarioConfig`] one after another.
 #[cfg(feature = "scenario")]
 pub struct ScenarioExecutor {
     scenario_name: String,
@@ -453,11 +445,12 @@ impl ScenarioExecutor {
         scenario: &ScenarioConfig,
         base_config: LoadTestConfig,
         phase: Option<&str>,
-        cli_target: Option<&str>,
+        target_override: Option<&str>,
     ) -> crate::error::Result<Self> {
+        scenario.validate()?;
         Ok(Self {
             scenario_name: scenario.metadata.name.clone(),
-            targets: scenario.resolve_phase_targets(cli_target, phase)?,
+            targets: scenario.resolve_phase_targets(target_override, phase)?,
             phases: scenario.compile(phase)?,
             base_config,
             live_metrics: LiveMetrics::new(),
@@ -467,14 +460,14 @@ impl ScenarioExecutor {
     }
 
     /// Shares an existing live-metrics registry across every phase.
-    pub fn with_live_metrics(mut self, live_metrics: Arc<LiveMetrics>) -> Self {
+    pub(crate) fn with_live_metrics(mut self, live_metrics: Arc<LiveMetrics>) -> Self {
         self.live_metrics = live_metrics;
         self
     }
 
-    /// Returns the registry shared by all phases.
-    pub fn live_metrics(&self) -> Arc<LiveMetrics> {
-        Arc::clone(&self.live_metrics)
+    /// Reads the live counters, summed over the phases run so far.
+    pub fn live_snapshot(&self) -> LiveSnapshot {
+        self.live_metrics.snapshot()
     }
 
     /// Returns the run-level token. Cancelling it stops the current phase
@@ -487,6 +480,7 @@ impl ScenarioExecutor {
     /// SIGTERM. Enabled by default; phase runners never install their own
     /// listener, so with this disabled only [`ScenarioExecutor::cancel_token`]
     /// stops the scenario early.
+    #[must_use]
     pub fn with_signal_handling(mut self, enabled: bool) -> Self {
         self.handle_signals = enabled;
         self
@@ -495,8 +489,8 @@ impl ScenarioExecutor {
     /// Executes every compiled phase sequentially until the scenario ends or
     /// the run-level token is cancelled.
     ///
-    /// Returns the unmerged worker metrics, total elapsed time, total
-    /// connection slots and the target of every phase that ran.
+    /// Returns the metrics merged over every phase that ran and the target
+    /// of each of those phases.
     ///
     /// # Errors
     ///
@@ -556,11 +550,11 @@ impl ScenarioExecutor {
             }
         }
 
+        let metrics =
+            AggregatedMetrics::merge(all_worker_metrics, total_elapsed, total_connections)?
+                .with_not_started(total_not_started);
         Ok(ScenarioOutcome {
-            worker_metrics: all_worker_metrics,
-            elapsed: total_elapsed,
-            connections: total_connections,
-            not_started: total_not_started,
+            metrics,
             phase_targets,
         })
     }
