@@ -1,4 +1,5 @@
-//! Validated runtime configuration model for load test execution.
+//! Load test configuration: [`LoadTestConfig`] and its builder, the shared
+//! validation, the conversion from command-line flags, and scenario files.
 
 use crate::cli::{Cli, OutputFormat, TestMode};
 use crate::error::{ConfigError, Result, WsBlastError};
@@ -60,6 +61,37 @@ pub struct LoadTestConfig {
 
 impl LoadTestConfig {
     /// Starts a configuration for `target_url` with the command-line defaults.
+    ///
+    /// The URL is parsed and checked by
+    /// [`build`](LoadTestConfigBuilder::build), together with every other
+    /// setting.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use wsblast::{ConfigError, LoadTestConfig, SloThresholds, WsBlastError};
+    ///
+    /// # fn main() -> wsblast::Result<()> {
+    /// let config = LoadTestConfig::builder("wss://api.example.com/stream")
+    ///     .connections(200)
+    ///     .ramp_rate(50)
+    ///     .duration(Duration::from_secs(60))
+    ///     .rate_per_connection(10)
+    ///     .payload_text(r#"{"op":"ping","id":{{seq}}}"#)
+    ///     .reply_match("json:/id".parse()?)
+    ///     .header("Authorization", "Bearer token")
+    ///     .slo(SloThresholds::new().with_max_p99(Duration::from_millis(50)))
+    ///     .build()?;
+    /// assert_eq!(config.connections(), 200);
+    /// assert_eq!(config.target_url().host_str(), Some("api.example.com"));
+    ///
+    /// // Settings the command line rejects are rejected here too.
+    /// let err = LoadTestConfig::builder("http://api.example.com").build().unwrap_err();
+    /// assert!(matches!(err, WsBlastError::Config(ConfigError::UnsupportedScheme(_))));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn builder(target_url: impl Into<String>) -> LoadTestConfigBuilder {
         LoadTestConfigBuilder::new(target_url.into())
     }
@@ -349,7 +381,9 @@ impl LoadTestConfigBuilder {
     }
 
     /// Sets the GraphQL operation sent by [`TestMode::GraphQLWS`] workers.
+    /// Required in that mode.
     #[cfg(feature = "graphql-ws")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "graphql-ws")))]
     pub fn graphql_operation(mut self, operation: impl Into<String>) -> Self {
         self.graphql.operation = Some(operation.into());
         self
@@ -357,6 +391,7 @@ impl LoadTestConfigBuilder {
 
     /// Sets the GraphQL operation name.
     #[cfg(feature = "graphql-ws")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "graphql-ws")))]
     pub fn graphql_operation_name(mut self, name: impl Into<String>) -> Self {
         self.graphql.operation_name = Some(name.into());
         self
@@ -364,6 +399,7 @@ impl LoadTestConfigBuilder {
 
     /// Sets the GraphQL variables. Must be a JSON object.
     #[cfg(feature = "graphql-ws")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "graphql-ws")))]
     pub fn graphql_variables(mut self, variables: serde_json::Value) -> Self {
         self.graphql.variables = Some(variables);
         self
@@ -371,12 +407,33 @@ impl LoadTestConfigBuilder {
 
     /// Sets the GraphQL extensions. Must be a JSON object.
     #[cfg(feature = "graphql-ws")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "graphql-ws")))]
     pub fn graphql_extensions(mut self, extensions: serde_json::Value) -> Self {
         self.graphql.extensions = Some(extensions);
         self
     }
 
     /// Validates the settings and returns the configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WsBlastError::Config`] when the command line would reject the
+    /// same settings:
+    ///
+    /// - [`ConfigError::InvalidUrl`] or [`ConfigError::UnsupportedScheme`] for
+    ///   a target that does not parse or is not `ws://` or `wss://`.
+    /// - [`ConfigError::ZeroConcurrency`] for zero connections.
+    /// - [`ConfigError::InvalidOption`] for a zero request limit, or for a
+    ///   missing GraphQL operation or non-object GraphQL variables or
+    ///   extensions in GraphQL mode.
+    /// - [`ConfigError::InvalidHeader`] for a header name or value that is not
+    ///   valid HTTP.
+    /// - [`ConfigError::InvalidThreshold`] for an error-rate threshold outside
+    ///   0.0 to 1.0.
+    /// - [`ConfigError::UnsupportedOption`] for a latency threshold or a
+    ///   non-default [`ReplyMatch`] outside [`TestMode::Echo`], a JSON reply
+    ///   match whose pointer is invalid or whose payload lacks `{{seq}}`, or
+    ///   GraphQL settings outside GraphQL mode.
     pub fn build(self) -> Result<LoadTestConfig> {
         let target_url = parse_target_url(&self.target)?;
         validate_connections(self.connections)?;
@@ -545,6 +602,12 @@ impl ReplyMatch {
 impl FromStr for ReplyMatch {
     type Err = ConfigError;
 
+    /// Parses `first`, `exact` or `json:POINTER`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::UnsupportedOption`] for any other value or for a
+    /// pointer that is not valid RFC 6901 syntax.
     fn from_str(raw: &str) -> std::result::Result<Self, Self::Err> {
         match raw {
             "first" => Ok(Self::First),
@@ -795,8 +858,11 @@ pub(crate) struct GraphQLWSStartPayload {
 ///
 /// Load one with [`ScenarioConfig::load`] or [`ScenarioConfig::from_yaml`] and
 /// run it with [`ScenarioExecutor`](crate::ScenarioExecutor). The file format
-/// is described in `docs/scenarios.md`.
+/// is described in [docs/scenarios.md].
+///
+/// [docs/scenarios.md]: https://github.com/jephter-olamiposi/wsblast/blob/main/docs/scenarios.md
 #[cfg(feature = "scenario")]
+#[cfg_attr(docsrs, doc(cfg(feature = "scenario")))]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScenarioConfig {
@@ -911,6 +977,39 @@ impl ScenarioConfig {
     }
 
     /// Parses and validates a scenario from YAML text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidScenario`] when the YAML does not parse,
+    /// has unknown keys, or fails validation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use wsblast::ScenarioConfig;
+    ///
+    /// # fn main() -> wsblast::Result<()> {
+    /// let scenario = ScenarioConfig::from_yaml(
+    ///     r#"
+    /// version: "1.0"
+    /// target: "ws://127.0.0.1:9001"
+    /// metadata:
+    ///   name: "warmup then sustain"
+    /// phases:
+    ///   - name: "warmup"
+    ///     duration: "5s"
+    ///     connections: 10
+    ///   - name: "sustain"
+    ///     duration: "30s"
+    ///     connections: 50
+    ///     rate_per_conn: 100
+    /// "#,
+    /// )?;
+    /// assert_eq!(scenario.name(), "warmup then sustain");
+    /// assert_eq!(scenario.phase_names().collect::<Vec<_>>(), ["warmup", "sustain"]);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn from_yaml(yaml: &str) -> Result<Self> {
         Self::parse(yaml, None)
     }

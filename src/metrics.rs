@@ -1,4 +1,5 @@
-//! Metric collection, lock-free telemetry, HDR latency histograms, and aggregation.
+//! Per-worker HDR latency histograms and counters, the relaxed atomics behind
+//! live progress, and the merge into [`AggregatedMetrics`].
 
 use crate::error::{ErrorCategory, Result as WsResult, WsBlastError};
 use hdrhistogram::Histogram;

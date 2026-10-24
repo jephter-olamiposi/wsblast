@@ -1,4 +1,5 @@
-//! Typed domain error hierarchy and error classification for WebSocket load testing.
+//! Error types, and the [`ErrorCategory`] taxonomy failures are counted under
+//! in reports.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

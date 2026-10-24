@@ -1,4 +1,5 @@
-//! Multi-format report generation (Terminal Text, Schema v1.0 JSON, Markdown) and SLO gating.
+//! SLO evaluation, report rendering (terminal text, JSON schema 1.0,
+//! Markdown), and the baseline comparison behind `--compare`.
 
 use crate::cli::OutputFormat;
 use crate::config::{LoadTestConfig, SloThresholds};
@@ -37,6 +38,7 @@ pub struct SloCheck {
 }
 
 /// Endpoint one scenario phase ran against, listed in scenario reports.
+#[cfg_attr(docsrs, doc(cfg(feature = "scenario")))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct PhaseTarget {
@@ -403,7 +405,38 @@ fn render_markdown_comparison(comparison: &BaselineComparison, threshold: f64) -
 /// Checks every threshold set in `slo` against `metrics`.
 ///
 /// A latency threshold fails when no round trip was measured, because an
-/// empty histogram is no evidence that the budget was met.
+/// empty histogram is no evidence that the budget was met. Thresholds are
+/// inclusive: a p99 equal to `max_p99` passes.
+///
+/// # Examples
+///
+/// Nothing listens on port 1, so this run measures no round trip and the
+/// latency check fails along with the error budget:
+///
+/// ```
+/// use std::time::Duration;
+/// use wsblast::{LoadTestConfig, Runner, SloThresholds, evaluate_slos};
+///
+/// # #[tokio::main]
+/// # async fn main() -> wsblast::Result<()> {
+/// let config = LoadTestConfig::builder("ws://127.0.0.1:1")
+///     .connections(1)
+///     .duration(Duration::from_millis(200))
+///     .build()?;
+/// let metrics = Runner::new(config).with_signal_handling(false).run().await?;
+///
+/// let slo = SloThresholds::new()
+///     .with_max_p99(Duration::from_millis(50))
+///     .with_max_error_rate(0.01);
+/// let evaluation = evaluate_slos(&slo, &metrics);
+///
+/// assert!(!evaluation.passed);
+/// assert_eq!(evaluation.checks[0].name, "Latency p99");
+/// assert_eq!(evaluation.checks[0].actual, "no RTT samples");
+/// assert!(!evaluation.checks[1].passed);
+/// # Ok(())
+/// # }
+/// ```
 pub fn evaluate_slos(slo: &SloThresholds, metrics: &AggregatedMetrics) -> SloEvaluation {
     let mut checks = Vec::new();
     let mut all_passed = true;
@@ -480,6 +513,12 @@ fn latency_check(name: &str, target: Duration, actual: Duration, samples: u64) -
 
 /// Renders the run report in the configuration's
 /// [`output_format`](LoadTestConfig::output_format).
+///
+/// This is the report the CLI prints: terminal tables for
+/// [`OutputFormat::Text`], the schema 1.0 document for [`OutputFormat::Json`],
+/// and a GitHub Flavored Markdown summary for [`OutputFormat::Markdown`]. The
+/// JSON schema is published in the repository as
+/// [`schema/report-v1.json`](https://github.com/jephter-olamiposi/wsblast/blob/main/schema/report-v1.json).
 pub fn render_report(
     config: &LoadTestConfig,
     metrics: &AggregatedMetrics,

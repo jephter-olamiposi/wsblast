@@ -290,6 +290,7 @@ pub enum TestMode {
     /// Connect workers and passively record incoming server-pushed broadcast messages.
     Listen,
     /// Apollo GraphQL WS protocol (subscriptions).
+    #[cfg_attr(docsrs, doc(cfg(feature = "graphql-ws")))]
     #[cfg(feature = "graphql-ws")]
     #[value(name = "graphql-ws", alias = "graph-qlws")]
     GraphQLWS,
