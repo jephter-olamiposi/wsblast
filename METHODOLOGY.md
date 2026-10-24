@@ -96,7 +96,9 @@ If no reply arrives within `--message-timeout` (default `5s`), the worker record
 - All intervals are measured with `std::time::Instant`, a monotonic clock. Wall-clock changes (NTP steps, DST) do not affect results.
 - Only the `{{timestamp}}` payload placeholder uses the system clock (Unix time in milliseconds). It is never used for measurement.
 - **RTT** starts immediately before the request is handed to the WebSocket sink and stops when the worker has read the reply frame. It includes client-side frame encoding and the socket write, the network in both directions, server processing, client-side frame decoding, and any delay before the Tokio scheduler polls the worker again. If the load generator's CPU is saturated, the scheduling delay inflates RTT.
-- **Handshake latency** starts before `connect_async` and stops when the HTTP upgrade completes. It covers DNS resolution, TCP connect, the TLS handshake for `wss://`, and the HTTP upgrade. It is bounded by `--connect-timeout` (default `5s`); a handshake that takes longer is a `timeout` error.
+- **Handshake latency** starts before the TCP connect and stops when the HTTP upgrade completes. It covers TCP connect, the TLS handshake for `wss://`, and the HTTP upgrade. It is bounded by `--connect-timeout` (default `5s`); a handshake that takes longer is a `timeout` error.
+- **DNS resolution and TLS setup are not part of handshake latency.** Before the clock starts, wsblast resolves the target host once, also bounded by `--connect-timeout`, and builds one TLS client configuration from the platform's root certificates (or `SSL_CERT_FILE` / `SSL_CERT_DIR`). Every connection of the run reuses both, so the run keeps the addresses it resolved at the start even if DNS changes during the run. A host that does not resolve fails every slot once with `dns_resolution`, without reconnect attempts.
+- **Address selection.** When the host resolves to several addresses, they are tried with IPv6 and IPv4 interleaved, starting with the resolver's first choice. An attempt that has not connected after 250 ms gets the next address started alongside it, and a failed attempt starts the next address at once (RFC 8305, Happy Eyeballs). The address that accepted a connection is tried first by later connections, so a host such as `localhost` that resolves to `::1` first while the server listens only on `127.0.0.1` costs the race only on the first connections, not on every handshake.
 - Durations are converted to whole microseconds by truncation and clamped to the histogram range (1 µs to 60 s) before recording. A sub-microsecond value is recorded as 1 µs.
 
 ## 5. Histograms and percentiles
@@ -190,6 +192,7 @@ Connection counts are per worker slot, not per handshake:
 `total_connections_attempted = total_connections_established + total_connections_failed + total_connections_not_started`, and `handshake_latency.count = total_connections_established + total_reconnects`.
 
 A slot is not started when the run ends before the ramp reaches it, usually because `--duration` is shorter than `-c / --ramp-rate` (wsblast warns about this at start) or because the run was interrupted. Such a slot never tried to connect, so it is not a failure and has no entry in `error_breakdown`. A local run with `-c 10 --ramp-rate 5 -d 600ms` reports 10 attempted, 3 established, 0 failed and 7 not started. The text and Markdown reports show the not-started count only when it is non-zero.
+
 
 ### 7.1 Reconnect policy
 

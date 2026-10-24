@@ -2,6 +2,7 @@
 
 use crate::cli::TestMode;
 use crate::config::{LoadTestConfig, PayloadConfig, ReplyMatch};
+use crate::connect::{ConnectError, ConnectTarget};
 use crate::error::ErrorCategory;
 use crate::metrics::{ErrorScope, WorkerMetrics};
 use bytes::Bytes;
@@ -30,6 +31,7 @@ use crate::config::{ScenarioAction, ScenarioPhase};
 pub(crate) struct WorkerSession {
     worker_id: usize,
     config: Arc<LoadTestConfig>,
+    target: Arc<ConnectTarget>,
     cancel_token: CancellationToken,
     metrics: WorkerMetrics,
     #[cfg(feature = "scenario")]
@@ -40,12 +42,14 @@ impl WorkerSession {
     pub(crate) fn new(
         worker_id: usize,
         config: Arc<LoadTestConfig>,
+        target: Arc<ConnectTarget>,
         cancel_token: CancellationToken,
         metrics: WorkerMetrics,
     ) -> Self {
         Self {
             worker_id,
             config,
+            target,
             cancel_token,
             metrics,
             #[cfg(feature = "scenario")]
@@ -83,7 +87,7 @@ impl WorkerSession {
             let handshake_start = Instant::now();
             let connect_fut = tokio::time::timeout(
                 self.config.connect_timeout,
-                tokio_tungstenite::connect_async(client_req.clone()),
+                self.target.connect(client_req.clone()),
             );
             let connect_result = tokio::select! {
                 biased;
@@ -92,7 +96,7 @@ impl WorkerSession {
             };
 
             match connect_result {
-                Ok(Ok((ws_stream, _))) => {
+                Ok(Ok(ws_stream)) => {
                     if connected_before {
                         self.metrics.record_reconnect(handshake_start.elapsed());
                     } else {
@@ -107,7 +111,12 @@ impl WorkerSession {
                         break;
                     }
                 }
-                Ok(Err(err)) => {
+                Ok(Err(ConnectError::Static(cat))) => {
+                    // Retrying cannot help, as with a bad handshake request.
+                    self.metrics.record_connection_failed(cat);
+                    break;
+                }
+                Ok(Err(ConnectError::Tungstenite(err))) => {
                     self.metrics
                         .record_connection_failed(categorize_tungstenite_error(&err));
                 }

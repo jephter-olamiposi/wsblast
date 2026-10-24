@@ -5,6 +5,7 @@
 use crate::config::LoadTestConfig;
 #[cfg(feature = "scenario")]
 use crate::config::{ScenarioConfig, ScenarioPhase};
+use crate::connect::ConnectTarget;
 use crate::metrics::{AggregatedMetrics, LiveMetrics, LiveSnapshot, WorkerMetrics};
 #[cfg(feature = "scenario")]
 use crate::report::PhaseTarget;
@@ -63,10 +64,16 @@ impl Runner {
         }
     }
 
-    fn create_session(&self, worker_id: usize, metrics: WorkerMetrics) -> WorkerSession {
+    fn create_session(
+        &self,
+        worker_id: usize,
+        target: &Arc<ConnectTarget>,
+        metrics: WorkerMetrics,
+    ) -> WorkerSession {
         let session = WorkerSession::new(
             worker_id,
             Arc::clone(&self.config),
+            Arc::clone(target),
             self.cancel_token.clone(),
             metrics,
         );
@@ -201,6 +208,22 @@ impl Runner {
             None
         };
 
+        // Resolve the target and load the TLS roots once, before the clock
+        // starts, so neither is counted in the run time or handshake latency.
+        let target = tokio::select! {
+            target = ConnectTarget::prepare(&self.config.target_url, self.config.connect_timeout) => {
+                Arc::new(target)
+            }
+            _ = self.cancel_token.cancelled() => {
+                return Ok(RunOutcome {
+                    worker_metrics: Vec::new(),
+                    elapsed: Duration::ZERO,
+                    connections: total_connections as u64,
+                    not_started: total_connections as u64,
+                });
+            }
+        };
+
         // `--duration` is total wall-clock time including the ramp, so the
         // timer shares `start_time` with elapsed, throughput, and progress.
         let start_time = Instant::now();
@@ -218,7 +241,9 @@ impl Runner {
             }
 
             let metrics = WorkerMetrics::new(Arc::clone(&self.live_metrics))?;
-            handles.push(tokio::spawn(self.create_session(worker_id, metrics).run()));
+            handles.push(tokio::spawn(
+                self.create_session(worker_id, &target, metrics).run(),
+            ));
 
             if let Some(delay) = spawn_delay {
                 tokio::select! {

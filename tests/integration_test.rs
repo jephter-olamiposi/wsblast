@@ -1574,3 +1574,19 @@ async fn test_scenario_echo_match_skips_unsolicited_frames() {
 
     cancel_server.cancel();
 }
+
+#[tokio::test]
+async fn test_unresolvable_host_fails_every_slot_once_with_dns_error() {
+    let metrics = run(LoadTestConfig::builder("ws://does-not-exist.invalid/")
+        .connections(3)
+        .duration(Duration::from_millis(500))
+        .connect_timeout(Duration::from_secs(2)))
+    .await;
+
+    assert_eq!(metrics.total_connections_failed, 3, "{metrics:?}");
+    assert_eq!(
+        metrics.error_breakdown.get(&ErrorCategory::DnsResolution),
+        Some(&3),
+        "{metrics:?}"
+    );
+}

@@ -107,6 +107,7 @@ mod app;
 mod auth;
 mod cli;
 mod config;
+mod connect;
 mod error;
 mod metrics;
 mod report;

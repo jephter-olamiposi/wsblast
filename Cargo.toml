@@ -70,6 +70,7 @@ tokio-util = "0.7"
 url = { version = "2.5", features = ["serde"] }
 http = "1.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
 
 [features]
 # Every feature is on by default, so `cargo install wsblast` and the release
