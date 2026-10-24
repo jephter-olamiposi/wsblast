@@ -344,7 +344,7 @@ impl WorkerSession {
                                 capture
                                     .record_received(self.worker_id, &Message::Text(txt.clone()));
                             }
-                            return Ok((txt.len(), true));
+                            return Ok(Some(txt.len()));
                         }
                         Ok(Message::Binary(bin)) => {
                             #[cfg(feature = "capture")]
@@ -352,13 +352,13 @@ impl WorkerSession {
                                 capture
                                     .record_received(self.worker_id, &Message::Binary(bin.clone()));
                             }
-                            return Ok((bin.len(), true));
+                            return Ok(Some(bin.len()));
                         }
                         Ok(Message::Ping(data)) => {
                             let _ = sink.send(Message::Pong(data)).await;
                         }
                         Ok(Message::Pong(_)) => {}
-                        Ok(Message::Close(_)) => return Ok((0, false)),
+                        Ok(Message::Close(_)) => return Ok(None),
                         Ok(Message::Frame(_)) => {}
                         Err(e) => return Err(categorize_session_error(&e, ErrorDirection::Read)),
                     }
@@ -379,13 +379,12 @@ impl WorkerSession {
             };
 
             match response {
-                Ok(Ok((bytes_recv, is_alive))) => {
+                Ok(Ok(Some(bytes_recv))) => {
                     let rtt = start_time.elapsed();
                     self.metrics.record_message_recv(bytes_recv, Some(rtt));
-                    if !is_alive {
-                        break;
-                    }
                 }
+                // A server Close ends the session; it is not the reply.
+                Ok(Ok(None)) => break,
                 Ok(Err(cat)) => {
                     self.metrics.record_error(cat);
                     break;
@@ -695,7 +694,7 @@ impl WorkerSession {
                                                         &Message::Text(txt.clone()),
                                                     );
                                                 }
-                                                return Ok((txt.len(), true));
+                                                return Ok(Some(txt.len()));
                                             }
                                             Ok(Message::Binary(bin)) => {
                                                 #[cfg(feature = "capture")]
@@ -705,13 +704,13 @@ impl WorkerSession {
                                                         &Message::Binary(bin.clone()),
                                                     );
                                                 }
-                                                return Ok((bin.len(), true));
+                                                return Ok(Some(bin.len()));
                                             }
                                             Ok(Message::Ping(data)) => {
                                                 let _ = sink.send(Message::Pong(data)).await;
                                             }
                                             Ok(Message::Pong(_)) => {}
-                                            Ok(Message::Close(_)) => return Ok((0, false)),
+                                            Ok(Message::Close(_)) => return Ok(None),
                                             Ok(Message::Frame(_)) => {}
                                             Err(e) => {
                                                 return Err(categorize_session_error(
@@ -738,15 +737,13 @@ impl WorkerSession {
                                 };
 
                                 match response {
-                                    Ok(Ok((bytes_recv, is_alive))) => {
+                                    Ok(Ok(Some(bytes_recv))) => {
                                         self.metrics.record_message_recv(
                                             bytes_recv,
                                             Some(start_time.elapsed()),
                                         );
-                                        if !is_alive {
-                                            break 'script;
-                                        }
                                     }
+                                    Ok(Ok(None)) => break 'script,
                                     Ok(Err(cat)) => {
                                         self.metrics.record_error(cat);
                                         break 'script;
