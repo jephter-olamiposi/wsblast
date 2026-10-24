@@ -3,7 +3,7 @@
 
 use crate::cli::OutputFormat;
 use crate::config::{LoadTestConfig, SloThresholds};
-use crate::metrics::AggregatedMetrics;
+use crate::metrics::{AggregatedMetrics, LatencyStats};
 use colored::Colorize;
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, Color, Row, Table};
@@ -117,7 +117,10 @@ fn metric_direction(metric: &str) -> MetricDirection {
         "total_connections_attempted" => MetricDirection::Neutral,
         "total_connections_failed" | "error_rate" => MetricDirection::LowerIsBetter,
         _ if metric.starts_with("errors.") => MetricDirection::LowerIsBetter,
-        _ if metric.starts_with("handshake_latency.") || metric.starts_with("message_rtt.") => {
+        _ if metric.starts_with("handshake_latency.")
+            || metric.starts_with("message_rtt.")
+            || metric.starts_with("response_time.") =>
+        {
             MetricDirection::LowerIsBetter
         }
         _ => MetricDirection::HigherIsBetter,
@@ -147,6 +150,15 @@ pub(crate) fn compare_metrics(
     for metric_name in metric_names {
         let direction = metric_direction(metric_name);
         if direction == MetricDirection::Neutral {
+            continue;
+        }
+
+        // Response time exists only for paced runs and in reports from 0.3
+        // on; comparing it against a report without it would read as a
+        // regression from zero.
+        if metric_name.starts_with("response_time.")
+            && !(baseline_map.contains_key(metric_name) && current_map.contains_key(metric_name))
+        {
             continue;
         }
 
@@ -269,6 +281,13 @@ fn metrics_to_map(metrics: &AggregatedMetrics) -> BTreeMap<String, f64> {
         "message_rtt.p999_us".into(),
         metrics.message_rtt.p999_us as f64,
     );
+    if metrics.response_time.count > 0 {
+        let rt = &metrics.response_time;
+        map.insert("response_time.p50_us".into(), rt.p50_us as f64);
+        map.insert("response_time.p95_us".into(), rt.p95_us as f64);
+        map.insert("response_time.p99_us".into(), rt.p99_us as f64);
+        map.insert("response_time.p999_us".into(), rt.p999_us as f64);
+    }
 
     map
 }
@@ -444,12 +463,29 @@ pub fn evaluate_slos(slo: &SloThresholds, metrics: &AggregatedMetrics) -> SloEva
     let mut checks = Vec::new();
     let mut all_passed = true;
 
-    let rtt = &metrics.message_rtt;
+    // A paced run gates on response time, which counts the time a request
+    // waited behind a slow reply; RTT alone would hide that wait.
+    let (rtt, names) = if metrics.response_time.count > 0 {
+        (
+            &metrics.response_time,
+            [
+                "Response time p50",
+                "Response time p95",
+                "Response time p99",
+                "Response time p99.9",
+            ],
+        )
+    } else {
+        (
+            &metrics.message_rtt,
+            ["Latency p50", "Latency p95", "Latency p99", "Latency p99.9"],
+        )
+    };
     let latency_targets = [
-        ("Latency p50", slo.max_p50, rtt.p50_duration()),
-        ("Latency p95", slo.max_p95, rtt.p95_duration()),
-        ("Latency p99", slo.max_p99, rtt.p99_duration()),
-        ("Latency p99.9", slo.max_p999, rtt.p999_duration()),
+        (names[0], slo.max_p50, rtt.p50_duration()),
+        (names[1], slo.max_p95, rtt.p95_duration()),
+        (names[2], slo.max_p99, rtt.p99_duration()),
+        (names[3], slo.max_p999, rtt.p999_duration()),
     ];
     for (name, target, actual) in latency_targets {
         let Some(target) = target else {
@@ -497,6 +533,22 @@ pub fn evaluate_slos(slo: &SloThresholds, metrics: &AggregatedMetrics) -> SloEva
 /// A latency budget cannot pass without evidence: when no round trip was
 /// measured (every request timed out, or the mode does not measure RTT) the
 /// check fails instead of comparing the empty histogram's zero against the target.
+/// A report row label and the percentile it reads from a distribution.
+type PercentileRow = (&'static str, fn(&LatencyStats) -> u64);
+
+/// The latency distributions a report shows, by column name. Response time
+/// appears only when the run recorded it.
+fn latency_columns(metrics: &AggregatedMetrics) -> Vec<(&'static str, &LatencyStats)> {
+    let mut columns = vec![
+        ("Handshake Latency", &metrics.handshake_latency),
+        ("Message RTT Latency", &metrics.message_rtt),
+    ];
+    if metrics.response_time.count > 0 {
+        columns.push(("Response Time (from schedule)", &metrics.response_time));
+    }
+    columns
+}
+
 fn latency_check(name: &str, target: Duration, actual: Duration, samples: u64) -> SloCheck {
     if samples == 0 {
         return SloCheck {
@@ -676,59 +728,35 @@ fn render_text_report(
     out.push_str(&tput_table.to_string());
     out.push_str("\n\n");
 
+    let columns = latency_columns(metrics);
     let mut lat_table = Table::new();
     lat_table.load_preset(UTF8_FULL);
-    lat_table.set_header(vec![
-        "Percentile",
-        "Handshake Latency",
-        "Message RTT Latency",
-    ]);
-
-    lat_table.add_row(vec![
-        "p50 (Median)",
-        &format_us(metrics.handshake_latency.p50_us),
-        &format_us(metrics.message_rtt.p50_us),
-    ]);
-    lat_table.add_row(vec![
-        "p75",
-        &format_us(metrics.handshake_latency.p75_us),
-        &format_us(metrics.message_rtt.p75_us),
-    ]);
-    lat_table.add_row(vec![
-        "p90",
-        &format_us(metrics.handshake_latency.p90_us),
-        &format_us(metrics.message_rtt.p90_us),
-    ]);
-    lat_table.add_row(vec![
-        "p95",
-        &format_us(metrics.handshake_latency.p95_us),
-        &format_us(metrics.message_rtt.p95_us),
-    ]);
-    lat_table.add_row(vec![
-        "p99",
-        &format_us(metrics.handshake_latency.p99_us),
-        &format_us(metrics.message_rtt.p99_us),
-    ]);
-    lat_table.add_row(vec![
-        "p99.9",
-        &format_us(metrics.handshake_latency.p999_us),
-        &format_us(metrics.message_rtt.p999_us),
-    ]);
-    lat_table.add_row(vec![
-        "Min / Mean / Max",
-        &format!(
+    let mut header = vec!["Percentile"];
+    header.extend(columns.iter().map(|(name, _)| *name));
+    lat_table.set_header(header);
+    let rows: [PercentileRow; 6] = [
+        ("p50 (Median)", |s| s.p50_us),
+        ("p75", |s| s.p75_us),
+        ("p90", |s| s.p90_us),
+        ("p95", |s| s.p95_us),
+        ("p99", |s| s.p99_us),
+        ("p99.9", |s| s.p999_us),
+    ];
+    for (label, value) in rows {
+        let mut row = vec![label.to_string()];
+        row.extend(columns.iter().map(|(_, stats)| format_us(value(stats))));
+        lat_table.add_row(row);
+    }
+    let mut row = vec!["Min / Mean / Max".to_string()];
+    row.extend(columns.iter().map(|(_, stats)| {
+        format!(
             "{} / {} / {}",
-            format_us(metrics.handshake_latency.min_us),
-            format_us(metrics.handshake_latency.mean_us as u64),
-            format_us(metrics.handshake_latency.max_us)
-        ),
-        &format!(
-            "{} / {} / {}",
-            format_us(metrics.message_rtt.min_us),
-            format_us(metrics.message_rtt.mean_us as u64),
-            format_us(metrics.message_rtt.max_us)
-        ),
-    ]);
+            format_us(stats.min_us),
+            format_us(stats.mean_us as u64),
+            format_us(stats.max_us)
+        )
+    }));
+    lat_table.add_row(row);
     out.push_str(&lat_table.to_string());
     out.push_str("\n\n");
 
@@ -880,38 +908,30 @@ fn render_markdown_report(
     ));
 
     md.push_str("### Latency Distribution\n\n");
-    md.push_str("| Percentile | Handshake | Message RTT |\n");
-    md.push_str("| :--- | :--- | :--- |\n");
-    md.push_str(&format!(
-        "| **p50** | {} | {} |\n",
-        format_us(metrics.handshake_latency.p50_us),
-        format_us(metrics.message_rtt.p50_us)
-    ));
-    md.push_str(&format!(
-        "| **p90** | {} | {} |\n",
-        format_us(metrics.handshake_latency.p90_us),
-        format_us(metrics.message_rtt.p90_us)
-    ));
-    md.push_str(&format!(
-        "| **p95** | {} | {} |\n",
-        format_us(metrics.handshake_latency.p95_us),
-        format_us(metrics.message_rtt.p95_us)
-    ));
-    md.push_str(&format!(
-        "| **p99** | {} | {} |\n",
-        format_us(metrics.handshake_latency.p99_us),
-        format_us(metrics.message_rtt.p99_us)
-    ));
-    md.push_str(&format!(
-        "| **p99.9** | {} | {} |\n",
-        format_us(metrics.handshake_latency.p999_us),
-        format_us(metrics.message_rtt.p999_us)
-    ));
-    md.push_str(&format!(
-        "| **Max** | {} | {} |\n\n",
-        format_us(metrics.handshake_latency.max_us),
-        format_us(metrics.message_rtt.max_us)
-    ));
+    let columns = latency_columns(metrics);
+    md.push_str("| Percentile |");
+    for (name, _) in &columns {
+        md.push_str(&format!(" {name} |"));
+    }
+    md.push_str("\n| :--- |");
+    md.push_str(&" :--- |".repeat(columns.len()));
+    md.push('\n');
+    let rows: [PercentileRow; 6] = [
+        ("p50", |s| s.p50_us),
+        ("p90", |s| s.p90_us),
+        ("p95", |s| s.p95_us),
+        ("p99", |s| s.p99_us),
+        ("p99.9", |s| s.p999_us),
+        ("Max", |s| s.max_us),
+    ];
+    for (label, value) in rows {
+        md.push_str(&format!("| **{label}** |"));
+        for (_, stats) in &columns {
+            md.push_str(&format!(" {} |", format_us(value(stats))));
+        }
+        md.push('\n');
+    }
+    md.push('\n');
 
     if !slo.checks.is_empty() {
         md.push_str("### SLO Gate Evaluation\n\n");
@@ -983,6 +1003,7 @@ mod tests {
             error_rate: 0.0,
             handshake_latency: latency(500),
             message_rtt: latency(250),
+            response_time: LatencyStats::default(),
             error_breakdown: HashMap::new(),
         }
     }
@@ -1281,6 +1302,58 @@ mod tests {
                 .unwrap_or_else(|| panic!("{format}: {rendered}"));
             assert!(line.contains('7'), "{format}: {line}");
         }
+    }
+
+    #[test]
+    fn paced_runs_gate_on_response_time_and_show_it() {
+        let slo = SloThresholds::new().with_max_p99(Duration::from_millis(1));
+        let mut metrics = sample_metrics();
+
+        let unpaced = evaluate_slos(&slo, &metrics);
+        assert_eq!(unpaced.checks[0].name, "Latency p99");
+        for format in ["text", "markdown"] {
+            let rendered = render_report(&report_config(format), &metrics, &unpaced);
+            assert!(!rendered.contains("Response Time"), "{format}: {rendered}");
+        }
+
+        // RTT is within the 1 ms budget but response time is not.
+        metrics.response_time = latency(5_000);
+        let paced = evaluate_slos(&slo, &metrics);
+        assert_eq!(paced.checks[0].name, "Response time p99");
+        assert!(!paced.passed);
+        for format in ["text", "markdown"] {
+            let rendered = render_report(&report_config(format), &metrics, &paced);
+            assert!(rendered.contains("Response Time"), "{format}: {rendered}");
+        }
+    }
+
+    #[cfg(feature = "compare")]
+    #[test]
+    fn response_time_is_compared_only_when_both_reports_have_it() {
+        let baseline = sample_metrics();
+        let mut current = sample_metrics();
+        current.response_time = latency(9_000);
+        let comparison = compare_metrics(&baseline, &current, 5.0);
+        assert!(
+            comparison
+                .regressions
+                .iter()
+                .all(|item| !item.metric.starts_with("response_time.")),
+            "{:?}",
+            comparison.regressions
+        );
+
+        let mut baseline = current.clone();
+        baseline.response_time = latency(1_000);
+        let comparison = compare_metrics(&baseline, &current, 5.0);
+        assert!(
+            comparison
+                .regressions
+                .iter()
+                .any(|item| item.metric == "response_time.p99_us"),
+            "{:?}",
+            comparison.regressions
+        );
     }
 
     #[test]

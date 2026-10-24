@@ -17,6 +17,7 @@ Each connection is a worker on a Tokio runtime. In the default echo mode a worke
 - **Failure taxonomy.** Failures are counted by cause: DNS resolution, TCP connect, TLS handshake, HTTP upgrade rejected, protocol error, write error, read error, timeout and unexpected close.
 - **CI exit codes.** `0` when the run completed and every SLO passed, `1` for configuration or runtime errors, `2` only for an SLO breach or a `--fail-on-regression` regression.
 - **HDR percentiles.** Handshake latency and round-trip time are recorded in HDR histograms and reported from p50 to p99.9, merged from every connection rather than averaged.
+- **Coordinated omission corrected.** With `--rate`, requests follow a fixed schedule and wsblast also records response time from when each request was due, so a server stall shows up in every request that waited behind it instead of in one slow sample. Latency SLOs gate on it. See [METHODOLOGY.md](https://github.com/jephter-olamiposi/wsblast/blob/main/METHODOLOGY.md#4-timing).
 - **Single binary.** One executable, pre-built for Linux, macOS and Windows, with no agents, controllers or scripting runtime to deploy next to it.
 
 ## Install
@@ -107,7 +108,7 @@ The most used options; `wsblast --help` lists them all.
 | `-H, --header` | | Handshake header, repeatable |
 | `--mode` | `echo` | `echo`, `stream` or `listen` |
 | `--match` | `first` | Reply matching in echo mode: `first`, `exact` or `json:/path` |
-| `--max-p50`, `--max-p95`, `--max-p99`, `--max-p999` | | Round-trip time thresholds (echo mode only) |
+| `--max-p50`, `--max-p95`, `--max-p99`, `--max-p999` | | Latency thresholds (echo mode only): response time with `--rate`, round-trip time without |
 | `--max-error-rate` | | Error rate threshold, a fraction such as `0.01` |
 | `--min-throughput` | | Messages per second threshold |
 | `--format` / `-o, --output` | `text` | `text`, `json` or `markdown`, optionally written to a file |

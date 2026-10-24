@@ -105,6 +105,9 @@ pub(crate) enum ErrorScope {
 pub struct WorkerMetrics {
     pub(crate) handshake_hist: Histogram<u64>,
     pub(crate) rtt_hist: Histogram<u64>,
+    /// Paced echo latency measured from each request's scheduled send time.
+    /// Created on the first sample, so unpaced runs do not pay for it.
+    pub(crate) response_hist: Option<Histogram<u64>>,
     pub(crate) messages_sent: u64,
     pub(crate) messages_recv: u64,
     pub(crate) bytes_sent: u64,
@@ -144,6 +147,7 @@ impl WorkerMetrics {
         Ok(Self {
             handshake_hist,
             rtt_hist,
+            response_hist: None,
             messages_sent: 0,
             messages_recv: 0,
             bytes_sent: 0,
@@ -218,6 +222,19 @@ impl WorkerMetrics {
             .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
+    /// Records the time from a paced request's scheduled send time to its
+    /// reply.
+    #[inline]
+    pub(crate) fn record_response_time(&mut self, duration: Duration) {
+        let micros = duration.as_micros().clamp(1, 60_000_000) as u64;
+        if self.response_hist.is_none() {
+            self.response_hist = latency_histogram().ok();
+        }
+        if let Some(hist) = self.response_hist.as_mut() {
+            let _ = hist.record(micros);
+        }
+    }
+
     #[inline]
     pub(crate) fn record_unsolicited_frames(&mut self, count: u64) {
         if count == 0 {
@@ -243,7 +260,7 @@ impl WorkerMetrics {
 ///
 /// Values come from an HDR histogram covering 1 µs to 60 s at three
 /// significant figures. With no samples every field is zero.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct LatencyStats {
     /// Number of samples.
@@ -387,8 +404,15 @@ pub struct AggregatedMetrics {
     pub error_rate: f64,
     /// Time from connect to a completed WebSocket handshake.
     pub handshake_latency: LatencyStats,
-    /// Echo round-trip time; empty outside echo mode.
+    /// Echo round-trip time, from the actual send to the reply; empty
+    /// outside echo mode.
     pub message_rtt: LatencyStats,
+    /// Echo response time, from each request's scheduled send time to its
+    /// reply. Recorded only for paced echo runs (`--rate`), where it
+    /// includes the time a request waited behind a slow reply; empty
+    /// otherwise.
+    #[serde(default)]
+    pub response_time: LatencyStats,
     /// Error counts by category.
     pub error_breakdown: HashMap<ErrorCategory, u64>,
 }
@@ -407,6 +431,7 @@ impl AggregatedMetrics {
     ) -> WsResult<Self> {
         let mut combined_handshake = latency_histogram()?;
         let mut combined_rtt = latency_histogram()?;
+        let mut combined_response = latency_histogram()?;
 
         let mut total_messages_sent = 0u64;
         let mut total_messages_recv = 0u64;
@@ -421,6 +446,9 @@ impl AggregatedMetrics {
         for w in workers {
             let _ = combined_handshake.add(&w.handshake_hist);
             let _ = combined_rtt.add(&w.rtt_hist);
+            if let Some(hist) = &w.response_hist {
+                let _ = combined_response.add(hist);
+            }
             total_messages_sent += w.messages_sent;
             total_messages_recv += w.messages_recv;
             total_bytes_sent += w.bytes_sent;
@@ -481,6 +509,7 @@ impl AggregatedMetrics {
             error_rate,
             handshake_latency: LatencyStats::from_histogram(&combined_handshake),
             message_rtt: LatencyStats::from_histogram(&combined_rtt),
+            response_time: LatencyStats::from_histogram(&combined_response),
             error_breakdown,
         })
     }

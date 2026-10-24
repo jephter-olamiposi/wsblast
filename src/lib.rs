@@ -9,7 +9,9 @@
 //! # Example
 //!
 //! Run 10 connections for 5 seconds at 20 messages per second each, then fail
-//! if the 99th percentile round-trip time exceeds 25 ms:
+//! if the 99th percentile response time exceeds 25 ms. Response time is
+//! measured from when each request was due, so it includes any time a request
+//! waited behind a slow reply:
 //!
 //! ```no_run
 //! use std::time::Duration;
@@ -29,6 +31,7 @@
 //!         .run()
 //!         .await?;
 //!     println!("p99 round trip: {:?}", metrics.message_rtt.p99_duration());
+//!     println!("p99 response time: {:?}", metrics.response_time.p99_duration());
 //!
 //!     let gate = evaluate_slos(config.slo(), &metrics);
 //!     for check in gate.checks.iter().filter(|check| !check.passed) {
@@ -53,7 +56,8 @@
 //!   runs.
 //! - **Read the results**: [`AggregatedMetrics`] holds connection, message and
 //!   byte counts, throughput, the error rate, an [`ErrorCategory`] breakdown,
-//!   and [`LatencyStats`] for handshakes and echo round trips.
+//!   and [`LatencyStats`] for handshakes, echo round trips and, for paced
+//!   runs, response time.
 //! - **Gate**: [`evaluate_slos`] checks [`SloThresholds`] and returns an
 //!   [`SloEvaluation`]; [`render_report`] renders the same text, JSON or
 //!   Markdown report the CLI prints.

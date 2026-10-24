@@ -1648,3 +1648,86 @@ async fn test_unresolvable_host_fails_every_slot_once_with_dns_error() {
         "{metrics:?}"
     );
 }
+
+/// Echoes every data frame after `delay`, one at a time per connection.
+async fn spawn_delayed_echo_server(delay: Duration) -> (Url, tokio_util::sync::CancellationToken) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("ws://{}", listener.local_addr().unwrap())).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_server = cancel.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Ok((stream, _)) = listener.accept() => {
+                    tokio::spawn(async move {
+                        let Ok(ws) = tokio_tungstenite::accept_async(stream).await else {
+                            return;
+                        };
+                        let (mut sink, mut reader) = ws.split();
+                        while let Some(Ok(msg)) = reader.next().await {
+                            if msg.is_text() || msg.is_binary() {
+                                tokio::time::sleep(delay).await;
+                                if sink.send(msg).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                }
+                _ = cancel_server.cancelled() => break,
+            }
+        }
+    });
+    (url, cancel)
+}
+
+#[tokio::test]
+async fn test_paced_echo_response_time_counts_waiting_behind_a_slow_reply() {
+    // Each reply takes 40 ms but requests are due every 10 ms, so every
+    // request after the first waits longer than the one before it. RTT only
+    // sees the 40 ms; response time sees the growing wait.
+    let (target_url, cancel_server) = spawn_delayed_echo_server(Duration::from_millis(40)).await;
+
+    let metrics = run(echo_test_config(&target_url)
+        .rate_per_connection(100)
+        .duration(Duration::from_millis(1200)))
+    .await;
+
+    let rtt = &metrics.message_rtt;
+    let response = &metrics.response_time;
+    assert!(rtt.count >= 10, "{metrics:?}");
+    assert_eq!(response.count, rtt.count, "{metrics:?}");
+    assert!(rtt.p99_us < 100_000, "{metrics:?}");
+    assert!(response.p99_us > 300_000, "{metrics:?}");
+    assert!(response.p50_us > rtt.p50_us * 3, "{metrics:?}");
+    cancel_server.cancel();
+}
+
+#[tokio::test]
+async fn test_paced_echo_response_time_matches_rtt_when_the_server_keeps_up() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    let metrics = run(echo_test_config(&target_url)
+        .rate_per_connection(50)
+        .duration(Duration::from_millis(800)))
+    .await;
+
+    let response = &metrics.response_time;
+    assert!(response.count >= 20, "{metrics:?}");
+    assert_eq!(response.count, metrics.message_rtt.count, "{metrics:?}");
+    // Every request is sent on time; the timer's own wake-up delay is within
+    // the slack that response time leaves out.
+    assert!(response.p50_us < 5_000, "{metrics:?}");
+    cancel_server.cancel();
+}
+
+#[tokio::test]
+async fn test_unpaced_echo_records_no_response_time() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    let metrics = run(echo_test_config(&target_url).duration(Duration::from_millis(300))).await;
+
+    assert!(metrics.message_rtt.count > 0, "{metrics:?}");
+    assert_eq!(metrics.response_time.count, 0, "{metrics:?}");
+    cancel_server.cancel();
+}

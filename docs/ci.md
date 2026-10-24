@@ -55,7 +55,7 @@ wsblast "$TARGET" -H "X-API-Key: $WS_API_KEY"
 | `--rate` set | A paced run is more repeatable than an unthrottled one, whose load depends on the server's speed. |
 | A threshold with headroom | Shared CI runners are noisy. Gate on the latency your users need, not on the best run you have seen. |
 
-Remember that latency SLOs (`--max-p50`, `--max-p95`, `--max-p99`, `--max-p999`) need `--mode echo` (the default). Stream and listen mode can still be gated on `--max-error-rate` and `--min-throughput`.
+Remember that latency SLOs (`--max-p50`, `--max-p95`, `--max-p99`, `--max-p999`) need `--mode echo` (the default). With `--rate` they gate on response time, which includes the time a request waited behind a slow reply; without it they gate on round-trip time. Set `--rate` for a gate that catches server stalls. Stream and listen mode can still be gated on `--max-error-rate` and `--min-throughput`.
 
 wsblast writes one format per run. To get both a machine-readable record and a readable summary from one run, write JSON and render the summary from it with `jq`, as in the recipes below.
 
@@ -364,7 +364,7 @@ For each metric it computes `pct_change = (current - baseline) / baseline * 100`
 | Direction | Metrics |
 | :--- | :--- |
 | Higher is better | `total_connections_established`, `total_messages_sent`, `total_messages_recv`, `total_bytes_sent`, `total_bytes_recv`, `throughput_msg_per_sec`, `throughput_bytes_per_sec` |
-| Lower is better | `total_connections_failed`, `error_rate`, `errors.<category>` (one per error category, for example `errors.timeout`), `handshake_latency.p50_us`, `.p95_us`, `.p99_us`, `.p999_us`, `message_rtt.p50_us`, `.p95_us`, `.p99_us`, `.p999_us` |
+| Lower is better | `total_connections_failed`, `error_rate`, `errors.<category>` (one per error category, for example `errors.timeout`), `handshake_latency.p50_us`, `.p95_us`, `.p99_us`, `.p999_us`, `message_rtt.p50_us`, `.p95_us`, `.p99_us`, `.p999_us`, and for paced runs `response_time.p50_us`, `.p95_us`, `.p99_us`, `.p999_us` (compared only when both reports have them) |
 | Not compared | `total_connections_attempted`, `total_reconnects`, mean, min, max, p75, p90, p99.99 |
 
 Edge cases:

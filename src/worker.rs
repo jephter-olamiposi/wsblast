@@ -212,19 +212,27 @@ impl WorkerSession {
 
         let mut seq = 0u64;
 
-        let pacing_duration = if self.config.rate_per_conn > 0 {
-            Some(Duration::from_secs_f64(
-                1.0 / self.config.rate_per_conn as f64,
-            ))
-        } else {
-            None
-        };
-
-        // Skip missed ticks to prevent burst storms after temporary latency pauses
-        let mut ticker = pacing_duration.map(interval);
-        if let Some(ref mut t) = ticker {
-            t.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        }
+        // Paced sends follow a fixed schedule: request n is due at
+        // `session start + n * period`. A request is never sent before it is
+        // due, and one that falls behind (because an earlier reply was slow)
+        // is sent as soon as the previous reply arrives, so the configured
+        // rate is kept on average. Response time is RTT plus the time the
+        // request spent waiting past its due time behind a slow one, less the
+        // timer's own slack; RTT is measured from the actual send. See
+        // METHODOLOGY.md.
+        let mut schedule = (self.config.rate_per_conn > 0).then(|| SendSchedule {
+            period: Duration::from_secs_f64(1.0 / self.config.rate_per_conn as f64),
+            next_due: Instant::now(),
+        });
+        // Think time is a deliberate pause after each reply, not queueing, so
+        // response time is only recorded without it.
+        #[cfg(feature = "scenario")]
+        let record_response_time = self
+            .scenario
+            .as_ref()
+            .is_none_or(|phase| phase.think_time.is_zero());
+        #[cfg(not(feature = "scenario"))]
+        let record_response_time = true;
 
         let mut ping_ticker = self.keepalive_ticker();
 
@@ -242,12 +250,13 @@ impl WorkerSession {
                 break;
             }
 
-            if let Some(ref mut t) = ticker {
+            let due = schedule.as_ref().map(|s| s.next_due);
+            if let Some(due) = due {
                 // Keepalive ticks that land while waiting for the pacing slot
                 // only send a ping; the data send still waits for the slot.
                 loop {
                     tokio::select! {
-                        _ = t.tick() => break,
+                        _ = tokio::time::sleep_until(due.into()) => break,
                         _ = async {
                             match ping_ticker.as_mut() {
                                 Some(pt) => { pt.tick().await; }
@@ -311,8 +320,16 @@ impl WorkerSession {
 
             match response {
                 Ok(Ok(Some(bytes_recv))) => {
-                    let rtt = start_time.elapsed();
+                    let received_at = Instant::now();
+                    let rtt = received_at - start_time;
                     self.metrics.record_message_recv(bytes_recv, Some(rtt));
+                    if let Some(due) = due
+                        && record_response_time
+                    {
+                        let late = start_time.saturating_duration_since(due);
+                        self.metrics
+                            .record_response_time(rtt + late.saturating_sub(TIMER_SLACK));
+                    }
                 }
                 // A server Close ends the session; it is not the reply.
                 Ok(Ok(None)) => break,
@@ -328,11 +345,20 @@ impl WorkerSession {
             }
 
             seq += 1;
+            if let Some(schedule) = schedule.as_mut() {
+                schedule.next_due += schedule.period;
+            }
 
             #[cfg(feature = "scenario")]
             if !self.apply_think_time().await {
                 let _ = sink.send(Message::Close(None)).await;
                 break;
+            }
+            // After think time the schedule restarts from now, so the pause
+            // is not counted as lateness.
+            #[cfg(feature = "scenario")]
+            if !record_response_time && let Some(schedule) = schedule.as_mut() {
+                schedule.next_due = schedule.next_due.max(Instant::now());
             }
         }
 
@@ -1173,6 +1199,24 @@ fn categorize_session_error(err: &TungsteniteError, direction: ErrorDirection) -
 }
 
 /// Normalizes connection-establishment errors into canonical taxonomy categories.
+/// How late a paced send can be from timer wake-up alone. Tokio timers fire
+/// on the next millisecond tick after their deadline, and Windows wakes them
+/// at its default 15.6 ms timer resolution. Lateness up to this slack is the
+/// client's own timer, not time spent waiting behind a slow reply, so it is
+/// left out of response time.
+const TIMER_SLACK: Duration = if cfg!(windows) {
+    Duration::from_millis(16)
+} else {
+    Duration::from_millis(2)
+};
+
+/// The send times of a paced echo session.
+struct SendSchedule {
+    period: Duration,
+    /// When the next request is due.
+    next_due: Instant,
+}
+
 fn categorize_tungstenite_error(err: &TungsteniteError) -> ErrorCategory {
     categorize_session_error(err, ErrorDirection::Connect)
 }

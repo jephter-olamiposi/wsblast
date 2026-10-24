@@ -224,7 +224,11 @@
           "$ref": "#/$defs/latency_stats"
         },
         "message_rtt": {
-          "description": "Request to reply round-trip time. Only echo mode records samples; in every other mode count is 0.",
+          "description": "Request to reply round-trip time, from the actual send to the reply. Only echo mode records samples; in every other mode count is 0.",
+          "$ref": "#/$defs/latency_stats"
+        },
+        "response_time": {
+          "description": "Echo response time, from each request's scheduled send time to its reply, so it includes the time a request waited behind a slow reply (coordinated omission correction). Recorded only for paced echo runs (--rate); count is 0 otherwise. Absent from reports written before this field was added; readers should treat a missing value as an empty distribution.",
           "$ref": "#/$defs/latency_stats"
         },
         "error_breakdown": {

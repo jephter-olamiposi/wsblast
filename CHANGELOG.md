@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Coordinated omission correction for paced echo runs. With `--rate`, wsblast records a new `response_time` distribution: the time from when each request was due on the connection's schedule to its reply. When the server is slower than the configured rate, requests queue behind the slow replies, and response time shows that wait while round-trip time does not. The text and Markdown reports add a "Response Time (from schedule)" column, the JSON report a `response_time` object, and `--compare` compares its percentiles when both reports have them. See METHODOLOGY.md section 4.
+
+### Changed
+- Paced echo sends follow a fixed schedule instead of skipping missed ticks. A request that is late because an earlier reply was slow is sent as soon as that reply arrives, so a connection keeps `--rate` on average while the server keeps up. Achieved rates at high `--rate` values now match the requested rate.
+- **Breaking for SLO gates:** in a paced echo run, `--max-p50`, `--max-p95`, `--max-p99` and `--max-p999` gate on response time instead of round-trip time, and the checks are named `Response time p99` and so on. A run whose server cannot keep up with `--rate` can now fail a latency gate it passed before. Unpaced runs still gate on round-trip time.
+
+## [0.2.1] - 2026-10-24
+
+### Fixed
+- Handshake latency no longer includes DNS resolution or loading the platform's root certificates. The target is resolved and the TLS client configuration is built once, before the run starts, and every connection reuses them. `--connect-timeout` also bounds the initial resolution. Because the addresses are resolved once, DNS changes during a run are not picked up.
+- A host that resolves to several addresses no longer stalls each handshake on an unreachable one. Connections race the addresses with IPv6 and IPv4 interleaved (RFC 8305), and later connections try the address that answered first. On Windows, testing `localhost` against a server that listens only on IPv4 previously added about two seconds to every handshake.
+- A host that does not resolve fails each connection slot once with `dns_resolution` instead of retrying the lookup for the whole run.
+- Connection slots whose first handshake was still in progress when the run ended were counted as failed with no error recorded, next to a 0% error rate. They are now reported in a new `total_connections_interrupted` field, shown in the text and Markdown reports when non-zero. A run in which every slot was interrupted exits with code 1 and says so. See METHODOLOGY.md section 7.
+
+### Changed
+- CI runs on pinned runner images (`ubuntu-24.04`, `macos-15`, `windows-2025`) and `actions/checkout@v5`.
+
 ## [0.2.0] - 2026-10-24
 
 v0.2.0 ships a smaller crate in which every feature works end to end. Several features that were developed on `main` after 0.1.1 were removed before release; their code is preserved on the [`archive/v0.1-full-features`](https://github.com/jephter-olamiposi/wsblast/tree/archive/v0.1-full-features) branch, and several of them will return, rebuilt, in later releases.

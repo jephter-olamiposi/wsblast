@@ -36,7 +36,7 @@ The ramp counts toward `--duration` (see [section 8](#8-run-duration-and-shutdow
 | Mode and rate | Model | Behaviour |
 | :--- | :--- | :--- |
 | `echo`, `--rate 0` | Closed loop | Send one message, wait for its reply (or `--message-timeout`), send the next one at once. Offered load is about `connections / RTT`, so it falls as the server slows down. |
-| `echo`, `--rate R` | Paced closed loop | A per-connection `tokio::time::interval` with period `1/R`. Each tick sends one message and then waits for its reply. If a reply takes longer than `1/R`, the missed ticks are skipped (`MissedTickBehavior::Skip`), not sent late in a burst. A connection never has more than one request in flight. |
+| `echo`, `--rate R` | Paced closed loop on a fixed schedule | Request `n` of a session is due at `session start + n/R`. A request is never sent before it is due. When a slow reply makes the next request late, it is sent as soon as that reply arrives, so the connection keeps the configured rate on average for as long as the server keeps up. A connection never has more than one request in flight. Response time is recorded for each reply ([section 4](#4-timing)). |
 | `stream`, `--rate R` | Open loop per connection | An interval with period `1/R` and `MissedTickBehavior::Skip`. Sends do not wait for replies. Incoming frames are read in the same loop between sends. |
 | `stream`, `--rate 0` | Open loop, timer driven | The same loop with a 10 µs interval. It is not a busy loop; in practice the timer and the socket writes bound the rate. |
 | `listen` | No sending | The worker only reads frames (and answers pings). |
@@ -44,7 +44,7 @@ The ramp counts toward `--duration` (see [section 8](#8-run-duration-and-shutdow
 
 `--rate` is per connection. The aggregate target rate is `connections x rate`. In a scenario, the phase's `rate_per_conn` plays the same role, and in an action script it paces every individual send.
 
-The interval's first tick completes immediately, so a paced connection sends its first message as soon as the session starts.
+The first request of a session is due when the session starts, so a paced connection sends its first message at once. A reconnect starts a new schedule.
 
 ### 2.3 Request cap
 
@@ -97,6 +97,7 @@ If no reply arrives within `--message-timeout` (default `5s`), the worker record
 - Only the `{{timestamp}}` payload placeholder uses the system clock (Unix time in milliseconds). It is never used for measurement.
 - **RTT** starts immediately before the request is handed to the WebSocket sink and stops when the worker has read the reply frame. It includes client-side frame encoding and the socket write, the network in both directions, server processing, client-side frame decoding, and any delay before the Tokio scheduler polls the worker again. If the load generator's CPU is saturated, the scheduling delay inflates RTT.
 - **Handshake latency** starts before the TCP connect and stops when the HTTP upgrade completes. It covers TCP connect, the TLS handshake for `wss://`, and the HTTP upgrade. It is bounded by `--connect-timeout` (default `5s`); a handshake that takes longer is a `timeout` error.
+- **Response time** (paced echo only) is how long the reply took from the moment the request was due: RTT plus the time the request waited past its due time because an earlier reply was slow. Lateness of up to one timer tick (2 ms, or 16 ms on Windows) comes from the client's own timer, not from waiting behind a reply, and is left out. This is the coordinated omission correction: a client that waits for each reply sends fewer requests while the server is slow, so RTT alone records one slow sample for a stall that a steady stream of users would each have felt. Response time records the wait every one of those requests saw. When a scenario phase has a think time, the pause after each reply is deliberate, the schedule restarts after it, and response time is not recorded.
 - **DNS resolution and TLS setup are not part of handshake latency.** Before the clock starts, wsblast resolves the target host once, also bounded by `--connect-timeout`, and builds one TLS client configuration from the platform's root certificates (or `SSL_CERT_FILE` / `SSL_CERT_DIR`). Every connection of the run reuses both, so the run keeps the addresses it resolved at the start even if DNS changes during the run. A host that does not resolve fails every slot once with `dns_resolution`, without reconnect attempts.
 - **Address selection.** When the host resolves to several addresses, they are tried with IPv6 and IPv4 interleaved, starting with the resolver's first choice. An attempt that has not connected after 250 ms gets the next address started alongside it, and a failed attempt starts the next address at once (RFC 8305, Happy Eyeballs). The address that accepted a connection is tried first by later connections, so a host such as `localhost` that resolves to `::1` first while the server listens only on `127.0.0.1` costs the race only on the first connections, not on every handshake.
 - Durations are converted to whole microseconds by truncation and clamped to the histogram range (1 µs to 60 s) before recording. A sub-microsecond value is recorded as 1 µs.
@@ -245,12 +246,12 @@ Pacing, ramp, think time and `Wait`/`Ping` actions all use Tokio timers, which h
 
 | `--rate` | echo, achieved msg/s | stream, achieved msg/s |
 | ---: | ---: | ---: |
-| 500 | 499 | 500 |
-| 1000 | 995 | 998 |
-| 2000 | 1978 | 1958 |
-| 5000 | 4846 | 4970 |
+| 500 | 500 | 500 |
+| 1000 | 1000 | 998 |
+| 2000 | 2000 | 1958 |
+| 5000 | 4998 | 4970 |
 
-These numbers depend on the machine, the OS and its load. Windows wakes timers at its default timer resolution of about 15.6 ms, so each paced connection there sends at most about 64 msg/s, whatever `--rate` asks for. On Windows, reach high rates with more connections, or leave `--rate` unset for unpaced echo load. For a high aggregate rate, prefer more connections at a moderate per-connection rate.
+These numbers depend on the machine, the OS and its load. Paced echo keeps its schedule by sending overdue requests as soon as it wakes, so it reaches the configured rate on average even when the timer wakes late; requests are then sent in small bursts. Stream mode skips missed ticks instead. Windows wakes timers at its default timer resolution of about 15.6 ms, so each paced stream connection there sends at most about 64 msg/s, whatever `--rate` asks for, and paced echo sends in bursts of up to 16 ms of requests. On Windows, reach high stream rates with more connections. For a high aggregate rate, prefer more connections at a moderate per-connection rate.
 
 ## 9. SLO evaluation and exit codes
 
@@ -258,14 +259,14 @@ SLOs are evaluated once, on the final merged metrics.
 
 | Flag | Check | Passes when |
 | :--- | :--- | :--- |
-| `--max-p50 D` | `message_rtt.p50_us` | `p50 <= D` |
-| `--max-p95 D` | `message_rtt.p95_us` | `p95 <= D` |
-| `--max-p99 D` | `message_rtt.p99_us` | `p99 <= D` |
-| `--max-p999 D` | `message_rtt.p999_us` | `p99.9 <= D` |
+| `--max-p50 D` | `response_time.p50_us` when the run recorded response time, otherwise `message_rtt.p50_us` | `p50 <= D` |
+| `--max-p95 D` | the same, at p95 | `p95 <= D` |
+| `--max-p99 D` | the same, at p99 | `p99 <= D` |
+| `--max-p999 D` | the same, at p99.9 | `p99.9 <= D` |
 | `--max-error-rate F` | `error_rate` | `error_rate <= F` |
 | `--min-throughput X` | `throughput_msg_per_sec` | `throughput >= X` |
 
-A latency check with no RTT samples (for example every request timed out) fails with the actual value "no RTT samples". It never passes on an empty histogram.
+A paced echo run (`--rate`) records response time, so its latency checks are named `Response time p99` and gate on the latency a steady stream of users would see. An unpaced run gates on RTT and its checks are named `Latency p99`. A latency check with no RTT samples (for example every request timed out) fails with the actual value "no RTT samples". It never passes on an empty histogram.
 
 | Exit code | Meaning |
 | :--- | :--- |
@@ -277,8 +278,8 @@ SLOs are checked before the "all connections failed" condition. A run where ever
 
 ## 10. Known limitations
 
-- **No coordinated-omission correction.** Both echo load models are closed loop: a connection waits for each reply before it sends again, and missed pacing ticks are skipped. When the server stalls for a time `T`, each connection records one slow sample instead of the `T x rate` samples a constant-rate client would have seen. Percentiles therefore understate tail latency under stalls, and the effect grows with the stall length and the configured rate. Correction is planned for v0.3.0. Until then, compare runs made with the same settings, and treat high percentiles as a lower bound when the server has pauses.
-- **Memory per connection.** Each connection holds two histograms of about 136 KiB each, so about 270 KB per connection before any socket or TLS buffers. 10,000 connections need about 2.7 GB for histograms alone. A local echo run with 1,000 connections at `--rate 1` peaked at about 420 MB resident.
+- **Coordinated omission is corrected only for paced echo.** Response time needs a schedule to measure against, so it is recorded only with `--rate` in echo mode. Unpaced echo (`--rate 0`) is a closed loop with no intended send times: its RTT percentiles still record one slow sample per stall and understate tail latency when the server pauses. Scenario action scripts and phases with a think time do not record response time either. To measure tail latency under stalls, set `--rate`.
+- **Memory per connection.** Each connection holds two histograms of about 136 KiB each, so about 270 KB per connection before any socket or TLS buffers; a paced echo connection adds a third for response time. 10,000 connections need about 2.7 GB for histograms alone. A local echo run with 1,000 connections at `--rate 1` peaked at about 420 MB resident.
 - **Reply matching.** Echo replies are matched by `--match` (default `first`, see [section 3.1](#31-how-replies-are-matched-echo-mode)). With `first`, unsolicited server frames are taken as replies.
 - **Single generator.** All load comes from one process. wsblast does not detect when the generator itself is the bottleneck (CPU saturation, file descriptor limit, ephemeral ports). It prints a warning when `-c` plus 64 exceeds the open file limit (`ulimit -n`). Watch the generator's CPU when RTT matters.
 - **Timer resolution.** Per-connection rates above about 1000 msg/s are approximate (see [section 8.3](#83-timer-resolution)).
