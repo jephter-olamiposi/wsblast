@@ -9,8 +9,6 @@ use futures_util::{FutureExt, SinkExt, StreamExt};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-#[cfg(feature = "chaos")]
-use crate::config::ChaosConfig;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_tungstenite::tungstenite::Error as TungsteniteError;
@@ -30,9 +28,6 @@ use crate::config::{ScenarioAction, ScenarioPhase};
 
 #[cfg(feature = "capture")]
 use crate::metrics::FrameCapture;
-
-#[cfg(feature = "chaos")]
-use fastrand;
 
 /// Represents a single asynchronous WebSocket client worker session.
 pub struct WorkerSession {
@@ -234,19 +229,7 @@ impl WorkerSession {
             + futures_util::Stream<Item = std::result::Result<Message, TungsteniteError>>
             + Unpin,
     {
-        let (sink, stream) = ws_stream.split();
-
-        #[cfg(feature = "chaos")]
-        let mut sink = ChaosInjector::new(sink, self.config.chaos.clone());
-
-        #[cfg(feature = "chaos")]
-        let mut stream = ChaosInjector::new(stream, self.config.chaos.clone());
-
-        #[cfg(not(feature = "chaos"))]
-        let mut sink = sink;
-
-        #[cfg(not(feature = "chaos"))]
-        let mut stream = stream;
+        let (mut sink, mut stream) = ws_stream.split();
 
         let mut seq = 0u64;
 
@@ -386,19 +369,7 @@ impl WorkerSession {
             + futures_util::Stream<Item = std::result::Result<Message, TungsteniteError>>
             + Unpin,
     {
-        let (sink, stream) = ws_stream.split();
-
-        #[cfg(feature = "chaos")]
-        let mut sink = ChaosInjector::new(sink, self.config.chaos.clone());
-
-        #[cfg(feature = "chaos")]
-        let mut stream = ChaosInjector::new(stream, self.config.chaos.clone());
-
-        #[cfg(not(feature = "chaos"))]
-        let mut sink = sink;
-
-        #[cfg(not(feature = "chaos"))]
-        let mut stream = stream;
+        let (mut sink, mut stream) = ws_stream.split();
 
         let mut seq = 0u64;
         let mut ping_ticker = self.keepalive_ticker();
@@ -494,19 +465,7 @@ impl WorkerSession {
             + futures_util::Stream<Item = std::result::Result<Message, TungsteniteError>>
             + Unpin,
     {
-        let (sink, stream) = ws_stream.split();
-
-        #[cfg(feature = "chaos")]
-        let mut sink = ChaosInjector::new(sink, self.config.chaos.clone());
-
-        #[cfg(feature = "chaos")]
-        let mut stream = ChaosInjector::new(stream, self.config.chaos.clone());
-
-        #[cfg(not(feature = "chaos"))]
-        let mut sink = sink;
-
-        #[cfg(not(feature = "chaos"))]
-        let mut stream = stream;
+        let (mut sink, mut stream) = ws_stream.split();
 
         let mut ping_ticker = self.keepalive_ticker();
 
@@ -571,19 +530,7 @@ impl WorkerSession {
             + futures_util::Stream<Item = std::result::Result<Message, TungsteniteError>>
             + Unpin,
     {
-        let (sink, stream) = ws_stream.split();
-
-        #[cfg(feature = "chaos")]
-        let mut sink = ChaosInjector::new(sink, self.config.chaos.clone());
-
-        #[cfg(feature = "chaos")]
-        let mut stream = ChaosInjector::new(stream, self.config.chaos.clone());
-
-        #[cfg(not(feature = "chaos"))]
-        let mut sink = sink;
-
-        #[cfg(not(feature = "chaos"))]
-        let mut stream = stream;
+        let (mut sink, mut stream) = ws_stream.split();
 
         let mut seq = 0u64;
         let mut ticker = if self.config.rate_per_conn > 0 {
@@ -857,19 +804,7 @@ impl WorkerSession {
             + futures_util::Stream<Item = std::result::Result<Message, TungsteniteError>>
             + Unpin,
     {
-        let (sink, stream) = ws_stream.split();
-
-        #[cfg(feature = "chaos")]
-        let mut sink = ChaosInjector::new(sink, self.config.chaos.clone());
-
-        #[cfg(feature = "chaos")]
-        let mut stream = ChaosInjector::new(stream, self.config.chaos.clone());
-
-        #[cfg(not(feature = "chaos"))]
-        let mut sink = sink;
-
-        #[cfg(not(feature = "chaos"))]
-        let mut stream = stream;
+        let (mut sink, mut stream) = ws_stream.split();
 
         let mut ping_ticker = self.keepalive_ticker();
 
@@ -1199,223 +1134,6 @@ fn message_byte_len(msg: &Message) -> usize {
     }
 }
 
-/// Chaos injection middleware for testing resilience.
-/// Applies a deterministic single-character or single-byte corruption to a frame.
-#[cfg(feature = "chaos")]
-fn corrupt_message(message: Message) -> Message {
-    match message {
-        Message::Text(text) => {
-            let mut chars: Vec<char> = text.chars().collect();
-            if chars.is_empty() {
-                return Message::Text(text);
-            }
-            let index = fastrand::usize(..chars.len());
-            chars[index] = '\u{FFFD}';
-            Message::Text(Utf8Bytes::from(chars.into_iter().collect::<String>()))
-        }
-        Message::Binary(bytes) => {
-            if bytes.is_empty() {
-                return Message::Binary(bytes);
-            }
-            let mut corrupted = bytes.to_vec();
-            let index = fastrand::usize(..corrupted.len());
-            corrupted[index] ^= 0x01;
-            Message::Binary(Bytes::from(corrupted))
-        }
-        other => other,
-    }
-}
-
-/// Injects latency, packet loss, corruption, and connection closes on the hot path.
-#[cfg(feature = "chaos")]
-pub struct ChaosInjector<S> {
-    inner: S,
-    config: ChaosConfig,
-    latency: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
-    sink_latency_done: bool,
-    stream_latency_done: bool,
-}
-
-#[cfg(feature = "chaos")]
-impl<S> ChaosInjector<S> {
-    pub fn new(inner: S, config: ChaosConfig) -> Self {
-        Self {
-            inner,
-            config,
-            latency: None,
-            sink_latency_done: false,
-            stream_latency_done: false,
-        }
-    }
-
-    /// Applies latency injection without blocking the async runtime.
-    fn poll_latency(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
-        if !self.config.enabled {
-            return std::task::Poll::Ready(());
-        }
-        let latency_ms = match self.config.latency_ms {
-            Some(latency_ms) if latency_ms > 0 => latency_ms,
-            _ => return std::task::Poll::Ready(()),
-        };
-
-        let sleep = self
-            .latency
-            .get_or_insert_with(|| Box::pin(tokio::time::sleep(Duration::from_millis(latency_ms))));
-        let elapsed = match std::future::Future::poll(sleep.as_mut(), cx) {
-            std::task::Poll::Ready(()) => true,
-            std::task::Poll::Pending => false,
-        };
-
-        if elapsed {
-            self.latency = None;
-            std::task::Poll::Ready(())
-        } else {
-            std::task::Poll::Pending
-        }
-    }
-
-    /// Determines if a message should be dropped based on loss percentage.
-    fn should_drop(&self) -> bool {
-        if !self.config.enabled {
-            return false;
-        }
-        if let Some(loss_percent) = self.config.loss_percent {
-            if loss_percent > 0.0 {
-                let roll: f64 = fastrand::f64() * 100.0;
-                return roll < loss_percent;
-            }
-        }
-        false
-    }
-
-    /// Determines if a message should be corrupted based on corruption percentage.
-    fn should_corrupt(&self) -> bool {
-        if !self.config.enabled {
-            return false;
-        }
-        if let Some(corrupt_percent) = self.config.corrupt_percent {
-            if corrupt_percent > 0.0 {
-                let roll: f64 = fastrand::f64() * 100.0;
-                return roll < corrupt_percent;
-            }
-        }
-        false
-    }
-
-    /// Determines if connection should be closed based on close percentage.
-    fn should_close(&self) -> bool {
-        if !self.config.enabled {
-            return false;
-        }
-        if let Some(close_percent) = self.config.close_percent {
-            if close_percent > 0.0 {
-                let roll: f64 = fastrand::f64() * 100.0;
-                return roll < close_percent;
-            }
-        }
-        false
-    }
-}
-
-#[cfg(feature = "chaos")]
-impl<S> futures_util::Sink<Message> for ChaosInjector<S>
-where
-    S: futures_util::Sink<Message, Error = TungsteniteError> + Unpin,
-{
-    type Error = TungsteniteError;
-
-    fn poll_ready(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        let this = self.as_mut().get_mut();
-        if !this.sink_latency_done {
-            match this.poll_latency(cx) {
-                std::task::Poll::Ready(()) => this.sink_latency_done = true,
-                std::task::Poll::Pending => return std::task::Poll::Pending,
-            }
-        }
-        std::pin::Pin::new(&mut this.inner).poll_ready(cx)
-    }
-
-    fn start_send(mut self: std::pin::Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
-        let this = self.as_mut().get_mut();
-        this.sink_latency_done = false;
-        if this.should_drop() {
-            return Ok(()); // Silently drop
-        }
-        if this.should_close() {
-            return Err(TungsteniteError::ConnectionClosed);
-        }
-        let item = if this.should_corrupt() {
-            corrupt_message(item)
-        } else {
-            item
-        };
-        std::pin::Pin::new(&mut this.inner).start_send(item)
-    }
-
-    fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
-    }
-
-    fn poll_close(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::pin::Pin::new(&mut self.inner).poll_close(cx)
-    }
-}
-
-#[cfg(feature = "chaos")]
-impl<S> futures_util::Stream for ChaosInjector<S>
-where
-    S: futures_util::Stream<Item = Result<Message, TungsteniteError>> + Unpin,
-{
-    type Item = Result<Message, TungsteniteError>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        let this = self.as_mut().get_mut();
-        if !this.stream_latency_done {
-            match this.poll_latency(cx) {
-                std::task::Poll::Ready(()) => this.stream_latency_done = true,
-                std::task::Poll::Pending => return std::task::Poll::Pending,
-            }
-        }
-
-        loop {
-            let poll = std::pin::Pin::new(&mut this.inner).poll_next(cx);
-            match poll {
-                std::task::Poll::Ready(Some(Ok(msg))) => {
-                    this.stream_latency_done = false;
-                    if this.should_drop() {
-                        // Packet loss removes the frame from the stream instead of
-                        // surfacing a protocol error that would end the session.
-                        continue;
-                    }
-                    if this.should_close() {
-                        return std::task::Poll::Ready(Some(Err(
-                            TungsteniteError::ConnectionClosed,
-                        )));
-                    }
-                    return std::task::Poll::Ready(Some(Ok(msg)));
-                }
-                std::task::Poll::Ready(other) => {
-                    this.stream_latency_done = false;
-                    return std::task::Poll::Ready(other);
-                }
-                std::task::Poll::Pending => return std::task::Poll::Pending,
-            }
-        }
-    }
-}
-
 /// Direction of the I/O operation that produced a session error.
 #[derive(Clone, Copy)]
 enum ErrorDirection {
@@ -1497,39 +1215,6 @@ mod backoff_tests {
 
         backoff.reset();
         assert_eq!(backoff.next_delay(), Duration::from_millis(100));
-    }
-}
-
-#[cfg(all(test, feature = "chaos"))]
-mod chaos_tests {
-    use super::*;
-
-    #[test]
-    fn text_corruption_stays_valid_utf8_and_changes_content() {
-        match corrupt_message(Message::Text(Utf8Bytes::from_static("hello"))) {
-            Message::Text(text) => assert_ne!(text.as_str(), "hello"),
-            other => panic!("expected text frame, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn binary_corruption_changes_content() {
-        match corrupt_message(Message::Binary(Bytes::from_static(&[1, 2, 3]))) {
-            Message::Binary(bytes) => assert_ne!(bytes.as_ref(), &[1, 2, 3]),
-            other => panic!("expected binary frame, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn empty_frames_are_left_unchanged() {
-        assert_eq!(
-            corrupt_message(Message::Text(Utf8Bytes::from_static(""))),
-            Message::Text(Utf8Bytes::from_static(""))
-        );
-        assert_eq!(
-            corrupt_message(Message::Binary(Bytes::new())),
-            Message::Binary(Bytes::new())
-        );
     }
 }
 

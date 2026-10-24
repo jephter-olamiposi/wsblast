@@ -45,7 +45,6 @@ jobs:
           - auth
           - graphql-ws
           - capture
-          - chaos
           - mock
           - distributed
           - compare

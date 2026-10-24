@@ -3742,7 +3742,6 @@ dependencies = [
  "criterion",
  "crossbeam",
  "crossterm 0.28.1",
- "fastrand",
  "futures-util",
  "hdrhistogram",
  "http",

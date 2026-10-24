@@ -71,7 +71,6 @@ chrono = { version = "0.4", features = ["serde"], optional = true }
 reqwest = { version = "0.12", features = ["blocking", "json"], optional = true }
 crossbeam = { version = "0.8", optional = true }
 pcap-file = { version = "3.0.0-rc1", optional = true }
-fastrand = { version = "2.1", optional = true }
 uuid = { version = "1.8", features = ["v4", "serde"], optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"], optional = true }
 
@@ -83,11 +82,10 @@ prometheus = ["prometheus-client", "axum", "tower"]
 auth = ["jsonwebtoken", "oauth2", "chrono", "reqwest"]
 graphql-ws = []
 capture = ["crossbeam", "pcap-file"]
-chaos = ["fastrand", "crossbeam"]
 mock = ["tokio-tungstenite/native-tls"]
 distributed = ["tonic", "prost", "prost-types", "uuid", "tracing", "tracing-subscriber"]
 compare = []
-full = ["scenario", "otel", "prometheus", "auth", "graphql-ws", "capture", "chaos", "compare", "mock", "distributed"]
+full = ["scenario", "otel", "prometheus", "auth", "graphql-ws", "capture", "compare", "mock", "distributed"]
 tracing-subscriber = ["dep:tracing-subscriber"]
 
 [target.'cfg(unix)'.dependencies]

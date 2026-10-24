@@ -39,8 +39,6 @@ pub struct LoadTestConfig {
     pub graphql_ws: Option<GraphQLWSConfig>,
     #[cfg(feature = "capture")]
     pub capture: CaptureConfig,
-    #[cfg(feature = "chaos")]
-    pub chaos: ChaosConfig,
     pub slo: SloThresholds,
     pub output_format: OutputFormat,
     pub output_path: Option<PathBuf>,
@@ -308,16 +306,6 @@ pub struct CaptureConfig {
 
 #[cfg(feature = "capture")]
 pub use crate::cli::CaptureFormat;
-
-#[cfg(feature = "chaos")]
-#[derive(Debug, Clone)]
-pub struct ChaosConfig {
-    pub enabled: bool,
-    pub latency_ms: Option<u64>,
-    pub loss_percent: Option<f64>,
-    pub corrupt_percent: Option<f64>,
-    pub close_percent: Option<f64>,
-}
 
 #[cfg(feature = "scenario")]
 #[derive(Debug, Clone, Deserialize)]
@@ -624,19 +612,6 @@ impl ScenarioAction {
     }
 }
 
-#[cfg(feature = "chaos")]
-fn validate_percentage(name: &str, value: Option<f64>) -> Result<()> {
-    if let Some(value) = value {
-        if !(0.0..=100.0).contains(&value) {
-            return Err(ConfigError::InvalidThreshold(format!(
-                "chaos {name} percentage must be between 0 and 100, received {value}"
-            ))
-            .into());
-        }
-    }
-    Ok(())
-}
-
 #[cfg(feature = "scenario")]
 pub(crate) fn parse_target_url(raw: &str) -> Result<Url> {
     let url =
@@ -764,13 +739,6 @@ impl LoadTestConfig {
 
         if cli.connections == 0 {
             return Err(ConfigError::ZeroConcurrency(0).into());
-        }
-
-        #[cfg(feature = "chaos")]
-        {
-            validate_percentage("loss", cli.chaos_loss)?;
-            validate_percentage("corruption", cli.chaos_corrupt)?;
-            validate_percentage("close", cli.chaos_close)?;
         }
 
         if let Some(0) = cli.requests {
@@ -1005,18 +973,6 @@ impl LoadTestConfig {
                     .unwrap_or_else(|| PathBuf::from("capture.pcapng")),
                 format: cli.capture_format,
                 max_frames: cli.capture_max_frames,
-            },
-            #[cfg(feature = "chaos")]
-            chaos: ChaosConfig {
-                enabled: cli.chaos
-                    || cli.chaos_latency.is_some()
-                    || cli.chaos_loss.is_some()
-                    || cli.chaos_corrupt.is_some()
-                    || cli.chaos_close.is_some(),
-                latency_ms: cli.chaos_latency,
-                loss_percent: cli.chaos_loss,
-                corrupt_percent: cli.chaos_corrupt,
-                close_percent: cli.chaos_close,
             },
             slo,
             output_format: cli.format,
@@ -1328,16 +1284,6 @@ mod tests {
             "10",
         ]);
         assert!(LoadTestConfig::from_cli(cli).is_ok());
-    }
-
-    #[cfg(feature = "chaos")]
-    #[test]
-    fn chaos_percentages_are_validated() {
-        use clap::Parser;
-
-        let cli = Cli::parse_from(["wsblast", "ws://127.0.0.1:9001", "--chaos-loss", "150"]);
-        let error = LoadTestConfig::from_cli(cli).unwrap_err();
-        assert!(error.to_string().contains("between 0 and 100"));
     }
 
     #[cfg(feature = "auth")]

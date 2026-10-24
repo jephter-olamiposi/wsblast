@@ -302,31 +302,6 @@ pub struct Cli {
     #[arg(long = "capture-max-frames", value_name = "NUM", default_value_t = 0)]
     pub capture_max_frames: usize,
 
-    /// Enable chaos injection
-    #[cfg(feature = "chaos")]
-    #[arg(long = "chaos", default_value_t = false)]
-    pub chaos: bool,
-
-    /// Inject latency in milliseconds
-    #[cfg(feature = "chaos")]
-    #[arg(long = "chaos-latency", value_name = "MS")]
-    pub chaos_latency: Option<u64>,
-
-    /// Inject packet loss percentage (0.0-100.0)
-    #[cfg(feature = "chaos")]
-    #[arg(long = "chaos-loss", value_name = "PERCENT")]
-    pub chaos_loss: Option<f64>,
-
-    /// Inject corruption percentage (0.0-100.0)
-    #[cfg(feature = "chaos")]
-    #[arg(long = "chaos-corrupt", value_name = "PERCENT")]
-    pub chaos_corrupt: Option<f64>,
-
-    /// Inject random close percentage (0.0-100.0)
-    #[cfg(feature = "chaos")]
-    #[arg(long = "chaos-close", value_name = "PERCENT")]
-    pub chaos_close: Option<f64>,
-
     /// Output report format
     #[arg(long = "format", value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
