@@ -53,15 +53,11 @@ tokio-util = "0.7"
 url = { version = "2.5", features = ["serde"] }
 http = "1.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-jsonwebtoken = { version = "9", optional = true }
-oauth2 = { version = "5", optional = true }
-chrono = { version = "0.4", features = ["serde"], optional = true }
-reqwest = { version = "0.12", features = ["blocking", "json"], optional = true }
 
 [features]
 default = []
 scenario = ["serde_yaml"]
-auth = ["jsonwebtoken", "oauth2", "chrono", "reqwest"]
+auth = []
 graphql-ws = []
 compare = []
 full = ["scenario", "auth", "graphql-ws", "compare"]

@@ -150,7 +150,7 @@ pub struct Cli {
     #[arg(long = "min-throughput", value_name = "RPS")]
     pub min_throughput: Option<f64>,
 
-    /// Authentication type (static, jwt, oauth2, apikey)
+    /// Authentication type (none, static, apikey)
     #[cfg(feature = "auth")]
     #[arg(long = "auth-type", value_name = "TYPE", value_enum, default_value_t = AuthType::None)]
     pub auth_type: AuthType,
@@ -168,46 +168,6 @@ pub struct Cli {
         default_value = "Authorization"
     )]
     pub auth_header: String,
-
-    /// JWT token endpoint (used with --auth-type jwt)
-    #[cfg(feature = "auth")]
-    #[arg(long = "auth-jwt-endpoint", value_name = "URL")]
-    pub auth_jwt_endpoint: Option<String>,
-
-    /// JWT client ID (used with --auth-type jwt)
-    #[cfg(feature = "auth")]
-    #[arg(long = "auth-jwt-client-id", value_name = "ID")]
-    pub auth_jwt_client_id: Option<String>,
-
-    /// JWT secret (used with --auth-type jwt)
-    #[cfg(feature = "auth")]
-    #[arg(long = "auth-jwt-secret", value_name = "SECRET")]
-    pub auth_jwt_secret: Option<String>,
-
-    /// JWT scopes (used with --auth-type jwt)
-    #[cfg(feature = "auth")]
-    #[arg(long = "auth-jwt-scopes", value_name = "SCOPES", num_args = 1..)]
-    pub auth_jwt_scopes: Vec<String>,
-
-    /// OAuth2 token URL (used with --auth-type oauth2)
-    #[cfg(feature = "auth")]
-    #[arg(long = "auth-oauth2-token-url", value_name = "URL")]
-    pub auth_oauth2_token_url: Option<String>,
-
-    /// OAuth2 client ID (used with --auth-type oauth2)
-    #[cfg(feature = "auth")]
-    #[arg(long = "auth-oauth2-client-id", value_name = "ID")]
-    pub auth_oauth2_client_id: Option<String>,
-
-    /// OAuth2 client secret (used with --auth-type oauth2)
-    #[cfg(feature = "auth")]
-    #[arg(long = "auth-oauth2-client-secret", value_name = "SECRET")]
-    pub auth_oauth2_client_secret: Option<String>,
-
-    /// OAuth2 scopes (used with --auth-type oauth2)
-    #[cfg(feature = "auth")]
-    #[arg(long = "auth-oauth2-scopes", value_name = "SCOPES", num_args = 1..)]
-    pub auth_oauth2_scopes: Vec<String>,
 
     /// API Key (used with --auth-type apikey)
     #[cfg(feature = "auth")]
@@ -311,11 +271,6 @@ pub enum AuthType {
     None,
     /// Static bearer token
     Static,
-    /// JWT with client credentials
-    Jwt,
-    /// OAuth2 client credentials flow
-    #[value(name = "oauth2", alias = "o-auth2")]
-    OAuth2,
     /// API Key
     #[value(name = "apikey", alias = "api-key")]
     ApiKey,

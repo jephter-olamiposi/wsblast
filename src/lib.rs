@@ -10,10 +10,6 @@ pub mod runner;
 pub mod tui;
 pub mod worker;
 
-#[cfg(feature = "auth")]
-pub use auth::{
-    ApiKeyAuthenticator, Authenticator, JwtAuthenticator, OAuth2Authenticator, StaticAuthenticator,
-};
 pub use cli::{Cli, OutputFormat, TestMode};
 #[cfg(feature = "auth")]
 pub use config::AuthConfig;
