@@ -169,6 +169,8 @@ pub struct LoadTestConfig {
     pub chaos_corrupt_percent: f64,
     #[prost(double, tag = "22")]
     pub chaos_close_percent: f64,
+    #[prost(bool, tag = "23")]
+    pub no_reconnect: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WorkerMetrics {
@@ -192,6 +194,8 @@ pub struct WorkerMetrics {
     pub connections_established: u64,
     #[prost(uint64, tag = "10")]
     pub connections_failed: u64,
+    #[prost(uint64, tag = "11")]
+    pub reconnects: u64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
