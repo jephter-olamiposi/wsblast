@@ -441,6 +441,44 @@ impl ScenarioConfig {
         }
     }
 
+    /// Resolves the target of every phase that `selected` runs, in run order.
+    ///
+    /// For each phase the target is the CLI URL, then the phase's `target`,
+    /// then the scenario's `target`. A phase is never given another phase's
+    /// endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidScenario`] naming the first phase that
+    /// has no target from any of the three sources, and URL errors for an
+    /// unparsable or non-WebSocket target.
+    pub fn resolve_phase_targets(
+        &self,
+        cli_url: Option<&str>,
+        selected: Option<&str>,
+    ) -> Result<Vec<Url>> {
+        let phases = match selected {
+            Some(_) => vec![self.selected_phase(selected)?],
+            None => self.phases.iter().collect(),
+        };
+        phases
+            .into_iter()
+            .map(|phase| {
+                let raw = cli_url
+                    .or(phase.target.as_deref())
+                    .or(self.target.as_deref())
+                    .ok_or_else(|| {
+                        invalid_phase(
+                            &phase.name,
+                            "no target URL; set `target` on this phase or at the top level of \
+                             the scenario, or pass a URL on the command line",
+                        )
+                    })?;
+                parse_target_url(raw)
+            })
+            .collect()
+    }
+
     /// Compiles every phase, or only the named phase when `selected` is set.
     pub fn compile(&self, selected: Option<&str>) -> Result<Vec<ScenarioPhase>> {
         match selected {
@@ -899,12 +937,11 @@ impl LoadTestConfig {
 
         let phase = ScenarioPhase::compile(scenario.selected_phase(cli.phase.as_deref())?)?;
 
-        // Precedence: explicit CLI URL, then phase endpoint, then scenario endpoint.
-        let target = cli
-            .resolve_url()
-            .map(ToOwned::to_owned)
-            .or_else(|| phase.target.as_ref().map(Url::to_string))
-            .or_else(|| scenario.target.clone());
+        let target = scenario
+            .resolve_phase_targets(cli.resolve_url(), cli.phase.as_deref())?
+            .into_iter()
+            .next()
+            .map(String::from);
 
         let mut config = Self::from_cli_with_target(cli.clone(), target)?;
 
@@ -1367,6 +1404,77 @@ mod tests {
             .compile(Some("missing"))
             .unwrap_err();
         assert!(error.to_string().contains("phase 'missing' not found"));
+    }
+
+    #[cfg(feature = "scenario")]
+    fn targeted_phase(name: &str, target: Option<&str>) -> PhaseConfig {
+        PhaseConfig {
+            target: target.map(ToOwned::to_owned),
+            ..phase(name)
+        }
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn scenario_phase_without_any_target_is_rejected_by_name() {
+        use clap::Parser;
+
+        let mut scenario = scenario(vec![
+            targeted_phase("first", Some("ws://127.0.0.1:9001")),
+            targeted_phase("second", None),
+        ]);
+        scenario.target = None;
+
+        let cli = Cli::parse_from(["wsblast", "--scenario", "scenario.yaml"]);
+        let error = LoadTestConfig::from_scenario_config(&scenario, &cli).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("phase 'second'"), "{message}");
+        assert!(message.contains("no target URL"), "{message}");
+
+        let cli = Cli::parse_from(["wsblast", "--scenario", "scenario.yaml", "ws://10.0.0.1/ws"]);
+        assert!(LoadTestConfig::from_scenario_config(&scenario, &cli).is_ok());
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn scenario_targets_prefer_cli_then_phase_then_scenario_for_every_phase() {
+        let mut scenario = scenario(vec![
+            targeted_phase("own", Some("ws://phase.test/a")),
+            targeted_phase("shared", None),
+            targeted_phase("own-again", Some("ws://phase.test/c")),
+        ]);
+        scenario.target = Some("ws://scenario.test/".to_string());
+
+        let targets: Vec<String> = scenario
+            .resolve_phase_targets(None, None)
+            .unwrap()
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            targets,
+            [
+                "ws://phase.test/a",
+                "ws://scenario.test/",
+                "ws://phase.test/c"
+            ]
+        );
+
+        let targets = scenario
+            .resolve_phase_targets(Some("wss://cli.test/ws"), None)
+            .unwrap();
+        assert_eq!(targets.len(), 3);
+        assert!(
+            targets
+                .iter()
+                .all(|url| url.as_str() == "wss://cli.test/ws")
+        );
+
+        let targets = scenario
+            .resolve_phase_targets(None, Some("own-again"))
+            .unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].as_str(), "ws://phase.test/c");
     }
 
     #[cfg(feature = "scenario")]

@@ -280,3 +280,84 @@ async fn impossible_slo_exits_with_code_2() {
 
     cancel_server.cancel();
 }
+
+/// Writes a scenario file unique to this test process and returns its path.
+#[cfg(feature = "scenario")]
+fn write_scenario(name: &str, yaml: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("cli_{name}_{}.yaml", std::process::id()));
+    std::fs::write(&path, yaml).unwrap();
+    path
+}
+
+#[cfg(feature = "scenario")]
+fn phase_yaml(name: &str, target: Option<&str>) -> String {
+    let target = target
+        .map(|url| format!("    target: \"{url}\"\n"))
+        .unwrap_or_default();
+    format!("  - name: \"{name}\"\n{target}    duration: \"200ms\"\n    connections: 1\n")
+}
+
+#[cfg(feature = "scenario")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scenario_phase_without_a_target_is_rejected() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+    let path = write_scenario(
+        "missing_target",
+        &format!(
+            "version: \"1.0\"\nmetadata:\n  name: \"targets\"\nphases:\n{}{}",
+            phase_yaml("first", Some(&target_url)),
+            phase_yaml("second", None)
+        ),
+    );
+
+    let finished = run_wsblast(&["--scenario", path.to_str().unwrap(), "--no-progress"]).await;
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(
+        finished.code,
+        Some(1),
+        "stdout:\n{}\nstderr:\n{}",
+        finished.stdout,
+        finished.stderr
+    );
+    assert!(
+        finished.stderr.contains("phase 'second': no target URL"),
+        "stderr:\n{}",
+        finished.stderr
+    );
+    assert!(!finished.stderr.contains("phase 1/2"), "the run started");
+
+    cancel_server.cancel();
+}
+
+#[cfg(feature = "scenario")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scenario_report_lists_every_phase_target() {
+    let (first_url, cancel_first) = spawn_echo_server().await;
+    let (second_url, cancel_second) = spawn_echo_server().await;
+    let path = write_scenario(
+        "phase_targets",
+        &format!(
+            "version: \"1.0\"\nmetadata:\n  name: \"targets\"\nphases:\n{}{}",
+            phase_yaml("first", Some(&first_url)),
+            phase_yaml("second", Some(&second_url))
+        ),
+    );
+
+    let finished = run_wsblast(&["--scenario", path.to_str().unwrap(), "--no-progress"]).await;
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(finished.code, Some(0), "stderr:\n{}", finished.stderr);
+    for (phase, url) in [("first", &first_url), ("second", &second_url)] {
+        let line = finished
+            .stdout
+            .lines()
+            .find(|line| line.contains(url.as_str()))
+            .unwrap_or_else(|| panic!("{url} missing from the report:\n{}", finished.stdout));
+        assert!(line.contains(phase), "{line}");
+    }
+
+    cancel_first.cancel();
+    cancel_second.cancel();
+}

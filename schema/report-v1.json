@@ -21,7 +21,7 @@
       "examples": ["1.0.0"]
     },
     "target_url": {
-      "description": "Target URL after parsing, so a bare host gains a trailing slash (ws://127.0.0.1:9001 is written as ws://127.0.0.1:9001/). For a scenario this is the URL of the first phase that ran (or of the --phase phase), even when later phases used other targets.",
+      "description": "Target URL after parsing, so a bare host gains a trailing slash (ws://127.0.0.1:9001 is written as ws://127.0.0.1:9001/). For a scenario this is the URL of the first phase that ran (or of the --phase phase); phase_targets lists every phase.",
       "type": "string",
       "pattern": "^wss?://"
     },
@@ -39,6 +39,27 @@
       "description": "Session mode, printed with Rust Debug formatting.",
       "type": "string",
       "enum": ["Echo", "Stream", "Listen", "GraphQLWS"]
+    },
+    "phase_targets": {
+      "description": "Scenario runs only: the target of every executed phase, in run order. A phase skipped by Ctrl+C or SIGTERM is not listed. Absent from single-run reports and from reports written before it was added; readers should treat a missing value as an empty list.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["phase", "target_url"],
+        "properties": {
+          "phase": {
+            "description": "Phase name from the scenario file.",
+            "type": "string",
+            "minLength": 1
+          },
+          "target_url": {
+            "description": "Target URL the phase connected to, after parsing (same format as target_url).",
+            "type": "string",
+            "pattern": "^wss?://"
+          }
+        }
+      }
     },
     "metrics": {
       "$ref": "#/$defs/aggregated_metrics"

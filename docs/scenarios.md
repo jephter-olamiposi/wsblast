@@ -145,13 +145,13 @@ For each phase, the target is the first of:
 2. The phase's `target`.
 3. The scenario's `target`.
 
-If none of the three is set for the first phase that runs, wsblast exits with code 1:
+The rule is applied to every phase on its own; a phase never inherits another phase's target. If none of the three is set for a phase that will run, wsblast exits with code 1 before opening any connection and names the phase:
 
 ```text
-Error: Configuration error: Invalid target URL '': No target URL provided. Specify target as argument or --url <URL>
+Error: Configuration error: Invalid scenario: phase 'spike': no target URL; set `target` on this phase or at the top level of the scenario, or pass a URL on the command line
 ```
 
-A later phase that has no target of its own, in a scenario that has no top-level `target`, reuses the target of the first phase that runs (or of the `--phase` phase). Set a top-level `target` when phases should share an endpoint, so this does not depend on phase order.
+Set a top-level `target` when phases should share an endpoint. With `--phase`, only the selected phase needs a target.
 
 ## 6. Command-line flags with scenarios
 
@@ -177,6 +177,7 @@ All phases are merged into one report, and SLOs are evaluated once on the merged
 | `connections` | Sum of `connections` over the executed phases. |
 | `duration_secs`, `metrics.elapsed` | Sum of each phase's elapsed time. The 500 ms pauses are not included. |
 | `target_url` | Target of the first executed phase. |
+| `phase_targets` | JSON only: one `{"phase", "target_url"}` entry per executed phase, in run order. The text and Markdown reports show the same list in place of the single target. |
 | `metrics.total_connections_attempted` | Same as `connections`. |
 | Latency histograms | One distribution over the samples of every phase. |
 
@@ -203,6 +204,7 @@ The whole file is validated before any connection is opened, including phases th
 | Zero `Wait` or `Ping` duration | `phase 'warmup': wait action duration must be greater than zero` |
 | Forbidden close code | `close code 1005 cannot be sent; use 1000-4999 excluding 1004, 1005, 1006, 1015` |
 | `--phase` names a missing phase | `phase 'nope' not found; available phases: soak, spike` |
+| A phase that will run has no target from the command line, the phase or the scenario | ``phase 'spike': no target URL; set `target` on this phase or at the top level of the scenario, or pass a URL on the command line`` |
 
 An invalid URL in any `target` fails with `Invalid target URL` or `Unsupported WebSocket scheme`.
 
