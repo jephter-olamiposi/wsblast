@@ -7,8 +7,6 @@ pub mod config;
 pub mod distributed;
 pub mod error;
 pub mod metrics;
-#[cfg(feature = "mock")]
-pub mod mock;
 pub mod report;
 pub mod runner;
 pub mod tui;
@@ -30,8 +28,6 @@ pub use distributed::{DistributedConfig, DistributedMode};
 pub use distributed::{run_coordinator, run_worker};
 pub use error::{ConfigError, ErrorCategory, Result, WorkerError, WsBlastError};
 pub use metrics::{AggregatedMetrics, LatencyStats, LiveMetrics, LiveSnapshot, WorkerMetrics};
-#[cfg(feature = "mock")]
-pub use mock::{ErrorInjectionConfig, FrameDirection, MockConfig, MockServer, RecordedFrame};
 #[cfg(feature = "compare")]
 pub use report::{
     BaselineComparison, Improvement, Regression, compare_metrics, parse_report_metrics,

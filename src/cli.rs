@@ -1,7 +1,5 @@
 //! Command-line argument parsing and flag specifications.
 
-#[cfg(feature = "mock")]
-use clap::Subcommand;
 use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -329,49 +327,6 @@ pub struct Cli {
     /// Run only a specific phase from the scenario by name
     #[arg(long = "phase", value_name = "NAME", requires = "scenario")]
     pub phase: Option<String>,
-
-    /// Mock server subcommand
-    #[cfg(feature = "mock")]
-    #[command(subcommand)]
-    pub mock: Option<MockSubcommand>,
-}
-
-#[cfg(feature = "mock")]
-#[derive(Debug, Subcommand, Clone)]
-pub enum MockSubcommand {
-    /// Record WebSocket interactions to a file
-    Record {
-        /// Bind address for the mock server
-        #[arg(long = "bind", default_value = "127.0.0.1:9001")]
-        bind: std::net::SocketAddr,
-        /// Output file for recorded frames
-        #[arg(short = 'o', long = "output", value_name = "FILE")]
-        output: PathBuf,
-        /// Delay before responding (milliseconds)
-        #[arg(long = "delay", value_name = "MS")]
-        delay: Option<u64>,
-    },
-    /// Replay recorded WebSocket interactions
-    Replay {
-        /// Bind address for the mock server
-        #[arg(long = "bind", default_value = "127.0.0.1:9001")]
-        bind: std::net::SocketAddr,
-        /// Input file with recorded frames
-        #[arg(short = 'i', long = "input", value_name = "FILE")]
-        input: PathBuf,
-        /// Delay before responding (milliseconds)
-        #[arg(long = "delay", value_name = "MS")]
-        delay: Option<u64>,
-        /// Error injection: close after N messages
-        #[arg(long = "error-close-after", value_name = "N")]
-        error_close_after: Option<usize>,
-        /// Error injection: inject error after N messages
-        #[arg(long = "error-inject-after", value_name = "N")]
-        error_inject_after: Option<usize>,
-        /// Error injection: custom error message
-        #[arg(long = "error-message", value_name = "MSG")]
-        error_message: Option<String>,
-    },
 }
 
 impl Cli {

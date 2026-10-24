@@ -40,12 +40,6 @@ async fn main() {
 async fn run_app() -> Result<()> {
     let cli = Cli::parse();
 
-    // Handle mock subcommand first (doesn't run load test)
-    #[cfg(feature = "mock")]
-    if let Some(mock_cmd) = &cli.mock {
-        return handle_mock_command(mock_cmd).await;
-    }
-
     // Handle compare command first (doesn't run load test)
     #[cfg(feature = "compare")]
     if !cli.compare.is_empty() {
@@ -309,57 +303,5 @@ async fn run_app() -> Result<()> {
         std::process::exit(1);
     }
 
-    Ok(())
-}
-
-#[cfg(feature = "mock")]
-async fn handle_mock_command(mock_cmd: &wsblast::cli::MockSubcommand) -> Result<()> {
-    match mock_cmd {
-        wsblast::cli::MockSubcommand::Record {
-            bind,
-            output,
-            delay,
-        } => {
-            let config = wsblast::mock::MockConfig {
-                bind_addr: *bind,
-                record_path: Some(output.clone()),
-                replay_path: None,
-                delay_ms: *delay,
-                error_injection: None,
-            };
-            let server = wsblast::mock::MockServer::new(config);
-            server.run().await?;
-        }
-        wsblast::cli::MockSubcommand::Replay {
-            bind,
-            input,
-            delay,
-            error_close_after,
-            error_inject_after,
-            error_message,
-        } => {
-            let error_injection = if error_close_after.is_some()
-                || error_inject_after.is_some()
-                || error_message.is_some()
-            {
-                Some(wsblast::mock::ErrorInjectionConfig {
-                    close_after_messages: *error_close_after,
-                    inject_error_after: *error_inject_after,
-                    error_message: error_message.clone(),
-                })
-            } else {
-                None
-            };
-            let config = wsblast::mock::MockConfig {
-                bind_addr: *bind,
-                record_path: None,
-                replay_path: Some(input.clone()),
-                delay_ms: *delay,
-                error_injection,
-            };
-            let server = wsblast::mock::MockServer::new(config);
-            server.run().await?;
-        }
-    }
     Ok(())
 }
