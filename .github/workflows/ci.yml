@@ -42,7 +42,6 @@ jobs:
           - scenario
           - auth
           - graphql-ws
-          - mock
           - distributed
           - compare
           - tracing-subscriber

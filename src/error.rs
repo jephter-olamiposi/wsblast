@@ -57,9 +57,6 @@ pub enum ConfigError {
     #[error("Invalid scenario: {0}")]
     InvalidScenario(String),
 
-    #[error("Invalid mock server configuration: {0}")]
-    InvalidMock(String),
-
     #[error("Unsupported option combination: {0}")]
     UnsupportedOption(String),
 
