@@ -542,6 +542,76 @@ async fn test_custom_headers_propagation() {
     cancel.cancel();
 }
 
+#[tokio::test]
+#[allow(clippy::result_large_err)]
+async fn test_repeated_headers_reach_server() {
+    use clap::Parser;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_server = cancel.clone();
+    let (seen_tx, seen_rx) = tokio::sync::oneshot::channel::<(Vec<String>, Vec<String>)>();
+
+    tokio::spawn(async move {
+        tokio::select! {
+            Ok((stream, _)) = listener.accept() => {
+                let callback = move |req: &tokio_tungstenite::tungstenite::handshake::server::Request, resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    let values = |name: &str| {
+                        req.headers()
+                            .get_all(name)
+                            .iter()
+                            .map(|v| v.to_str().unwrap_or("").to_string())
+                            .collect()
+                    };
+                    let _ = seen_tx.send((values("x-test"), values("host")));
+                    Ok(resp)
+                };
+
+                if let Ok(ws_stream) = tokio_tungstenite::accept_hdr_async(stream, callback).await {
+                    let (mut sink, mut reader) = ws_stream.split();
+                    while let Some(Ok(msg)) = reader.next().await {
+                        if let Message::Text(t) = msg {
+                            let _ = sink.send(Message::Text(t)).await;
+                        }
+                    }
+                }
+            }
+            _ = cancel_server.cancelled() => {}
+        }
+    });
+
+    let target = format!("ws://127.0.0.1:{}", addr.port());
+    let cli = wsblast::cli::Cli::parse_from([
+        "wsblast",
+        target.as_str(),
+        "-c",
+        "1",
+        "-d",
+        "300ms",
+        "-H",
+        "X-Test: a",
+        "-H",
+        "X-Test: b",
+        "-H",
+        "Host: wsblast.test",
+        "--no-progress",
+    ]);
+    let config = LoadTestConfig::from_cli(cli).unwrap();
+
+    let metrics = Runner::new(config).run().await.unwrap();
+    assert_eq!(metrics.total_connections_established, 1);
+
+    let (x_test, host) = tokio::time::timeout(Duration::from_secs(1), seen_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(x_test, ["a", "b"]);
+    assert_eq!(host, ["wsblast.test"]);
+
+    cancel.cancel();
+}
+
 #[cfg(feature = "graphql-ws")]
 #[tokio::test]
 async fn test_graphql_ws_subscription_lifecycle() {

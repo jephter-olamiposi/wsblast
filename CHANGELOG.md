@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GraphQL WS now emits protocol-correct wire names (`connection_init`, `subscribe`, `next`, `complete`) instead of Rust variant names, and handles modern keepalives.
 - Prometheus counters now export with a single `_total` suffix instead of `_total_total`.
 - Duration flags no longer panic on negative, NaN, infinite or overflowing values (`-d infs`, `--duration=-1s`); they fail with `InvalidDuration`, and the parser now accepts `ns` and fractional values for every unit (`1.5ms`, `0.5us`).
+- Repeated `-H` flags with the same header name now send every value instead of keeping only the last one; a `-H` header still replaces a default handshake header of the same name (such as `Host`).
 
 ## [0.1.1] - 2026-09-04
 
