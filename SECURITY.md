@@ -31,10 +31,10 @@ you prefer to stay anonymous.
 Examples of what is in scope:
 
 - memory safety problems, panics or unbounded resource use triggered by a
-  malicious WebSocket server, scenario file, baseline file or mock recording;
+  malicious WebSocket server, scenario file or baseline file;
 - TLS certificate or hostname verification being skipped when it should not be;
-- credentials (tokens, API keys, OAuth2 secrets) leaking into logs, reports,
-  captures or error messages;
+- credentials (tokens, API keys) leaking into logs, reports or error
+  messages;
 - vulnerabilities in the release artifacts, installers or Docker image.
 
 ## Responsible use
