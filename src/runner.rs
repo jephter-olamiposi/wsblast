@@ -130,135 +130,18 @@ impl Runner {
     ///
     /// Cancellation via timeout or interrupt signal gracefully stops all worker loops
     /// and ensures all in-flight session metrics are aggregated without data loss.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::WsBlastError::Metrics`] if per-worker telemetry
+    /// initialization or histogram aggregation fails.
     pub async fn run(&self) -> crate::error::Result<AggregatedMetrics> {
-        let total_connections = self.config.connections;
-        check_file_descriptor_limit(total_connections);
-
-        let start_time = Instant::now();
-        let spawn_delay = if self.config.ramp_rate > 0 {
-            Some(Duration::from_secs_f64(1.0 / self.config.ramp_rate as f64))
-        } else {
-            None
-        };
-
-        let mut handles = Vec::with_capacity(total_connections);
-        for worker_id in 0..total_connections {
-            if self.cancel_token.is_cancelled() {
-                break;
-            }
-
-            let metrics = WorkerMetrics::new(Arc::clone(&self.live_metrics))?;
-            handles.push(tokio::spawn(self.create_session(worker_id, metrics).run()));
-
-            if let Some(delay) = spawn_delay {
-                tokio::select! {
-                    _ = tokio::time::sleep(delay) => {}
-                    _ = self.cancel_token.cancelled() => break,
-                }
-            }
-        }
-
-        let duration_token = self.cancel_token.clone();
-        let test_duration = self.config.duration;
-        tokio::spawn(async move {
-            tokio::time::sleep(test_duration).await;
-            duration_token.cancel();
-        });
-
-        if let Some(max_reqs) = self.config.max_requests {
-            let req_token = self.cancel_token.clone();
-            let live = Arc::clone(&self.live_metrics);
-            tokio::spawn(async move {
-                while !req_token.is_cancelled() {
-                    if live
-                        .messages_sent
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                        >= max_reqs
-                    {
-                        req_token.cancel();
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-            });
-        }
-
-        let sig_token = self.cancel_token.clone();
-        tokio::spawn(async move {
-            #[cfg(unix)]
-            {
-                use tokio::signal::unix::{SignalKind, signal};
-                let mut sigterm = signal(SignalKind::terminate()).ok();
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {
-                        sig_token.cancel();
-                    }
-                    _ = async {
-                        if let Some(ref mut st) = sigterm {
-                            st.recv().await;
-                        } else {
-                            std::future::pending().await
-                        }
-                    } => {
-                        sig_token.cancel();
-                    }
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    sig_token.cancel();
-                }
-            }
-        });
-
-        if !self.config.no_progress && !self.config.tui {
-            let pb = ProgressBar::new(test_duration.as_millis() as u64);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {percent}% | Conns: {msg} | Press Ctrl+C to stop")
-                    .unwrap_or_else(|_| ProgressStyle::default_bar())
-                    .progress_chars("#>-"),
-            );
-
-            while !self.cancel_token.is_cancelled() {
-                let snap = self.live_metrics.snapshot();
-                let elapsed = start_time.elapsed();
-                let elapsed_ms = elapsed.as_millis() as u64;
-                pb.set_position(elapsed_ms.min(test_duration.as_millis() as u64));
-
-                let rps = if elapsed.as_secs_f64() > 0.0 {
-                    snap.messages_received as f64 / elapsed.as_secs_f64()
-                } else {
-                    0.0
-                };
-
-                pb.set_message(format!(
-                    "Active: {} | Msg/s: {:.1} | Recv: {} | Err: {}",
-                    snap.active_connections, rps, snap.messages_received, snap.total_errors
-                ));
-
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-
-            pb.finish_and_clear();
-        } else {
-            self.cancel_token.cancelled().await;
-        }
-
-        let elapsed = start_time.elapsed();
-
-        let mut worker_metrics = Vec::with_capacity(handles.len());
-        for handle in handles {
-            if let Ok(metrics) = handle.await {
-                worker_metrics.push(metrics);
-            }
-        }
+        let (worker_metrics, elapsed, attempted) = self.run_and_collect_worker_metrics().await?;
 
         #[cfg(feature = "capture")]
         self.write_capture();
 
-        AggregatedMetrics::merge(worker_metrics, elapsed, total_connections as u64)
+        AggregatedMetrics::merge(worker_metrics, elapsed, attempted)
     }
 
     /// Runs the worker pool and returns raw worker metrics without merging.
@@ -274,6 +157,8 @@ impl Runner {
         let total_connections = self.config.connections;
         check_file_descriptor_limit(total_connections);
 
+        spawn_signal_listener(self.cancel_token.clone());
+
         let start_time = Instant::now();
         let spawn_delay = if self.config.ramp_rate > 0 {
             Some(Duration::from_secs_f64(1.0 / self.config.ramp_rate as f64))
@@ -322,35 +207,6 @@ impl Runner {
                 }
             });
         }
-
-        let sig_token = self.cancel_token.clone();
-        tokio::spawn(async move {
-            #[cfg(unix)]
-            {
-                use tokio::signal::unix::{SignalKind, signal};
-                let mut sigterm = signal(SignalKind::terminate()).ok();
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {
-                        sig_token.cancel();
-                    }
-                    _ = async {
-                        if let Some(ref mut st) = sigterm {
-                            st.recv().await;
-                        } else {
-                            std::future::pending().await
-                        }
-                    } => {
-                        sig_token.cancel();
-                    }
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    sig_token.cancel();
-                }
-            }
-        });
 
         if !self.config.no_progress && !self.config.tui {
             let pb = ProgressBar::new(test_duration.as_millis() as u64);
@@ -396,6 +252,61 @@ impl Runner {
         }
 
         Ok((worker_metrics, elapsed, total_connections as u64))
+    }
+}
+
+/// Cancels `token` on Ctrl+C, and on SIGTERM where the platform has it.
+///
+/// OS handlers are registered before this returns, not when the spawned task
+/// is first polled, so a signal delivered while workers are still ramping is
+/// observed instead of killing the process with the default disposition. The
+/// listener exits once `token` is cancelled for any reason.
+fn spawn_signal_listener(token: CancellationToken) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigint = signal(SignalKind::interrupt()).ok();
+        let mut sigterm = signal(SignalKind::terminate()).ok();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = recv_or_pending(sigint.as_mut()) => token.cancel(),
+                _ = recv_or_pending(sigterm.as_mut()) => token.cancel(),
+                _ = token.cancelled() => {}
+            }
+        });
+    }
+
+    #[cfg(windows)]
+    {
+        let mut ctrl_c = tokio::signal::windows::ctrl_c().ok();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = async {
+                    match ctrl_c.as_mut() {
+                        Some(ctrl_c) => {
+                            ctrl_c.recv().await;
+                        }
+                        None => std::future::pending().await,
+                    }
+                } => token.cancel(),
+                _ = token.cancelled() => {}
+            }
+        });
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = token;
+    }
+}
+
+#[cfg(unix)]
+async fn recv_or_pending(signal: Option<&mut tokio::signal::unix::Signal>) {
+    match signal {
+        Some(signal) => {
+            signal.recv().await;
+        }
+        None => std::future::pending().await,
     }
 }
 
