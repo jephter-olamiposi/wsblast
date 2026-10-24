@@ -3,6 +3,7 @@
 # Installs the pre-compiled wsblast binary for macOS or Linux.
 # Usage: curl -fsSL https://raw.githubusercontent.com/jephter-olamiposi/wsblast/main/install.sh | sh
 # Set WSBLAST_VERSION (e.g. v0.1.1) to install a specific release without querying the GitHub API.
+# Set WSBLAST_INSTALL_DIR to install somewhere other than /usr/local/bin.
 #
 # Release archives are built by dist (see dist-workspace.toml). Each release
 # also ships dist's own installers, which install into $CARGO_HOME/bin:
@@ -125,23 +126,28 @@ if [ ! -f "$BIN_PATH" ]; then
     exit 1
 fi
 
-# Determine target installation directory
-INSTALL_DIR="/usr/local/bin"
-if [ ! -w "$INSTALL_DIR" ]; then
-    if command -v sudo >/dev/null 2>&1; then
-        echo "Elevating permissions with sudo to install to ${INSTALL_DIR}..."
-        sudo mv "$BIN_PATH" "${INSTALL_DIR}/${BIN_NAME}"
-        sudo chmod +x "${INSTALL_DIR}/${BIN_NAME}"
-    else
-        INSTALL_DIR="${HOME}/.local/bin"
-        mkdir -p "$INSTALL_DIR"
-        mv "$BIN_PATH" "${INSTALL_DIR}/${BIN_NAME}"
-        chmod +x "${INSTALL_DIR}/${BIN_NAME}"
-        echo "Note: Installed to ${INSTALL_DIR}. Ensure this directory is in your PATH."
-    fi
+# Install into WSBLAST_INSTALL_DIR when set. Otherwise use /usr/local/bin,
+# elevating with sudo when needed, and fall back to ~/.local/bin when sudo is
+# missing or cannot run (for example in a container).
+install_to() {
+    mkdir -p "$1" && mv "$BIN_PATH" "$1/${BIN_NAME}" && chmod +x "$1/${BIN_NAME}"
+}
+
+if [ -n "${WSBLAST_INSTALL_DIR:-}" ]; then
+    INSTALL_DIR="$WSBLAST_INSTALL_DIR"
+    install_to "$INSTALL_DIR"
+elif [ -w /usr/local/bin ]; then
+    INSTALL_DIR="/usr/local/bin"
+    install_to "$INSTALL_DIR"
+elif command -v sudo >/dev/null 2>&1 \
+    && echo "Elevating permissions with sudo to install to /usr/local/bin..." \
+    && sudo mv "$BIN_PATH" "/usr/local/bin/${BIN_NAME}" \
+    && sudo chmod +x "/usr/local/bin/${BIN_NAME}"; then
+    INSTALL_DIR="/usr/local/bin"
 else
-    mv "$BIN_PATH" "${INSTALL_DIR}/${BIN_NAME}"
-    chmod +x "${INSTALL_DIR}/${BIN_NAME}"
+    INSTALL_DIR="${HOME}/.local/bin"
+    install_to "$INSTALL_DIR"
+    echo "Note: Installed to ${INSTALL_DIR}. Ensure this directory is in your PATH."
 fi
 
 echo ""

@@ -27,7 +27,7 @@ cargo binstall wsblast                # pre-built binary via cargo-binstall
 curl -fsSL https://raw.githubusercontent.com/jephter-olamiposi/wsblast/main/install.sh | sh
 ```
 
-The shell installer downloads the release archive for your platform, verifies its SHA-256 checksum and installs to `/usr/local/bin` (or `~/.local/bin` without sudo). Archives for every platform are on the [releases page](https://github.com/jephter-olamiposi/wsblast/releases).
+The shell installer downloads the release archive for your platform, verifies its SHA-256 checksum and installs to `/usr/local/bin`, or to `~/.local/bin` when sudo is unavailable. Set `WSBLAST_INSTALL_DIR` to choose the directory. Archives for every platform are on the [releases page](https://github.com/jephter-olamiposi/wsblast/releases).
 
 No Docker image is published. Build one from the repository:
 
