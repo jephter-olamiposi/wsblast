@@ -48,6 +48,8 @@ pub struct LoadTestConfig {
     pub output_path: Option<PathBuf>,
     pub tui: bool,
     pub no_progress: bool,
+    /// Ends a worker on its first connection loss instead of reconnecting.
+    pub no_reconnect: bool,
 }
 
 /// Payload specification supporting zero-allocation cached frames or dynamic templating.
@@ -934,6 +936,7 @@ impl LoadTestConfig {
             output_path: cli.output_file,
             tui: cli.tui,
             no_progress: cli.no_progress,
+            no_reconnect: cli.no_reconnect,
         })
     }
 

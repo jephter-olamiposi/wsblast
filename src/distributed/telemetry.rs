@@ -24,6 +24,7 @@ pub fn worker_metrics_to_proto(worker_id: &str, workers: &[WorkerMetrics]) -> Pr
     let mut bytes_recv = 0;
     let mut connections_established = 0;
     let mut connections_failed = 0;
+    let mut reconnects = 0;
 
     for worker in workers {
         accumulate(&mut handshake, &worker.handshake_hist);
@@ -32,6 +33,7 @@ pub fn worker_metrics_to_proto(worker_id: &str, workers: &[WorkerMetrics]) -> Pr
         messages_recv += worker.messages_recv;
         bytes_sent += worker.bytes_sent;
         bytes_recv += worker.bytes_recv;
+        reconnects += worker.reconnects;
 
         for (category, count) in &worker.errors {
             *errors.entry(category_to_proto(*category)).or_insert(0) += count;
@@ -53,6 +55,7 @@ pub fn worker_metrics_to_proto(worker_id: &str, workers: &[WorkerMetrics]) -> Pr
         errors,
         connections_established,
         connections_failed,
+        reconnects,
     }
 }
 
@@ -68,6 +71,7 @@ pub fn proto_to_worker_metrics(proto: &ProtoWorkerMetrics) -> Result<WorkerMetri
     metrics.messages_recv = proto.messages_recv;
     metrics.bytes_sent = proto.bytes_sent;
     metrics.bytes_recv = proto.bytes_recv;
+    metrics.reconnects = proto.reconnects;
 
     for data in &proto.handshake_histogram {
         record_histogram_data(&mut metrics.handshake_hist, data)?;
@@ -86,6 +90,7 @@ pub fn proto_to_worker_metrics(proto: &ProtoWorkerMetrics) -> Result<WorkerMetri
         .store(proto.connections_established, Ordering::Relaxed);
     live.connections_failed
         .store(proto.connections_failed, Ordering::Relaxed);
+    live.reconnects.store(proto.reconnects, Ordering::Relaxed);
     live.messages_sent
         .store(proto.messages_sent, Ordering::Relaxed);
     live.messages_received
