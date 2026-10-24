@@ -1015,7 +1015,7 @@ impl ScenarioConfig {
     }
 
     fn parse(yaml: &str, path: Option<&Path>) -> Result<Self> {
-        let scenario: Self = serde_yaml::from_str(yaml).map_err(|e| {
+        let scenario: Self = serde_norway::from_str(yaml).map_err(|e| {
             ConfigError::InvalidScenario(match path {
                 Some(path) => format!("{}: {e}", path.display()),
                 None => e.to_string(),
@@ -2089,7 +2089,7 @@ phases:
         code: 1000
         reason: "done"
 "#;
-        serde_yaml::from_str::<ScenarioConfig>(valid).expect("valid scenario");
+        serde_norway::from_str::<ScenarioConfig>(valid).expect("valid scenario");
 
         for (typo, fixed) in [
             ("tagret:", "target:"),
@@ -2101,7 +2101,7 @@ phases:
             ("reson:", "reason:"),
         ] {
             let yaml = valid.replacen(fixed, typo, 1);
-            let error = serde_yaml::from_str::<ScenarioConfig>(&yaml)
+            let error = serde_norway::from_str::<ScenarioConfig>(&yaml)
                 .expect_err(typo)
                 .to_string();
             let key = typo.split(':').next().unwrap_or(typo);
@@ -2212,7 +2212,7 @@ phases:
       - type: Close
         code: 1000
 "#;
-        let scenario: ScenarioConfig = serde_yaml::from_str(yaml).unwrap();
+        let scenario: ScenarioConfig = serde_norway::from_str(yaml).unwrap();
         scenario.validate().unwrap();
 
         let compiled = scenario.compile(None).unwrap();
