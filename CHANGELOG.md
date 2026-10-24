@@ -48,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comparison reports print improvements with their real sign (throughput 100 to 150 shows `+50.00%`, not `-50.00%`); `improvements[].pct_change` in comparison JSON is now the signed change instead of its absolute value.
 - `cargo clippy --all-targets --features full -- -D warnings` passes again: the distributed worker boxes the `LoadTestConfig` carried by a work claim (`clippy::large_enum_variant`).
 - `install.sh` downloads the release assets that are actually published (`wsblast-<target>.tar.gz`), verifies their `.sha256` checksum before installing, and fails with a clear message when the GitHub API lookup fails instead of assuming `v0.1.0`; releases now build `x86_64-apple-darwin` on `macos-latest` and add `aarch64-unknown-linux-gnu`.
+- The Docker image builds again: the Dockerfile copies the whole crate (the manifest's `[[bench]]` target and build script were missing), installs the OpenSSL headers `native-tls` needs, and builds only `--bin wsblast`; `.dockerignore` now excludes build output, VCS, CI, assets and local agent files.
 
 ## [0.1.1] - 2026-09-04
 
