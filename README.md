@@ -377,8 +377,8 @@ Latency budgets apply to round-trip time, which only `--mode echo` measures; oth
 | Code | Status | Description |
 | :--- | :--- | :--- |
 | `0` | **Success** | Test completed successfully and all configured SLO thresholds passed. |
-| `1` | **Failure** | Runtime error (unreachable host, invalid configuration, fatal I/O error). |
-| `2` | **SLO Breach** | Benchmark completed, but one or more SLO thresholds were violated. |
+| `1` | **Failure** | Runtime error (unreachable host, invalid configuration, fatal I/O error) or invalid command-line arguments (unknown flag, missing value, conflicting flags). |
+| `2` | **SLO Breach** | Benchmark completed, but one or more SLO thresholds were violated. Only an SLO breach or a `--compare --fail-on-regression` regression exits with `2`. |
 
 ---
 

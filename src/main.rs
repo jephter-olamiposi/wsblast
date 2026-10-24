@@ -24,6 +24,21 @@ fn apply_auth(config: &mut LoadTestConfig) -> Result<()> {
     Ok(())
 }
 
+/// Parses the command line, keeping exit code 2 reserved for SLO breaches.
+///
+/// `--help` and `--version` print to stdout and exit with 0 as clap does.
+/// Every other parse error prints clap's message to stderr and exits with 1,
+/// the code wsblast uses for configuration errors.
+fn parse_cli() -> Cli {
+    match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            let _ = err.print();
+            std::process::exit(if err.use_stderr() { 1 } else { 0 });
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -35,7 +50,7 @@ async fn main() {
 }
 
 async fn run_app() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = parse_cli();
 
     // Handle compare command first (doesn't run load test)
     #[cfg(feature = "compare")]

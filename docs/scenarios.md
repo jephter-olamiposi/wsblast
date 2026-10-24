@@ -159,7 +159,7 @@ A later phase that has no target of its own, in a scenario that has no top-level
 | :--- | :--- |
 | `--phase NAME` | Runs only the named phase. An unknown name is an error that lists the available phases. Requires `--scenario`. |
 | `URL`, `-u, --url` | Overrides every phase and scenario target. |
-| `-c`, `-d`, `-r`, `-p`, `--payload-file` | Not allowed. The argument parser rejects them and exits with code 2. Set them per phase instead. |
+| `-c`, `-d`, `-r`, `-p`, `--payload-file` | Not allowed. The argument parser rejects them and exits with code 1. Set them per phase instead. |
 | `--ramp-rate` | Ignored. Each phase's `ramp_rate` is used. |
 | `--tui` | Rejected at startup (exit code 1). Use the progress bar or `--no-progress`. |
 | `--mode` | Applies to every phase. |

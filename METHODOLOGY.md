@@ -264,8 +264,8 @@ A latency check with no RTT samples (for example every request timed out) fails 
 | Exit code | Meaning |
 | :--- | :--- |
 | 0 | The run completed, every configured SLO passed (or none were set), and at least one connection was established. |
-| 1 | Configuration or runtime error (invalid URL, scheme or duration, latency SLO outside echo mode, invalid scenario, unreadable file, report write failure), or every connection slot failed and no SLO failed. |
-| 2 | At least one SLO failed. Also used by `--compare --fail-on-regression` when a regression is found, and by the argument parser for invalid or conflicting flags. |
+| 1 | Invalid command-line arguments (unknown flag, missing value, conflicting flags), configuration or runtime error (invalid URL, scheme or duration, latency SLO outside echo mode, invalid scenario, unreadable file, report write failure), or every connection slot failed and no SLO failed. |
+| 2 | At least one SLO failed. Also used by `--compare --fail-on-regression` when a regression is found. Nothing else exits with 2. |
 
 SLOs are checked before the "all connections failed" condition. A run where every connection fails and an SLO also fails (for example `--max-error-rate 0.5`) exits with 2, not 1. The report is always printed (and written with `-o`) before the process exits with 1 or 2 after a completed run.
 

@@ -17,12 +17,12 @@ Contents:
 | Code | Load test run | `--compare` run |
 | :--- | :--- | :--- |
 | 0 | The run completed, every SLO passed (or none were set), and at least one connection was established. | The comparison completed. Without `--fail-on-regression`, this is the result even when regressions were found. |
-| 1 | Configuration or runtime error: bad URL, scheme, duration or header, latency SLO outside `--mode echo`, invalid scenario, unreadable payload file, report write failure. Also: every connection slot failed and no SLO failed. | A report file is missing or is not a wsblast report. |
+| 1 | Invalid command-line arguments: unknown flag, missing value, conflicting flags (for example `--scenario` with `-c`). Configuration or runtime error: bad URL, scheme, duration or header, latency SLO outside `--mode echo`, invalid scenario, unreadable payload file, report write failure. Also: every connection slot failed and no SLO failed. | Invalid arguments, or a report file is missing or is not a wsblast report. |
 | 2 | At least one SLO failed. | `--fail-on-regression` is set and at least one metric regressed beyond the threshold. |
 
 Rules that matter in a pipeline:
 
-- **Exit code 2 is also used by the argument parser** for unknown flags, missing values and conflicting flags (for example `--scenario` with `-c`, or a negative number passed as `--compare-threshold -1`). A typo in a CI command therefore looks like an SLO breach. To tell them apart, check that the report file exists and read `slo.passed` from it (see [section 6](#6-plain-shell)).
+- **Exit code 2 always means an SLO breach** (or a regression with `--fail-on-regression`). A typo in a CI command, such as an unknown flag or a missing value, exits with 1 like any other configuration error. `--help` and `--version` exit with 0.
 - SLOs are checked before the "all connections failed" condition. If every connection fails and an SLO also fails (for example `--max-error-rate`), the exit code is 2.
 - After a completed run the report is printed to stdout and written to the `-o` file before the process exits, also when it exits with 1 or 2. Upload it with an "always" condition.
 - A latency SLO with no RTT samples fails ("no RTT samples"). An unreachable target cannot pass a latency gate.
@@ -310,11 +310,11 @@ To let only an SLO breach pass with a warning while configuration errors still f
     exit_codes: [2]
 ```
 
-Keep in mind that exit code 2 also covers argument errors (see [section 1](#1-exit-codes)), so do this only for a command line you have tested.
+Argument errors exit with 1 (see [section 1](#1-exit-codes)), so a typo in the command still fails the pipeline.
 
 ## 6. Plain shell
 
-A script for any runner, or for a cron job on a load-generator host. It separates the three outcomes, and uses the report file to tell an SLO breach from an argument error.
+A script for any runner, or for a cron job on a load-generator host. It separates the three outcomes by exit code.
 
 ```bash
 #!/usr/bin/env bash
@@ -337,12 +337,8 @@ case "$status" in
     echo "PASS: all SLOs met"
     ;;
   2)
-    if [ -f "$report" ] && [ "$(jq -r '.slo.passed' "$report")" = "false" ]; then
-      echo "FAIL: SLO breached"
-      jq -r '.slo.checks[] | select(.passed | not) | "  \(.name): \(.actual) (target \(.target))"' "$report"
-    else
-      echo "ERROR: wsblast rejected its arguments (exit 2, no report)"
-    fi
+    echo "FAIL: SLO breached"
+    jq -r '.slo.checks[] | select(.passed | not) | "  \(.name): \(.actual) (target \(.target))"' "$report"
     ;;
   *)
     echo "ERROR: wsblast failed with exit code $status"
