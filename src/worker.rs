@@ -1028,10 +1028,11 @@ impl WorkerSession {
 
         // Handle incoming messages (data, error, complete, ka).
         let mut subscription_complete = false;
+        let mut cancelled = false;
         loop {
             tokio::select! {
                 _ = self.cancel_token.cancelled() => {
-                    let _ = sink.send(Message::Close(None)).await;
+                    cancelled = true;
                     break;
                 }
                 _ = async {
@@ -1121,6 +1122,12 @@ impl WorkerSession {
         let stop_message = Message::Text(Utf8Bytes::from(stop_json));
         self.capture_sent(&stop_message);
         let _ = sink.send(stop_message).await;
+
+        // Ending an open subscription because the run is over is not a failure.
+        if cancelled {
+            let _ = sink.send(Message::Close(None)).await;
+            return SessionEnd::Finished;
+        }
 
         if !subscription_complete {
             // Connection closed unexpectedly

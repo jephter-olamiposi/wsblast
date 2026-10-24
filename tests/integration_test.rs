@@ -100,9 +100,11 @@ fn echo_graphql_subprotocol(
 }
 
 /// Spawns an in-process GraphQL WS server that acknowledges one subscription,
-/// emits one result, and completes.
+/// emits one result, and completes it when `send_complete` is set.
 #[cfg(feature = "graphql-ws")]
-async fn spawn_graphql_ws_server() -> (Url, tokio_util::sync::CancellationToken) {
+async fn spawn_graphql_ws_server(
+    send_complete: bool,
+) -> (Url, tokio_util::sync::CancellationToken) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
     let target_url = Url::parse(&format!("ws://127.0.0.1:{}", addr.port())).unwrap();
@@ -149,6 +151,9 @@ async fn spawn_graphql_ws_server() -> (Url, tokio_util::sync::CancellationToken)
                                         "payload": {"data": {"price": 42}}
                                     });
                                     let _ = sink.send(Message::Text(next.to_string().into())).await;
+                                    if !send_complete {
+                                        continue;
+                                    }
                                     let complete = serde_json::json!({
                                         "type": "complete",
                                         "id": id
@@ -578,7 +583,7 @@ async fn test_custom_headers_propagation() {
 #[cfg(feature = "graphql-ws")]
 #[tokio::test]
 async fn test_graphql_ws_subscription_lifecycle() {
-    let (target_url, cancel) = spawn_graphql_ws_server().await;
+    let (target_url, cancel) = spawn_graphql_ws_server(true).await;
 
     let config = LoadTestConfig {
         target_url,
@@ -1573,4 +1578,36 @@ async fn test_scenario_echo_server_close_is_not_counted_as_reply() {
     assert_eq!(metrics.message_rtt.count, 3);
 
     cancel_server.cancel();
+}
+
+#[cfg(feature = "graphql-ws")]
+#[tokio::test]
+async fn test_graphql_ws_cancellation_is_not_an_error() {
+    let (target_url, cancel) = spawn_graphql_ws_server(false).await;
+
+    let mut config = echo_test_config(target_url);
+    config.mode = TestMode::GraphQLWS;
+    config.subprotocol = Some("graphql-transport-ws".to_string());
+    config.duration = Duration::from_millis(300);
+    config.graphql_ws = Some(GraphQLWSConfig {
+        operation_name: Some("Price".to_string()),
+        operation: "subscription Price { price }".to_string(),
+        variables: None,
+        extensions: None,
+    });
+
+    let metrics = Runner::new(config).run().await.unwrap();
+
+    assert_eq!(metrics.total_connections_established, 1);
+    assert!(
+        metrics.total_messages_recv >= 1,
+        "unexpected metrics: {metrics:?}"
+    );
+    assert_eq!(
+        metrics.error_rate, 0.0,
+        "cancelling an open subscription was recorded as an error: {:?}",
+        metrics.error_breakdown
+    );
+
+    cancel.cancel();
 }
