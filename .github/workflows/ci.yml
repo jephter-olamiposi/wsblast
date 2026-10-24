@@ -40,8 +40,6 @@ jobs:
         features:
           - default
           - scenario
-          - otel
-          - prometheus
           - auth
           - graphql-ws
           - mock

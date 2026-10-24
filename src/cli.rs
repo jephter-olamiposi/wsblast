@@ -152,43 +152,6 @@ pub struct Cli {
     #[arg(long = "min-throughput", value_name = "RPS")]
     pub min_throughput: Option<f64>,
 
-    /// OpenTelemetry OTLP endpoint (e.g., http://localhost:4317)
-    #[cfg(feature = "otel")]
-    #[arg(
-        long = "otel-endpoint",
-        value_name = "URL",
-        default_value = "http://localhost:4317"
-    )]
-    pub otel_endpoint: String,
-
-    /// OpenTelemetry service name
-    #[cfg(feature = "otel")]
-    #[arg(
-        long = "otel-service-name",
-        value_name = "NAME",
-        default_value = "wsblast"
-    )]
-    pub otel_service_name: String,
-
-    /// Enable OpenTelemetry OTLP metric export
-    #[cfg(feature = "otel")]
-    #[arg(long = "otel", default_value_t = false)]
-    pub enable_otel: bool,
-
-    /// Serve Prometheus metrics over HTTP
-    #[cfg(feature = "prometheus")]
-    #[arg(long = "prometheus", default_value_t = false)]
-    pub enable_prometheus: bool,
-
-    /// Prometheus metrics listen address (e.g., 0.0.0.0:9090)
-    #[cfg(feature = "prometheus")]
-    #[arg(
-        long = "prometheus-listen",
-        value_name = "ADDR",
-        default_value = "0.0.0.0:9090"
-    )]
-    pub prometheus_listen: String,
-
     /// Authentication type (static, jwt, oauth2, apikey)
     #[cfg(feature = "auth")]
     #[arg(long = "auth-type", value_name = "TYPE", value_enum, default_value_t = AuthType::None)]
