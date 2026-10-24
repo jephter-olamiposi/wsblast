@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/jephter-olamiposi/wsblast/main/schema/compare-v1.1.json",
+  "title": "wsblast baseline comparison (schema 1.1.x)",
+  "description": "Output of `wsblast --compare BASELINE CURRENT --format json` (also written by `-o FILE`). Derived from `JsonComparison`, `Regression` and `Improvement` in src/report.rs. The baseline and current metrics themselves are not included. Readers must ignore properties they do not know.",
+  "type": "object",
+  "required": ["schema_version", "threshold", "regressions", "improvements"],
+  "properties": {
+    "schema_version": {
+      "description": "Comparison schema version. wsblast 0.1.x and 0.2.0 write \"1.1.0\".",
+      "type": "string",
+      "pattern": "^1\\.[0-9]+\\.[0-9]+$",
+      "examples": ["1.1.0"]
+    },
+    "threshold": {
+      "description": "The --compare-threshold value in percent (default 10). A metric is listed only when the absolute relative change is strictly greater than this value.",
+      "type": "number",
+      "minimum": 0
+    },
+    "regressions": {
+      "description": "Metrics that moved in the bad direction by more than the threshold, sorted by metric name. A non-empty list makes --fail-on-regression exit with code 2.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/change" }
+    },
+    "improvements": {
+      "description": "Metrics that moved in the good direction by more than the threshold, sorted by metric name.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/change" }
+    }
+  },
+  "$defs": {
+    "change": {
+      "type": "object",
+      "required": ["metric", "baseline", "current", "pct_change"],
+      "properties": {
+        "metric": {
+          "description": "Compared metric. Higher is better for total_connections_established, total_messages_sent, total_messages_recv, total_bytes_sent, total_bytes_recv, throughput_msg_per_sec and throughput_bytes_per_sec. Lower is better for total_connections_failed, error_rate, errors.<category> (one per error_breakdown key, such as errors.timeout), and handshake_latency.{p50,p95,p99,p999}_us and message_rtt.{p50,p95,p99,p999}_us. total_connections_attempted is never compared.",
+          "type": "string",
+          "minLength": 1,
+          "examples": [
+            "throughput_msg_per_sec",
+            "message_rtt.p99_us",
+            "errors.timeout"
+          ]
+        },
+        "baseline": {
+          "description": "Value in the baseline report (0 when the metric is absent there, for example a new error category).",
+          "type": "number"
+        },
+        "current": {
+          "description": "Value in the current report (0 when absent).",
+          "type": "number"
+        },
+        "pct_change": {
+          "description": "Signed relative change in percent: (current - baseline) / baseline * 100. When the baseline is 0 and the current value is not, this is exactly 100.",
+          "type": "number"
+        }
+      }
+    }
+  }
+}
