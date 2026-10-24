@@ -216,6 +216,7 @@ async fn test_echo_mode_load_run() {
         output_path: None,
         tui: false,
         no_progress: true,
+        no_reconnect: false,
     };
 
     let runner = Runner::new(config.clone());
@@ -288,6 +289,7 @@ async fn test_slo_evaluation_pass_and_fail() {
         output_path: None,
         tui: false,
         no_progress: true,
+        no_reconnect: false,
     };
 
     let runner = Runner::new(config.clone());
@@ -354,6 +356,7 @@ async fn test_json_and_markdown_report_formatting() {
         output_path: None,
         tui: false,
         no_progress: true,
+        no_reconnect: false,
     };
 
     let runner = Runner::new(config.clone());
@@ -425,27 +428,44 @@ async fn test_error_taxonomy_when_target_offline() {
         output_path: None,
         tui: false,
         no_progress: true,
+        no_reconnect: false,
     };
 
-    let runner = Runner::new(config);
-    let metrics = runner.run().await.unwrap();
+    let connect_errors = |metrics: &wsblast::metrics::AggregatedMetrics| {
+        let tcp_errs = metrics
+            .error_breakdown
+            .get(&ErrorCategory::TcpConnect)
+            .copied()
+            .unwrap_or(0);
+        let timeout_errs = metrics
+            .error_breakdown
+            .get(&ErrorCategory::Timeout)
+            .copied()
+            .unwrap_or(0);
+        let total_errs: u64 = metrics.error_breakdown.values().sum();
+        assert_eq!(tcp_errs + timeout_errs, total_errs);
+        total_errs
+    };
+
+    // Workers retry with backoff until the duration ends, so every slot logs
+    // at least one connect failure and the run still stops on schedule.
+    let start = std::time::Instant::now();
+    let metrics = Runner::new(config.clone()).run().await.unwrap();
+    assert!(start.elapsed() < Duration::from_secs(2));
 
     assert_eq!(metrics.total_connections_attempted, 4);
     assert_eq!(metrics.total_connections_established, 0);
     assert_eq!(metrics.total_connections_failed, 4);
+    assert_eq!(metrics.total_reconnects, 0);
     assert_eq!(metrics.total_messages_sent, 0);
+    assert!(connect_errors(&metrics) >= 4);
 
-    let tcp_errs = metrics
-        .error_breakdown
-        .get(&ErrorCategory::TcpConnect)
-        .copied()
-        .unwrap_or(0);
-    let timeout_errs = metrics
-        .error_breakdown
-        .get(&ErrorCategory::Timeout)
-        .copied()
-        .unwrap_or(0);
-    assert!(tcp_errs + timeout_errs == 4);
+    // Without reconnects each worker makes exactly one attempt.
+    let mut config = config;
+    config.no_reconnect = true;
+    let metrics = Runner::new(config).run().await.unwrap();
+    assert_eq!(metrics.total_connections_failed, 4);
+    assert_eq!(connect_errors(&metrics), 4);
 }
 
 #[tokio::test]
@@ -542,6 +562,7 @@ async fn test_custom_headers_propagation() {
         output_path: None,
         tui: false,
         no_progress: true,
+        no_reconnect: false,
     };
 
     let runner = Runner::new(config);
@@ -606,6 +627,7 @@ async fn test_graphql_ws_subscription_lifecycle() {
         output_path: None,
         tui: false,
         no_progress: true,
+        no_reconnect: false,
     };
 
     let metrics = Runner::new(config).run().await.unwrap();
@@ -672,6 +694,7 @@ async fn test_connection_ramp_rate() {
         output_path: None,
         tui: false,
         no_progress: true,
+        no_reconnect: false,
     };
 
     let runner = Runner::new(config);
@@ -740,6 +763,7 @@ async fn test_requests_limit_enforcement() {
         output_path: None,
         tui: false,
         no_progress: true,
+        no_reconnect: false,
     };
 
     let start = std::time::Instant::now();
@@ -802,6 +826,7 @@ async fn test_stream_mode_load_run() {
         output_path: None,
         tui: false,
         no_progress: true,
+        no_reconnect: false,
     };
 
     let runner = Runner::new(config);
@@ -861,6 +886,7 @@ async fn test_binary_payload_dispatch() {
         output_path: None,
         tui: false,
         no_progress: true,
+        no_reconnect: false,
     };
 
     let runner = Runner::new(config);
@@ -956,6 +982,7 @@ async fn test_listen_mode_with_server_broadcast_and_ping() {
         output_path: None,
         tui: false,
         no_progress: true,
+        no_reconnect: false,
     };
 
     let runner = Runner::new(config);
@@ -1013,6 +1040,7 @@ fn scenario_base_config(target_url: Url) -> LoadTestConfig {
         output_path: None,
         tui: false,
         no_progress: true,
+        no_reconnect: false,
     }
 }
 
@@ -1156,6 +1184,7 @@ fn echo_test_config(target_url: Url) -> LoadTestConfig {
         output_path: None,
         tui: false,
         no_progress: true,
+        no_reconnect: false,
     }
 }
 
@@ -1342,6 +1371,144 @@ async fn test_scenario_echo_cancellation_interrupts_pending_reply() {
         "cancelled in-flight requests must not count as errors: {:?}",
         metrics.error_breakdown
     );
+
+    cancel_server.cancel();
+}
+
+/// Spawns an echo server that closes every connection after `replies` echoes.
+async fn spawn_closing_echo_server(replies: usize) -> (Url, tokio_util::sync::CancellationToken) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let target_url = Url::parse(&format!("ws://127.0.0.1:{}", addr.port())).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_server = cancel.clone();
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Ok((stream, _)) = listener.accept() => {
+                    tokio::spawn(async move {
+                        let Ok(ws_stream) = tokio_tungstenite::accept_async(stream).await else {
+                            return;
+                        };
+                        let (mut sink, mut reader) = ws_stream.split();
+                        let mut echoed = 0;
+                        while let Some(Ok(msg)) = reader.next().await {
+                            if let Message::Text(t) = msg {
+                                let _ = sink.send(Message::Text(t)).await;
+                                echoed += 1;
+                                if echoed == replies {
+                                    let _ = sink.send(Message::Close(None)).await;
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                }
+                _ = cancel_server.cancelled() => break,
+            }
+        }
+    });
+
+    (target_url, cancel)
+}
+
+#[tokio::test]
+async fn test_worker_reconnects_after_server_close() {
+    let (target_url, cancel_server) = spawn_closing_echo_server(3).await;
+
+    let mut config = echo_test_config(target_url);
+    config.connections = 2;
+    config.duration = Duration::from_secs(1);
+
+    let runner = Runner::new(config);
+    let live = runner.live_metrics();
+    let metrics = runner.run().await.unwrap();
+
+    assert!(
+        metrics.total_messages_sent > 2 * 3 * 3,
+        "workers stopped after the first server close: {} messages sent by 2 workers",
+        metrics.total_messages_sent
+    );
+    assert!(
+        metrics.total_reconnects > 0,
+        "unexpected metrics: {metrics:?}"
+    );
+    assert_eq!(metrics.total_connections_attempted, 2);
+    assert_eq!(metrics.total_connections_established, 2);
+    assert_eq!(metrics.total_connections_failed, 0);
+    assert_eq!(
+        metrics.handshake_latency.count,
+        metrics.total_connections_established + metrics.total_reconnects
+    );
+
+    let snapshot = live.snapshot();
+    assert_eq!(snapshot.active_connections, 0);
+    assert_eq!(snapshot.connections_established, 2);
+    assert_eq!(snapshot.reconnects, metrics.total_reconnects);
+
+    cancel_server.cancel();
+}
+
+#[tokio::test]
+async fn test_no_reconnect_keeps_single_session_per_worker() {
+    let (target_url, cancel_server) = spawn_closing_echo_server(3).await;
+
+    let mut config = echo_test_config(target_url);
+    config.connections = 2;
+    config.duration = Duration::from_secs(1);
+    config.no_reconnect = true;
+
+    let runner = Runner::new(config);
+    let live = runner.live_metrics();
+    let metrics = runner.run().await.unwrap();
+
+    // Each worker gets 3 replies, then sends a fourth request and sees the close.
+    assert!(
+        metrics.total_messages_sent <= 2 * 4,
+        "workers kept running with no_reconnect: {metrics:?}"
+    );
+    assert_eq!(metrics.total_reconnects, 0);
+    assert_eq!(metrics.total_connections_established, 2);
+    assert_eq!(metrics.handshake_latency.count, 2);
+    assert_eq!(live.snapshot().active_connections, 0);
+
+    cancel_server.cancel();
+}
+
+#[cfg(feature = "chaos")]
+#[tokio::test]
+async fn test_chaos_loss_reconnects_instead_of_killing_workers() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    let mut config = echo_test_config(target_url);
+    config.connections = 4;
+    config.duration = Duration::from_secs(1);
+    config.message_timeout = Duration::from_millis(50);
+    config.chaos = wsblast::config::ChaosConfig {
+        enabled: true,
+        latency_ms: None,
+        loss_percent: Some(20.0),
+        corrupt_percent: None,
+        close_percent: None,
+    };
+
+    let runner = Runner::new(config);
+    let live = runner.live_metrics();
+    let metrics = runner.run().await.unwrap();
+
+    let timeouts = metrics
+        .error_breakdown
+        .get(&ErrorCategory::Timeout)
+        .copied()
+        .unwrap_or(0);
+    assert!(
+        timeouts > 4,
+        "every worker should survive several losses: {metrics:?}"
+    );
+    assert!(metrics.total_reconnects >= timeouts - 4);
+    assert_eq!(metrics.total_connections_established, 4);
+    assert_eq!(live.snapshot().active_connections, 0);
 
     cancel_server.cancel();
 }

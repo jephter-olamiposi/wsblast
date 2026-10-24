@@ -43,8 +43,12 @@ use prometheus_client::registry::Registry;
 #[derive(Debug, Default)]
 pub struct LiveMetrics {
     pub active_connections: AtomicU64,
+    /// Workers that completed their first handshake.
     pub connections_established: AtomicU64,
+    /// Handshake attempts that failed, including failed reconnect attempts.
     pub connections_failed: AtomicU64,
+    /// Handshakes that re-established a worker's connection after it was lost.
+    pub reconnects: AtomicU64,
     pub messages_sent: AtomicU64,
     pub messages_received: AtomicU64,
     pub bytes_sent: AtomicU64,
@@ -63,6 +67,7 @@ impl LiveMetrics {
             active_connections: self.active_connections.load(Ordering::Relaxed),
             connections_established: self.connections_established.load(Ordering::Relaxed),
             connections_failed: self.connections_failed.load(Ordering::Relaxed),
+            reconnects: self.reconnects.load(Ordering::Relaxed),
             messages_sent: self.messages_sent.load(Ordering::Relaxed),
             messages_received: self.messages_received.load(Ordering::Relaxed),
             bytes_sent: self.bytes_sent.load(Ordering::Relaxed),
@@ -78,6 +83,7 @@ pub struct LiveSnapshot {
     pub active_connections: u64,
     pub connections_established: u64,
     pub connections_failed: u64,
+    pub reconnects: u64,
     pub messages_sent: u64,
     pub messages_received: u64,
     pub bytes_sent: u64,
@@ -95,6 +101,9 @@ pub struct WorkerMetrics {
     pub bytes_sent: u64,
     pub bytes_recv: u64,
     pub errors: HashMap<ErrorCategory, u64>,
+    /// Handshakes recorded after this worker's first one; every other entry in
+    /// `handshake_hist` is a first handshake.
+    pub reconnects: u64,
     pub live: Arc<LiveMetrics>,
 }
 
@@ -124,17 +133,33 @@ impl WorkerMetrics {
             bytes_sent: 0,
             bytes_recv: 0,
             errors: HashMap::new(),
+            reconnects: 0,
             live,
         })
     }
 
+    /// Records this worker's first completed handshake.
     #[inline]
     pub fn record_handshake(&mut self, duration: Duration) {
-        let micros = duration.as_micros().clamp(1, 60_000_000) as u64;
-        let _ = self.handshake_hist.record(micros);
+        self.record_handshake_latency(duration);
         self.live
             .connections_established
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a handshake that replaced a connection this worker had already
+    /// established and lost.
+    #[inline]
+    pub fn record_reconnect(&mut self, duration: Duration) {
+        self.record_handshake_latency(duration);
+        self.reconnects += 1;
+        self.live.reconnects.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn record_handshake_latency(&mut self, duration: Duration) {
+        let micros = duration.as_micros().clamp(1, 60_000_000) as u64;
+        let _ = self.handshake_hist.record(micros);
         self.live.active_connections.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -419,11 +444,22 @@ impl LatencyStats {
 }
 
 /// Consolidated metrics combining all worker sessions, transfer statistics, and rates.
+///
+/// Connection counts are per worker slot, so they never exceed the attempted
+/// total even when workers reconnect:
+/// - `total_connections_attempted`: worker slots the run tried to open.
+/// - `total_connections_established`: slots that completed at least one handshake.
+/// - `total_connections_failed`: slots that never completed a handshake.
+/// - `total_reconnects`: extra handshakes that re-established a slot after its
+///   connection was lost, so `handshake_latency.count` equals
+///   `total_connections_established + total_reconnects`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AggregatedMetrics {
     pub total_connections_attempted: u64,
     pub total_connections_established: u64,
     pub total_connections_failed: u64,
+    #[serde(default)]
+    pub total_reconnects: u64,
     pub total_messages_sent: u64,
     pub total_messages_recv: u64,
     pub total_bytes_sent: u64,
@@ -456,6 +492,7 @@ impl AggregatedMetrics {
         let mut total_messages_recv = 0u64;
         let mut total_bytes_sent = 0u64;
         let mut total_bytes_recv = 0u64;
+        let mut total_reconnects = 0u64;
         let mut error_breakdown = HashMap::new();
 
         for w in workers {
@@ -465,6 +502,7 @@ impl AggregatedMetrics {
             total_messages_recv += w.messages_recv;
             total_bytes_sent += w.bytes_sent;
             total_bytes_recv += w.bytes_recv;
+            total_reconnects += w.reconnects;
 
             for (category, count) in w.errors {
                 *error_breakdown.entry(category).or_insert(0) += count;
@@ -486,7 +524,10 @@ impl AggregatedMetrics {
             total_messages_sent.max(total_messages_recv) as f64 / elapsed_secs;
         let throughput_bytes_per_sec = (total_bytes_sent + total_bytes_recv) as f64 / elapsed_secs;
 
-        let total_connections_established = combined_handshake.len();
+        let total_connections_established = combined_handshake
+            .len()
+            .saturating_sub(total_reconnects)
+            .min(attempted_conns);
         let total_connections_failed =
             attempted_conns.saturating_sub(total_connections_established);
 
@@ -494,6 +535,7 @@ impl AggregatedMetrics {
             total_connections_attempted: attempted_conns,
             total_connections_established,
             total_connections_failed,
+            total_reconnects,
             total_messages_sent,
             total_messages_recv,
             total_bytes_sent,
@@ -888,6 +930,56 @@ impl PrometheusExporter {
         if metrics.message_rtt.count > 0 {
             self.rtt_histogram.observe(metrics.message_rtt.mean_us);
         }
+    }
+}
+
+#[cfg(test)]
+mod aggregation_tests {
+    use super::*;
+
+    #[test]
+    fn reconnect_handshakes_do_not_inflate_established_connections() {
+        let live = LiveMetrics::new();
+        let mut first = WorkerMetrics::new(Arc::clone(&live)).expect("worker metrics");
+        first.record_handshake(Duration::from_millis(1));
+        first.record_connection_closed();
+        first.record_reconnect(Duration::from_millis(2));
+        first.record_connection_closed();
+        first.record_reconnect(Duration::from_millis(3));
+        first.record_connection_closed();
+        let mut never_connected = WorkerMetrics::new(Arc::clone(&live)).expect("worker metrics");
+        never_connected.record_connection_failed(ErrorCategory::TcpConnect);
+        never_connected.record_connection_failed(ErrorCategory::TcpConnect);
+
+        let merged =
+            AggregatedMetrics::merge(vec![first, never_connected], Duration::from_secs(1), 2)
+                .expect("merge");
+
+        assert_eq!(merged.total_connections_attempted, 2);
+        assert_eq!(merged.total_connections_established, 1);
+        assert_eq!(merged.total_connections_failed, 1);
+        assert_eq!(merged.total_reconnects, 2);
+        assert_eq!(merged.handshake_latency.count, 3);
+
+        let snapshot = live.snapshot();
+        assert_eq!(snapshot.active_connections, 0);
+        assert_eq!(snapshot.connections_established, 1);
+        assert_eq!(snapshot.connections_failed, 2);
+        assert_eq!(snapshot.reconnects, 2);
+    }
+
+    #[test]
+    fn reports_without_reconnect_field_still_parse() {
+        let merged =
+            AggregatedMetrics::merge(Vec::new(), Duration::from_secs(1), 0).expect("merge");
+        let mut value = serde_json::to_value(&merged).expect("serialize");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("total_reconnects");
+
+        let parsed: AggregatedMetrics = serde_json::from_value(value).expect("legacy report");
+        assert_eq!(parsed.total_reconnects, 0);
     }
 }
 

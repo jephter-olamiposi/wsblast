@@ -340,6 +340,7 @@ impl TryFrom<ProtoLoadTestConfig> for LoadTestConfig {
             output_path: None,
             tui: false,
             no_progress: true,
+            no_reconnect: proto.no_reconnect,
         })
     }
 }

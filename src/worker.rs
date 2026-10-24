@@ -87,42 +87,86 @@ impl WorkerSession {
     }
 
     /// Executes the full worker lifecycle: TCP+TLS handshake -> session loop -> graceful close.
+    ///
+    /// Unless `no_reconnect` is set, a failed handshake or a lost session is
+    /// followed by a fresh handshake after an exponential backoff, until the
+    /// run is cancelled. Echo mode needs the fresh socket: a late reply on the
+    /// old one would be attributed to the next request.
     pub async fn run(mut self) -> WorkerMetrics {
-        let handshake_start = Instant::now();
         let client_req = match self.build_handshake_request() {
             Ok(req) => req,
             Err(cat) => {
+                // The request is derived from static config, so retrying cannot help.
                 self.metrics.record_connection_failed(cat);
                 return self.metrics;
             }
         };
 
-        let connect_fut = tokio_tungstenite::connect_async(client_req);
-        let connect_result = tokio::time::timeout(self.config.connect_timeout, connect_fut).await;
+        let mut backoff = ReconnectBackoff::new();
+        let mut connected_before = false;
 
-        let (ws_stream, _) = match connect_result {
-            Ok(Ok(stream_and_resp)) => stream_and_resp,
-            Ok(Err(err)) => {
-                let cat = categorize_tungstenite_error(&err);
-                self.metrics.record_connection_failed(cat);
-                return self.metrics;
+        loop {
+            let handshake_start = Instant::now();
+            let connect_fut = tokio::time::timeout(
+                self.config.connect_timeout,
+                tokio_tungstenite::connect_async(client_req.clone()),
+            );
+            let connect_result = tokio::select! {
+                biased;
+                _ = self.cancel_token.cancelled() => break,
+                res = connect_fut => res,
+            };
+
+            match connect_result {
+                Ok(Ok((ws_stream, _))) => {
+                    if connected_before {
+                        self.metrics.record_reconnect(handshake_start.elapsed());
+                    } else {
+                        self.metrics.record_handshake(handshake_start.elapsed());
+                        connected_before = true;
+                    }
+                    backoff.reset();
+
+                    let end = self.run_session(ws_stream).await;
+                    self.metrics.record_connection_closed();
+                    if end == SessionEnd::Finished {
+                        break;
+                    }
+                }
+                Ok(Err(err)) => {
+                    self.metrics
+                        .record_connection_failed(categorize_tungstenite_error(&err));
+                }
+                Err(_) => {
+                    self.metrics
+                        .record_connection_failed(ErrorCategory::Timeout);
+                }
             }
-            Err(_) => {
-                self.metrics
-                    .record_connection_failed(ErrorCategory::Timeout);
-                return self.metrics;
+
+            if self.config.no_reconnect || self.cancel_token.is_cancelled() {
+                break;
             }
-        };
 
-        let handshake_dur = handshake_start.elapsed();
-        self.metrics.record_handshake(handshake_dur);
+            tokio::select! {
+                _ = tokio::time::sleep(backoff.next_delay()) => {}
+                _ = self.cancel_token.cancelled() => break,
+            }
+        }
 
+        self.metrics
+    }
+
+    /// Drives one established connection with the configured session loop.
+    async fn run_session(
+        &mut self,
+        ws_stream: tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> SessionEnd {
         #[cfg(feature = "scenario")]
         if let Some(phase) = self.scenario.clone() {
             if !phase.actions.is_empty() {
-                self.run_action_loop(ws_stream, phase).await;
-                self.metrics.record_connection_closed();
-                return self.metrics;
+                return self.run_action_loop(ws_stream, phase).await;
             }
         }
 
@@ -133,9 +177,17 @@ impl WorkerSession {
             #[cfg(feature = "graphql-ws")]
             TestMode::GraphQLWS => self.run_graphql_ws_loop(ws_stream).await,
         }
+    }
 
-        self.metrics.record_connection_closed();
-        self.metrics
+    /// Classifies a session that ended on its own: cancellation (including the
+    /// request cap, which cancels the run) means the work is done, anything
+    /// else means the connection was lost.
+    fn session_end(&self) -> SessionEnd {
+        if self.cancel_token.is_cancelled() {
+            SessionEnd::Finished
+        } else {
+            SessionEnd::Lost
+        }
     }
 
     fn build_handshake_request(&self) -> Result<Request, ErrorCategory> {
@@ -178,7 +230,7 @@ impl WorkerSession {
         }
     }
 
-    async fn run_echo_loop<S>(&mut self, ws_stream: S)
+    async fn run_echo_loop<S>(&mut self, ws_stream: S) -> SessionEnd
     where
         S: futures_util::Sink<Message, Error = TungsteniteError>
             + futures_util::Stream<Item = std::result::Result<Message, TungsteniteError>>
@@ -352,9 +404,11 @@ impl WorkerSession {
                 break;
             }
         }
+
+        self.session_end()
     }
 
-    async fn run_stream_loop<S>(&mut self, ws_stream: S)
+    async fn run_stream_loop<S>(&mut self, ws_stream: S) -> SessionEnd
     where
         S: futures_util::Sink<Message, Error = TungsteniteError>
             + futures_util::Stream<Item = std::result::Result<Message, TungsteniteError>>
@@ -458,9 +512,11 @@ impl WorkerSession {
                 }
             }
         }
+
+        self.session_end()
     }
 
-    async fn run_listen_loop<S>(&mut self, ws_stream: S)
+    async fn run_listen_loop<S>(&mut self, ws_stream: S) -> SessionEnd
     where
         S: futures_util::Sink<Message, Error = TungsteniteError>
             + futures_util::Stream<Item = std::result::Result<Message, TungsteniteError>>
@@ -526,6 +582,8 @@ impl WorkerSession {
                 }
             }
         }
+
+        self.session_end()
     }
 
     /// Executes a compiled action script until the phase ends, the server
@@ -535,7 +593,7 @@ impl WorkerSession {
     /// Close keeps generating load for its full duration. `rate_per_conn`
     /// paces individual sends and `think_time` pauses after each Send burst.
     #[cfg(feature = "scenario")]
-    async fn run_action_loop<S>(&mut self, ws_stream: S, phase: Arc<ScenarioPhase>)
+    async fn run_action_loop<S>(&mut self, ws_stream: S, phase: Arc<ScenarioPhase>) -> SessionEnd
     where
         S: futures_util::Sink<Message, Error = TungsteniteError>
             + futures_util::Stream<Item = std::result::Result<Message, TungsteniteError>>
@@ -740,11 +798,13 @@ impl WorkerSession {
                             reason: Utf8Bytes::from(reason.clone()),
                         }));
                         let _ = sink.send(frame).await;
-                        break 'script;
+                        return SessionEnd::Finished;
                     }
                 }
             }
         }
+
+        self.session_end()
     }
 
     #[cfg(feature = "scenario")]
@@ -806,7 +866,7 @@ impl WorkerSession {
     }
 
     #[cfg(feature = "graphql-ws")]
-    async fn run_graphql_ws_loop<S>(&mut self, ws_stream: S)
+    async fn run_graphql_ws_loop<S>(&mut self, ws_stream: S) -> SessionEnd
     where
         S: futures_util::Sink<Message, Error = TungsteniteError>
             + futures_util::Stream<Item = std::result::Result<Message, TungsteniteError>>
@@ -832,7 +892,7 @@ impl WorkerSession {
             Some(cfg) => cfg,
             None => {
                 self.metrics.record_error(ErrorCategory::ProtocolError);
-                return;
+                return SessionEnd::Finished;
             }
         };
         let legacy_protocol = self
@@ -849,7 +909,7 @@ impl WorkerSession {
             Ok(json) => json,
             Err(_) => {
                 self.metrics.record_error(ErrorCategory::ProtocolError);
-                return;
+                return SessionEnd::Finished;
             }
         };
         let init_len = init_json.len();
@@ -858,7 +918,7 @@ impl WorkerSession {
         if let Err(e) = sink.send(init_message).await {
             self.metrics
                 .record_error(categorize_session_error(&e, ErrorDirection::Write));
-            return;
+            return self.session_end();
         }
         self.metrics.record_message_sent(init_len);
 
@@ -869,11 +929,11 @@ impl WorkerSession {
             tokio::select! {
                 _ = self.cancel_token.cancelled() => {
                     let _ = sink.send(Message::Close(None)).await;
-                    return;
+                    return self.session_end();
                 }
                 _ = &mut ack_timeout => {
                     self.metrics.record_error(ErrorCategory::Timeout);
-                    return;
+                    return self.session_end();
                 }
                 _ = async {
                     match ping_ticker.as_mut() {
@@ -902,7 +962,7 @@ impl WorkerSession {
                                     }
                                     GraphQLWSMessage::ConnectionError { .. } => {
                                         self.metrics.record_error(ErrorCategory::ProtocolError);
-                                        return;
+                                        return self.session_end();
                                     }
                                     GraphQLWSMessage::Ping => {
                                         if let Ok(json) =
@@ -919,12 +979,12 @@ impl WorkerSession {
                         }
                         Some(Ok(Message::Close(_))) | None => {
                             self.metrics.record_error(ErrorCategory::UnexpectedClose);
-                            return;
+                            return self.session_end();
                         }
                         Some(Err(e)) => {
                             self.metrics
                                 .record_error(categorize_session_error(&e, ErrorDirection::Read));
-                            return;
+                            return self.session_end();
                         }
                         _ => {}
                     }
@@ -956,7 +1016,7 @@ impl WorkerSession {
             Ok(json) => json,
             Err(_) => {
                 self.metrics.record_error(ErrorCategory::ProtocolError);
-                return;
+                return SessionEnd::Finished;
             }
         };
         let start_len = start_json.len();
@@ -965,7 +1025,7 @@ impl WorkerSession {
         if let Err(e) = sink.send(start_message).await {
             self.metrics
                 .record_error(categorize_session_error(&e, ErrorDirection::Write));
-            return;
+            return self.session_end();
         }
         self.metrics.record_message_sent(start_len);
 
@@ -1058,7 +1118,7 @@ impl WorkerSession {
             Ok(json) => json,
             Err(_) => {
                 self.metrics.record_error(ErrorCategory::ProtocolError);
-                return;
+                return SessionEnd::Finished;
             }
         };
         let stop_message = Message::Text(Utf8Bytes::from(stop_json));
@@ -1068,7 +1128,46 @@ impl WorkerSession {
         if !subscription_complete {
             // Connection closed unexpectedly
             self.metrics.record_error(ErrorCategory::UnexpectedClose);
+            return self.session_end();
         }
+
+        SessionEnd::Finished
+    }
+}
+
+/// How a session loop ended, deciding whether the worker reconnects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionEnd {
+    /// The run was cancelled or the script or subscription completed.
+    Finished,
+    /// The connection failed or the server closed it while the run continued.
+    Lost,
+}
+
+/// Exponential reconnect delay: 100ms doubling to a 5s cap, reset after a
+/// successful handshake.
+struct ReconnectBackoff {
+    next: Duration,
+}
+
+impl ReconnectBackoff {
+    const INITIAL: Duration = Duration::from_millis(100);
+    const MAX: Duration = Duration::from_secs(5);
+
+    fn new() -> Self {
+        Self {
+            next: Self::INITIAL,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.next = Self::INITIAL;
+    }
+
+    fn next_delay(&mut self) -> Duration {
+        let delay = self.next;
+        self.next = self.next.saturating_mul(2).min(Self::MAX);
+        delay
     }
 }
 
@@ -1363,6 +1462,23 @@ fn categorize_session_error(err: &TungsteniteError, direction: ErrorDirection) -
 /// Normalizes connection-establishment errors into canonical taxonomy categories.
 pub fn categorize_tungstenite_error(err: &TungsteniteError) -> ErrorCategory {
     categorize_session_error(err, ErrorDirection::Connect)
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    #[test]
+    fn reconnect_backoff_doubles_caps_and_resets() {
+        let mut backoff = ReconnectBackoff::new();
+        let delays: Vec<u64> = (0..8)
+            .map(|_| backoff.next_delay().as_millis() as u64)
+            .collect();
+        assert_eq!(delays, [100, 200, 400, 800, 1600, 3200, 5000, 5000]);
+
+        backoff.reset();
+        assert_eq!(backoff.next_delay(), Duration::from_millis(100));
+    }
 }
 
 #[cfg(all(test, feature = "chaos"))]

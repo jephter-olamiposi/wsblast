@@ -520,6 +520,7 @@ fn render_text_report(
             metrics.total_connections_established, metrics.total_connections_failed
         ),
     ]);
+    tput_table.add_row(vec!["Reconnects", &metrics.total_reconnects.to_string()]);
     tput_table.add_row(vec![
         "Messages Sent / Received",
         &format!(
@@ -706,6 +707,12 @@ fn render_markdown_report(
         "- **Concurrency:** `{}` workers\n",
         config.connections
     ));
+    md.push_str(&format!(
+        "- **Connections:** `{}` established / `{}` failed / `{}` reconnects\n",
+        metrics.total_connections_established,
+        metrics.total_connections_failed,
+        metrics.total_reconnects
+    ));
     md.push_str(&format!("- **Duration:** `{:.2?}`\n", metrics.elapsed));
     md.push_str(&format!(
         "- **Throughput:** `{:.2}` msg/sec\n",
@@ -805,6 +812,7 @@ mod tests {
             total_connections_attempted: 10,
             total_connections_established: 10,
             total_connections_failed: 0,
+            total_reconnects: 0,
             total_messages_sent: 100,
             total_messages_recv: 100,
             total_bytes_sent: 1_000,

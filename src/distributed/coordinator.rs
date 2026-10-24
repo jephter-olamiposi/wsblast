@@ -679,6 +679,7 @@ impl TryFrom<LoadTestConfig> for ProtoLoadTestConfig {
             chaos_loss_percent,
             chaos_corrupt_percent,
             chaos_close_percent,
+            no_reconnect: config.no_reconnect,
         })
     }
 }

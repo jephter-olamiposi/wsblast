@@ -406,6 +406,7 @@ wsblast [OPTIONS] [URL] [COMMAND]
 | `--connect-timeout` | `5s` | Timeout for establishing TCP+TLS+WS upgrade handshake |
 | `--message-timeout` | `5s` | Per-message response timeout in echo mode |
 | `--ping-interval` | `0s` | Heartbeat ping interval (`0s` = disabled) |
+| `--no-reconnect` | `false` | Stop a worker after a timeout, I/O error or server close instead of reconnecting (backoff 100ms doubling to 5s) |
 | `--tui` | `false` | Launch interactive terminal dashboard |
 | `--format` | `text` | Output report format: `text`, `json`, `markdown` |
 | `-o, --output` | `None` | File path to write report output |

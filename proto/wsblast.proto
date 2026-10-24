@@ -131,6 +131,7 @@ message LoadTestConfig {
   double chaos_loss_percent = 20;
   double chaos_corrupt_percent = 21;
   double chaos_close_percent = 22;
+  bool no_reconnect = 23;
 }
 
 enum TestMode {
@@ -151,6 +152,7 @@ message WorkerMetrics {
   map<int32, uint64> errors = 8;
   uint64 connections_established = 9;
   uint64 connections_failed = 10;
+  uint64 reconnects = 11;
 }
 
 enum ErrorCategory {
