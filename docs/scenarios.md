@@ -2,10 +2,10 @@
 
 A scenario is a YAML file that describes one or more load phases. wsblast runs the phases in order and prints one merged report at the end.
 
-Scenarios need the `scenario` feature:
+Scenario support is part of the default build (the `scenario` Cargo feature):
 
 ```bash
-cargo install wsblast --features scenario
+cargo install wsblast --locked
 wsblast --scenario load.yaml --no-progress
 ```
 
@@ -13,7 +13,7 @@ From a checkout:
 
 ```bash
 cargo run --release --example echo_server            # ws://127.0.0.1:9001
-cargo run --release --features scenario -- --scenario load.yaml --no-progress
+cargo run --release -- --scenario load.yaml --no-progress
 ```
 
 Contents:
@@ -276,7 +276,7 @@ phases:
 ```
 
 ```bash
-cargo run --release --features scenario -- --scenario chat-session.yaml --no-progress
+cargo run --release -- --scenario chat-session.yaml --no-progress
 ```
 
 What happens:
@@ -320,14 +320,14 @@ phases:
 
 ```bash
 # Both phases
-cargo run --release --features scenario -- --scenario soak.yaml --no-progress
+cargo run --release -- --scenario soak.yaml --no-progress
 
 # Only the spike phase, gated on its own
-cargo run --release --features scenario -- --scenario soak.yaml --phase spike \
+cargo run --release -- --scenario soak.yaml --phase spike \
   --no-progress --max-p99 50ms --max-error-rate 0.01
 
 # Same file against another server: the command-line URL overrides both phase targets
-cargo run --release --features scenario -- --scenario soak.yaml --url wss://staging.example.com/ws
+cargo run --release -- --scenario soak.yaml --url wss://staging.example.com/ws
 ```
 
 What happens:

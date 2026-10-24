@@ -29,13 +29,13 @@ Rules that matter in a pipeline:
 
 ## 2. Installing in CI
 
-`--compare` and `--scenario` are cargo features. Install with the ones you need:
+Every wsblast feature, including `--compare`, `--scenario`, `--auth-type` and `--mode graphql-ws`, is part of the default build, so a plain install has all of them:
 
 ```bash
-cargo install wsblast --locked --features compare,scenario
+cargo install wsblast --locked
 ```
 
-The pre-built release binaries and the `install.sh` script ship the default feature set. Check with `wsblast --help` that `--compare` or `--scenario` is listed before relying on them; if not, use `cargo install` as above.
+The pre-built release binaries, `cargo binstall wsblast` and the `install.sh` script ship the same default build. wsblast 0.1 binaries did not include `--compare` or `--scenario`; check `wsblast --version` if a runner may have an old copy cached.
 
 Static tokens and API keys can always be sent as plain handshake headers, which need no feature:
 
@@ -82,10 +82,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/wsblast
-          key: wsblast-${{ runner.os }}-features-compare-scenario
+          key: wsblast-${{ runner.os }}
 
       - name: Install wsblast
-        run: command -v wsblast || cargo install wsblast --locked --features compare,scenario
+        run: command -v wsblast || cargo install wsblast --locked
 
       - name: Run load test with SLO gate
         env:
@@ -194,7 +194,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install wsblast
-        run: cargo install wsblast --locked --features compare
+        run: cargo install wsblast --locked
 
       - name: Run load test
         run: |
@@ -267,14 +267,14 @@ websocket-slo:
   variables:
     TARGET_URL: "wss://staging.example.com/ws"
   cache:
-    key: wsblast-compare-scenario
+    key: wsblast
     paths:
       - .cargo-bin/
   before_script:
     - apt-get update -qq && apt-get install -y -qq jq > /dev/null
     - |
       if [ ! -x .cargo-bin/bin/wsblast ]; then
-        cargo install wsblast --locked --features compare,scenario --root .cargo-bin
+        cargo install wsblast --locked --root .cargo-bin
       fi
     - export PATH="$PWD/.cargo-bin/bin:$PATH"
   script:

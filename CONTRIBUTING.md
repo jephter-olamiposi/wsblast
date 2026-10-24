@@ -49,8 +49,8 @@ CI runs the following on every pull request. Please run them before you push:
 ```bash
 cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
-cargo clippy --locked --all-targets --features full -- -D warnings
-cargo test --locked --all-targets --features full
+cargo clippy --locked --all-targets --no-default-features -- -D warnings
+cargo test --locked --all-targets
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
 ```
 
@@ -58,7 +58,8 @@ CI additionally:
 
 - runs clippy with each Cargo feature enabled on its own (see the `clippy`
   job matrix in `.github/workflows/ci.yml`), so check the feature you touched,
-  for example `cargo clippy --all-targets --features scenario -- -D warnings`;
+  for example
+  `cargo clippy --all-targets --no-default-features --features scenario -- -D warnings`;
 - runs the test suite on Linux, macOS and Windows;
 - checks the declared `rust-version`;
 - runs `cargo package` and `cargo publish --dry-run`;
