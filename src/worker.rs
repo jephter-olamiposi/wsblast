@@ -5,7 +5,7 @@ use crate::config::{LoadTestConfig, PayloadConfig};
 use crate::error::ErrorCategory;
 use crate::metrics::WorkerMetrics;
 use bytes::Bytes;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -216,7 +216,7 @@ impl WorkerSession {
 
         let mut ping_ticker = self.keepalive_ticker();
 
-        loop {
+        'session: loop {
             if self.cancel_token.is_cancelled() {
                 let _ = sink.send(Message::Close(None)).await;
                 break;
@@ -231,28 +231,30 @@ impl WorkerSession {
             }
 
             if let Some(ref mut t) = ticker {
-                tokio::select! {
-                    _ = t.tick() => {}
-                    _ = async {
-                        match ping_ticker.as_mut() {
-                            Some(pt) => { pt.tick().await; }
-                            None => std::future::pending().await,
+                // Keepalive ticks that land while waiting for the pacing slot
+                // only send a ping; the data send still waits for the slot.
+                loop {
+                    tokio::select! {
+                        _ = t.tick() => break,
+                        _ = async {
+                            match ping_ticker.as_mut() {
+                                Some(pt) => { pt.tick().await; }
+                                None => std::future::pending().await,
+                            }
+                        } => {
+                            let _ = sink.send(Message::Ping(Bytes::from_static(b"hb"))).await;
                         }
-                    } => {
-                        let _ = sink.send(Message::Ping(Bytes::from_static(b"hb"))).await;
-                    }
-                    _ = self.cancel_token.cancelled() => {
-                        let _ = sink.send(Message::Close(None)).await;
-                        break;
+                        _ = self.cancel_token.cancelled() => {
+                            let _ = sink.send(Message::Close(None)).await;
+                            break 'session;
+                        }
                     }
                 }
-            } else if let Some(ref mut pt) = ping_ticker {
-                tokio::select! {
-                    biased;
-                    _ = pt.tick() => {
-                        let _ = sink.send(Message::Ping(Bytes::from_static(b"hb"))).await;
-                    }
-                    else => {}
+            } else if let Some(pt) = ping_ticker.as_mut() {
+                // Unpaced load must not wait for the keepalive period, so the
+                // ticker is only polled once; `Interval::tick` is cancel safe.
+                if pt.tick().now_or_never().is_some() {
+                    let _ = sink.send(Message::Ping(Bytes::from_static(b"hb"))).await;
                 }
             }
 
