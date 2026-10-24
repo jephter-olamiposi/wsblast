@@ -52,11 +52,16 @@ http = "1.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 [features]
-default = []
+# Every feature is on by default, so `cargo install wsblast` and the release
+# binaries ship the whole CLI. `auth`, `graphql-ws` and `compare` add no
+# dependencies; `scenario` adds the YAML parser. Library users can opt out
+# with `default-features = false`.
+default = ["scenario", "compare", "auth", "graphql-ws"]
 scenario = ["dep:serde_norway"]
 auth = []
 graphql-ws = []
 compare = []
+# Kept so existing `--features full` invocations keep working.
 full = ["scenario", "auth", "graphql-ws", "compare"]
 
 [target.'cfg(unix)'.dependencies]

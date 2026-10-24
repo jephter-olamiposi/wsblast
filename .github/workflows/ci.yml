@@ -35,10 +35,13 @@ jobs:
       fail-fast: false
       matrix:
         # The single list of Cargo features CI builds. `default` means no
-        # --features flag; every other entry is passed to --features as is.
-        # When a feature is removed from Cargo.toml, delete its line here.
+        # feature flags (every feature is a default), `none` means
+        # --no-default-features, and every other entry is built alone with
+        # --no-default-features --features <entry>. When a feature is removed
+        # from Cargo.toml, delete its line here.
         features:
           - default
+          - none
           - scenario
           - auth
           - graphql-ws
@@ -57,10 +60,11 @@ jobs:
         env:
           FEATURES: ${{ matrix.features }}
         run: |
-          args=()
-          if [ "$FEATURES" != "default" ]; then
-            args=(--features "$FEATURES")
-          fi
+          case "$FEATURES" in
+            default) args=() ;;
+            none) args=(--no-default-features) ;;
+            *) args=(--no-default-features --features "$FEATURES") ;;
+          esac
           cargo clippy --locked --all-targets "${args[@]}" -- -D warnings
 
   test:
@@ -87,7 +91,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: [default, full]
+        features: [none, default]
     steps:
       - uses: actions/checkout@v4
       - name: Read rust-version from Cargo.toml
@@ -114,10 +118,11 @@ jobs:
         env:
           FEATURES: ${{ matrix.features }}
         run: |
-          args=()
-          if [ "$FEATURES" != "default" ]; then
-            args=(--features "$FEATURES")
-          fi
+          case "$FEATURES" in
+            default) args=() ;;
+            none) args=(--no-default-features) ;;
+            *) args=(--no-default-features --features "$FEATURES") ;;
+          esac
           cargo check --locked --lib --bins "${args[@]}"
 
   docs:

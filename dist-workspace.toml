@@ -18,6 +18,9 @@ targets = [
     "x86_64-pc-windows-msvc",
 ]
 installers = ["shell", "powershell"]
+# Release archives are built with the crate's default features, which include
+# every feature, so they match `cargo install wsblast`.
+default-features = true
 # The shell and PowerShell installers place the binary in $CARGO_HOME/bin.
 install-path = "CARGO_HOME"
 install-updater = false
