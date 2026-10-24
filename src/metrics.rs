@@ -2,6 +2,7 @@
 //! live progress, and the merge into [`AggregatedMetrics`].
 
 use crate::error::{ErrorCategory, Result as WsResult, WsBlastError};
+use crate::timeseries::{IntervalRecorder, TimeSeries};
 use hdrhistogram::Histogram;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -123,6 +124,11 @@ pub struct WorkerMetrics {
     /// The run ended during this worker's first handshake, before it
     /// succeeded or failed.
     pub(crate) interrupted: bool,
+    /// Latency samples for the run's time series, when it keeps one.
+    pub(crate) interval: Option<IntervalRecorder>,
+    /// Whether the time series takes response time instead of RTT, as it
+    /// does for paced echo sessions.
+    pub(crate) interval_uses_response: bool,
     pub(crate) live: Arc<LiveMetrics>,
 }
 
@@ -157,8 +163,23 @@ impl WorkerMetrics {
             reconnects: 0,
             unsolicited_frames: 0,
             interrupted: false,
+            interval: None,
+            interval_uses_response: false,
             live,
         })
+    }
+
+    /// Sends this worker's latency samples to the run's time series.
+    pub(crate) fn with_interval(mut self, interval: Option<IntervalRecorder>) -> Self {
+        self.interval = interval;
+        self
+    }
+
+    /// Hands the samples of the worker's current interval to the time series.
+    pub(crate) fn flush_interval(&mut self) {
+        if let Some(interval) = self.interval.as_mut() {
+            interval.flush();
+        }
     }
 
     /// Records this worker's first completed handshake.
@@ -215,6 +236,11 @@ impl WorkerMetrics {
         if let Some(rtt_dur) = rtt {
             let micros = rtt_dur.as_micros().clamp(1, 60_000_000) as u64;
             let _ = self.rtt_hist.record(micros);
+            if !self.interval_uses_response
+                && let Some(interval) = self.interval.as_mut()
+            {
+                interval.record(micros);
+            }
         }
         self.live.messages_received.fetch_add(1, Ordering::Relaxed);
         self.live
@@ -232,6 +258,9 @@ impl WorkerMetrics {
         }
         if let Some(hist) = self.response_hist.as_mut() {
             let _ = hist.record(micros);
+        }
+        if let Some(interval) = self.interval.as_mut() {
+            interval.record(micros);
         }
     }
 
@@ -413,6 +442,10 @@ pub struct AggregatedMetrics {
     /// otherwise.
     #[serde(default)]
     pub response_time: LatencyStats,
+    /// The run broken down by time: counters, throughput and latency per
+    /// interval.
+    #[serde(default)]
+    pub time_series: TimeSeries,
     /// Error counts by category.
     pub error_breakdown: HashMap<ErrorCategory, u64>,
 }
@@ -510,8 +543,16 @@ impl AggregatedMetrics {
             handshake_latency: LatencyStats::from_histogram(&combined_handshake),
             message_rtt: LatencyStats::from_histogram(&combined_rtt),
             response_time: LatencyStats::from_histogram(&combined_response),
+            time_series: TimeSeries::default(),
             error_breakdown,
         })
+    }
+
+    /// Attaches the run's time series.
+    #[must_use]
+    pub(crate) fn with_time_series(mut self, time_series: TimeSeries) -> Self {
+        self.time_series = time_series;
+        self
     }
 
     /// Reclassifies `not_started` slots, which have no worker metrics, from

@@ -18,6 +18,7 @@ Each connection is a worker on a Tokio runtime. In the default echo mode a worke
 - **CI exit codes.** `0` when the run completed and every SLO passed, `1` for configuration or runtime errors, `2` only for an SLO breach or a `--fail-on-regression` regression.
 - **HDR percentiles.** Handshake latency and round-trip time are recorded in HDR histograms and reported from p50 to p99.9, merged from every connection rather than averaged.
 - **Coordinated omission corrected.** With `--rate`, requests follow a fixed schedule and wsblast also records response time from when each request was due, so a server stall shows up in every request that waited behind it instead of in one slow sample. Latency SLOs gate on it. See [METHODOLOGY.md](https://github.com/jephter-olamiposi/wsblast/blob/main/METHODOLOGY.md#4-timing).
+- **Time series.** Every report breaks the run down by interval: throughput, errors and p99 per second, so a stall or a slow ramp shows up where it happened instead of disappearing into the run's averages. The JSON report has every point.
 - **Single binary.** One executable, pre-built for Linux, macOS and Windows, with no agents, controllers or scripting runtime to deploy next to it.
 
 ## Install

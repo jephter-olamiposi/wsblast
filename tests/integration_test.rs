@@ -1731,3 +1731,93 @@ async fn test_unpaced_echo_records_no_response_time() {
     assert_eq!(metrics.response_time.count, 0, "{metrics:?}");
     cancel_server.cancel();
 }
+
+/// Echoes every data frame at once, except that after `stall_after` replies
+/// on a connection it stops replying for `stall`.
+async fn spawn_stalling_echo_server(
+    stall_after: usize,
+    stall: Duration,
+) -> (Url, tokio_util::sync::CancellationToken) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("ws://{}", listener.local_addr().unwrap())).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_server = cancel.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Ok((stream, _)) = listener.accept() => {
+                    tokio::spawn(async move {
+                        let Ok(ws) = tokio_tungstenite::accept_async(stream).await else {
+                            return;
+                        };
+                        let (mut sink, mut reader) = ws.split();
+                        let mut replies = 0usize;
+                        while let Some(Ok(msg)) = reader.next().await {
+                            if msg.is_text() || msg.is_binary() {
+                                if replies == stall_after {
+                                    tokio::time::sleep(stall).await;
+                                }
+                                replies += 1;
+                                if sink.send(msg).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                }
+                _ = cancel_server.cancelled() => break,
+            }
+        }
+    });
+    (url, cancel)
+}
+
+#[tokio::test]
+async fn test_time_series_places_a_server_stall_in_its_interval() {
+    // At 50 msg/s the 76th request is due at 1.5 s and the server holds its
+    // reply until about 2.1 s. Throughput drops in the second interval, while
+    // the stall's latency lands in the third, where the late replies arrive,
+    // along with the catch-up sends.
+    let (target_url, cancel_server) =
+        spawn_stalling_echo_server(75, Duration::from_millis(600)).await;
+
+    let metrics = run(echo_test_config(&target_url)
+        .rate_per_connection(50)
+        .duration(Duration::from_millis(3_500)))
+    .await;
+
+    let series = &metrics.time_series;
+    assert_eq!(series.interval_secs, 1.0);
+    assert_eq!(series.latency_basis, "response_time");
+    assert!((3..=4).contains(&series.points.len()), "{series:?}");
+
+    let sent: u64 = series.points.iter().map(|p| p.messages_sent).sum();
+    let recv: u64 = series.points.iter().map(|p| p.messages_recv).sum();
+    assert_eq!(sent, metrics.total_messages_sent, "{series:?}");
+    assert_eq!(recv, metrics.total_messages_recv, "{series:?}");
+
+    let p99 = |i: usize| series.points[i].latency.p99_us;
+    let msgs = |i: usize| series.points[i].messages_sent;
+    assert!(p99(0) < 50_000 && p99(1) < 50_000, "{series:?}");
+    assert!(p99(2) > 400_000, "{series:?}");
+    assert!(msgs(1) < 40 && msgs(2) > 60, "{series:?}");
+    cancel_server.cancel();
+}
+
+#[tokio::test]
+async fn test_unpaced_time_series_reports_rtt_per_interval() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    let metrics = run(echo_test_config(&target_url)
+        .connections(2)
+        .duration(Duration::from_millis(2_200)))
+    .await;
+
+    let series = &metrics.time_series;
+    assert_eq!(series.latency_basis, "rtt");
+    assert!((2..=3).contains(&series.points.len()), "{series:?}");
+    let samples: u64 = series.points.iter().map(|p| p.latency.count).sum();
+    assert_eq!(samples, metrics.message_rtt.count, "{series:?}");
+    assert!(series.points.iter().all(|p| p.active_connections <= 2));
+    cancel_server.cancel();
+}

@@ -9,6 +9,9 @@ use crate::connect::ConnectTarget;
 use crate::metrics::{AggregatedMetrics, LiveMetrics, LiveSnapshot, WorkerMetrics};
 #[cfg(feature = "scenario")]
 use crate::report::PhaseTarget;
+use crate::timeseries::{
+    CounterSampler, IntervalRecorder, IntervalStore, TimeSeries, interval_for,
+};
 use crate::worker::WorkerSession;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -62,6 +65,20 @@ impl Runner {
             handle_signals: true,
             scenario: Some(Arc::new(phase)),
         }
+    }
+
+    /// The latency the time series reports: response time for paced echo
+    /// runs whose workers record it, RTT otherwise.
+    fn latency_basis(&self) -> &'static str {
+        let paced_echo =
+            self.config.mode == crate::cli::TestMode::Echo && self.config.rate_per_conn > 0;
+        #[cfg(feature = "scenario")]
+        let paced_echo = paced_echo
+            && self
+                .scenario
+                .as_ref()
+                .is_none_or(|phase| phase.actions.is_empty() && phase.think_time.is_zero());
+        if paced_echo { "response_time" } else { "rtt" }
     }
 
     fn create_session(
@@ -176,7 +193,8 @@ impl Runner {
 
         Ok(
             AggregatedMetrics::merge(outcome.worker_metrics, outcome.elapsed, outcome.connections)?
-                .with_not_started(outcome.not_started),
+                .with_not_started(outcome.not_started)
+                .with_time_series(outcome.time_series),
         )
     }
 
@@ -220,6 +238,8 @@ impl Runner {
                     elapsed: Duration::ZERO,
                     connections: total_connections as u64,
                     not_started: total_connections as u64,
+                    started_at: Instant::now(),
+                    time_series: TimeSeries::default(),
                 });
             }
         };
@@ -227,6 +247,14 @@ impl Runner {
         // `--duration` is total wall-clock time including the ramp, so the
         // timer shares `start_time` with elapsed, throughput, and progress.
         let start_time = Instant::now();
+        let interval = interval_for(self.config.duration);
+        let interval_store = IntervalStore::new(start_time, interval);
+        let sampler = CounterSampler::spawn(
+            Arc::clone(&self.live_metrics),
+            start_time,
+            interval,
+            self.cancel_token.clone(),
+        );
         let duration_token = self.cancel_token.clone();
         let test_duration = self.config.duration;
         tokio::spawn(async move {
@@ -240,7 +268,8 @@ impl Runner {
                 break;
             }
 
-            let metrics = WorkerMetrics::new(Arc::clone(&self.live_metrics))?;
+            let metrics = WorkerMetrics::new(Arc::clone(&self.live_metrics))?
+                .with_interval(IntervalRecorder::new(Arc::clone(&interval_store)));
             handles.push(tokio::spawn(
                 self.create_session(worker_id, &target, metrics).run(),
             ));
@@ -318,16 +347,21 @@ impl Runner {
 
         let mut worker_metrics = Vec::with_capacity(handles.len());
         for handle in handles {
-            if let Ok(metrics) = handle.await {
+            if let Ok(mut metrics) = handle.await {
+                metrics.flush_interval();
                 worker_metrics.push(metrics);
             }
         }
+        let samples = sampler.finish().await;
+        let time_series = TimeSeries::build(&samples, &interval_store, self.latency_basis());
 
         Ok(RunOutcome {
             worker_metrics,
             elapsed,
             connections: total_connections as u64,
             not_started,
+            started_at: start_time,
+            time_series,
         })
     }
 }
@@ -342,6 +376,11 @@ pub(crate) struct RunOutcome {
     /// Slots the ramp had not reached when the run ended. They have no
     /// worker metrics and are neither established nor failed.
     pub(crate) not_started: u64,
+    /// When the run's clock started. Scenarios use it to lay their phases'
+    /// time series end to end.
+    #[cfg_attr(not(feature = "scenario"), allow(dead_code))]
+    pub(crate) started_at: Instant,
+    pub(crate) time_series: TimeSeries,
 }
 
 /// Stops the signal listener task when the owning run ends.
@@ -578,6 +617,8 @@ impl ScenarioExecutor {
         let mut total_elapsed = Duration::ZERO;
         let mut total_connections = 0u64;
         let mut total_not_started = 0u64;
+        let mut time_series = TimeSeries::default();
+        let scenario_start = Instant::now();
         let mut phase_targets = Vec::with_capacity(self.phases.len());
 
         let _signal_listener = if self.handle_signals {
@@ -618,6 +659,10 @@ impl ScenarioExecutor {
             total_connections += outcome.connections;
             total_not_started += outcome.not_started;
             all_worker_metrics.extend(outcome.worker_metrics);
+            time_series.append(
+                outcome.time_series,
+                outcome.started_at.saturating_duration_since(scenario_start),
+            );
 
             if phase_idx + 1 < self.phases.len() {
                 tokio::select! {
@@ -629,7 +674,8 @@ impl ScenarioExecutor {
 
         let metrics =
             AggregatedMetrics::merge(all_worker_metrics, total_elapsed, total_connections)?
-                .with_not_started(total_not_started);
+                .with_not_started(total_not_started)
+                .with_time_series(time_series);
         Ok(ScenarioOutcome {
             metrics,
             phase_targets,

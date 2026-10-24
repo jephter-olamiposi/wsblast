@@ -139,6 +139,45 @@
         "p9999_us": { "$ref": "#/$defs/count" }
       }
     },
+    "interval_latency": {
+      "type": "object",
+      "description": "Latency percentiles of one time series interval, at 1% precision. Every field is 0 when no reply arrived in the interval.",
+      "required": ["count", "p50_us", "p90_us", "p99_us", "max_us"],
+      "properties": {
+        "count": { "$ref": "#/$defs/count" },
+        "p50_us": { "$ref": "#/$defs/count" },
+        "p90_us": { "$ref": "#/$defs/count" },
+        "p99_us": { "$ref": "#/$defs/count" },
+        "max_us": { "$ref": "#/$defs/count" }
+      }
+    },
+    "time_series_point": {
+      "type": "object",
+      "description": "Counters and latency of one interval. Latency is placed in the interval in which the reply arrived.",
+      "required": ["start_secs", "duration_secs", "active_connections", "messages_sent", "messages_recv", "bytes_sent", "bytes_recv", "errors", "throughput_msg_per_sec", "latency"],
+      "properties": {
+        "start_secs": { "description": "Start of the interval, in seconds since the run started.", "type": "number", "minimum": 0 },
+        "duration_secs": { "description": "Length of the interval in seconds. Only the last interval of a run or scenario phase can differ from interval_secs.", "type": "number", "minimum": 0 },
+        "active_connections": { "description": "Connections open at the end of the interval.", "$ref": "#/$defs/count" },
+        "messages_sent": { "$ref": "#/$defs/count" },
+        "messages_recv": { "$ref": "#/$defs/count" },
+        "bytes_sent": { "$ref": "#/$defs/count" },
+        "bytes_recv": { "$ref": "#/$defs/count" },
+        "errors": { "$ref": "#/$defs/count" },
+        "throughput_msg_per_sec": { "description": "The larger of messages_sent and messages_recv, per second of the interval.", "type": "number", "minimum": 0 },
+        "latency": { "$ref": "#/$defs/interval_latency" }
+      }
+    },
+    "time_series": {
+      "type": "object",
+      "description": "The run broken down by time. The counters of all points add up to the run's totals.",
+      "required": ["interval_secs", "latency_basis", "points"],
+      "properties": {
+        "interval_secs": { "description": "Length of each interval in seconds: 1 for runs up to 600 seconds, otherwise the whole number of seconds that keeps a run within 600 points.", "type": "number", "minimum": 0 },
+        "latency_basis": { "description": "The latency each point reports: response_time for paced echo runs, rtt otherwise, mixed for a scenario whose phases differ. Empty when the run kept no series.", "enum": ["response_time", "rtt", "mixed", ""] },
+        "points": { "type": "array", "items": { "$ref": "#/$defs/time_series_point" } }
+      }
+    },
     "aggregated_metrics": {
       "description": "Merged result of every worker. See METHODOLOGY.md for how each value is measured.",
       "type": "object",
@@ -230,6 +269,10 @@
         "response_time": {
           "description": "Echo response time, from each request's scheduled send time to its reply, so it includes the time a request waited behind a slow reply (coordinated omission correction). Recorded only for paced echo runs (--rate); count is 0 otherwise. Absent from reports written before this field was added; readers should treat a missing value as an empty distribution.",
           "$ref": "#/$defs/latency_stats"
+        },
+        "time_series": {
+          "description": "The run broken down by time. Absent from reports written before this field was added.",
+          "$ref": "#/$defs/time_series"
         },
         "error_breakdown": {
           "description": "Error count per category. Categories with no errors are omitted, so the object is empty on a clean run. Every failed handshake attempt, including failed reconnect attempts, adds one error.",

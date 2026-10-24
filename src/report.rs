@@ -533,6 +533,71 @@ pub fn evaluate_slos(slo: &SloThresholds, metrics: &AggregatedMetrics) -> SloEva
 /// A latency budget cannot pass without evidence: when no round trip was
 /// measured (every request timed out, or the mode does not measure RTT) the
 /// check fails instead of comparing the empty histogram's zero against the target.
+/// The most rows the text and Markdown reports show for the time series.
+const MAX_TIME_WINDOWS: usize = 10;
+
+/// A group of consecutive time series points, as one report row.
+struct TimeWindow {
+    label: String,
+    throughput: f64,
+    errors: u64,
+    /// The highest p99 of any interval in the window. Percentiles cannot be
+    /// combined, so this is the worst interval, not the window's p99.
+    worst_p99: Option<u64>,
+}
+
+/// Groups the run's time series into at most [`MAX_TIME_WINDOWS`] rows. A
+/// series with fewer than two points adds nothing to the summary tables, so
+/// it gives no rows.
+fn time_windows(metrics: &AggregatedMetrics) -> Vec<TimeWindow> {
+    let points = &metrics.time_series.points;
+    if points.len() < 2 {
+        return Vec::new();
+    }
+    let per_window = points.len().div_ceil(MAX_TIME_WINDOWS);
+    points
+        .chunks(per_window)
+        .map(|chunk| {
+            let start = chunk[0].start_secs;
+            let last = &chunk[chunk.len() - 1];
+            let end = last.start_secs + last.duration_secs;
+            let secs: f64 = chunk.iter().map(|p| p.duration_secs).sum();
+            let messages: u64 = chunk
+                .iter()
+                .map(|p| p.messages_sent.max(p.messages_recv))
+                .sum();
+            TimeWindow {
+                label: format!("{} to {}", format_secs(start), format_secs(end)),
+                throughput: messages as f64 / secs.max(0.000_1),
+                errors: chunk.iter().map(|p| p.errors).sum(),
+                worst_p99: chunk
+                    .iter()
+                    .filter(|p| p.latency.count > 0)
+                    .map(|p| p.latency.p99_us)
+                    .max(),
+            }
+        })
+        .collect()
+}
+
+/// Formats seconds since the run started, with one decimal only when the
+/// value is not a whole number of seconds.
+fn format_secs(secs: f64) -> String {
+    if (secs - secs.round()).abs() < 0.05 {
+        format!("{:.0}s", secs.round())
+    } else {
+        format!("{secs:.1}s")
+    }
+}
+
+fn latency_basis_label(metrics: &AggregatedMetrics) -> &'static str {
+    match metrics.time_series.latency_basis.as_str() {
+        "response_time" => "Response Time",
+        "mixed" => "Latency",
+        _ => "RTT",
+    }
+}
+
 /// A report row label and the percentile it reads from a distribution.
 type PercentileRow = (&'static str, fn(&LatencyStats) -> u64);
 
@@ -760,6 +825,28 @@ fn render_text_report(
     out.push_str(&lat_table.to_string());
     out.push_str("\n\n");
 
+    let windows = time_windows(metrics);
+    if !windows.is_empty() {
+        let mut ts_table = Table::new();
+        ts_table.load_preset(UTF8_FULL);
+        ts_table.set_header(vec![
+            "Time Window".to_string(),
+            "Throughput (msg/s)".to_string(),
+            "Errors".to_string(),
+            format!("Worst {} p99", latency_basis_label(metrics)),
+        ]);
+        for w in &windows {
+            ts_table.add_row(vec![
+                w.label.clone(),
+                format!("{:.1}", w.throughput),
+                w.errors.to_string(),
+                w.worst_p99.map_or_else(|| "-".to_string(), format_us),
+            ]);
+        }
+        out.push_str(&ts_table.to_string());
+        out.push_str("\n\n");
+    }
+
     if !metrics.error_breakdown.is_empty() {
         let mut err_table = Table::new();
         err_table.load_preset(UTF8_FULL);
@@ -933,6 +1020,26 @@ fn render_markdown_report(
     }
     md.push('\n');
 
+    let windows = time_windows(metrics);
+    if !windows.is_empty() {
+        md.push_str("### Over Time\n\n");
+        md.push_str(&format!(
+            "| Time Window | Throughput (msg/s) | Errors | Worst {} p99 |\n",
+            latency_basis_label(metrics)
+        ));
+        md.push_str("| :--- | :--- | :--- | :--- |\n");
+        for w in &windows {
+            md.push_str(&format!(
+                "| {} | {:.1} | {} | {} |\n",
+                w.label,
+                w.throughput,
+                w.errors,
+                w.worst_p99.map_or_else(|| "-".to_string(), format_us)
+            ));
+        }
+        md.push('\n');
+    }
+
     if !slo.checks.is_empty() {
         md.push_str("### SLO Gate Evaluation\n\n");
         md.push_str("| Metric | Target | Actual | Status |\n");
@@ -1004,6 +1111,7 @@ mod tests {
             handshake_latency: latency(500),
             message_rtt: latency(250),
             response_time: LatencyStats::default(),
+            time_series: crate::timeseries::TimeSeries::default(),
             error_breakdown: HashMap::new(),
         }
     }
@@ -1354,6 +1462,50 @@ mod tests {
             "{:?}",
             comparison.regressions
         );
+    }
+
+    #[test]
+    fn time_series_is_summarised_in_at_most_ten_rows() {
+        use crate::timeseries::{TimeSeries, TimeSeriesPoint};
+        let slo = evaluate_slos(&SloThresholds::default(), &sample_metrics());
+        let mut metrics = sample_metrics();
+        for format in ["text", "markdown"] {
+            let rendered = render_report(&report_config(format), &metrics, &slo);
+            assert!(!rendered.contains("Time Window"), "{format}: {rendered}");
+        }
+
+        let points: Vec<TimeSeriesPoint> = (0..25)
+            .map(|i| TimeSeriesPoint {
+                start_secs: f64::from(i),
+                duration_secs: 1.0,
+                messages_sent: 100,
+                latency: crate::timeseries::IntervalLatency {
+                    count: 100,
+                    p99_us: if i == 12 { 900_000 } else { 1_000 },
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .collect();
+        metrics.time_series = TimeSeries {
+            interval_secs: 1.0,
+            latency_basis: "rtt".into(),
+            points,
+        };
+
+        let rendered = render_report(&report_config("markdown"), &metrics, &slo);
+        let rows: Vec<&str> = rendered
+            .lines()
+            .filter(|line| line.contains("s to "))
+            .collect();
+        assert_eq!(rows.len(), 9, "{rendered}");
+        assert!(
+            rows[0].starts_with("| 0s to 3s | 100.0 | 0 |"),
+            "{rendered}"
+        );
+        assert!(rows[4].contains("900.00 ms"), "{rendered}");
+        assert!(rows[8].starts_with("| 24s to 25s |"), "{rendered}");
+        assert!(rendered.contains("Worst RTT p99"), "{rendered}");
     }
 
     #[test]

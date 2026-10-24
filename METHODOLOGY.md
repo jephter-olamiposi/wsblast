@@ -150,6 +150,17 @@ Throughput uses the larger direction so that it is meaningful in every mode: lis
 
 The progress bar and the TUI show a live "Msg/s" computed as received messages divided by elapsed time. It is a progress indicator and can differ from the final `throughput_msg_per_sec`.
 
+### 6.3 Time series
+
+`time_series` breaks the run down into intervals. The interval is 1 second for runs of up to 600 seconds; a longer run uses the whole number of seconds that keeps it within 600 points (6 seconds for an hour, 144 seconds for a day). Intervals start when the run's clock starts.
+
+- **Counters** (`messages_sent`, `messages_recv`, `bytes_sent`, `bytes_recv`, `errors`) are the difference between snapshots of the live counters taken at each interval boundary, so the points add up to the run's totals. `active_connections` is the snapshot at the end of the interval. `throughput_msg_per_sec` uses the larger direction, as the run total does.
+- **Latency** is the response time of paced echo runs and the RTT otherwise; `latency_basis` says which (`mixed` for a scenario whose phases differ). A sample belongs to the interval in which its reply arrived. A server stall therefore shows up twice: as lower throughput in the interval where requests stopped being answered, and as high latency in the interval where the late replies arrived.
+- **Precision.** Each worker keeps a histogram for its current interval at 2 significant figures, so interval percentiles are within 1%, and hands it to the run once per interval. The run-level percentiles in [section 5](#5-histograms-and-percentiles) keep 3 significant figures.
+- **Ends of runs.** The last interval is usually shorter. A final interval shorter than a twentieth of the interval length is merged into the one before it. Scenario phases are laid end to end, with each point's `start_secs` counted from the start of the scenario.
+
+The text and Markdown reports summarise the series in at most 10 rows. When a row covers several intervals, it shows their combined throughput and the highest p99 of any one interval: percentiles cannot be combined, so the row's latency is the worst interval, not a p99 over the whole row. The JSON report has every point.
+
 ### 6.1 What counts as an error
 
 `error_breakdown` counts errors per category: `dns_resolution`, `tcp_connect`, `tls_handshake`, `http_upgrade_rejected`, `protocol_error`, `write_error`, `read_error`, `timeout`, `unexpected_close`, `other`.
@@ -279,7 +290,7 @@ SLOs are checked before the "all connections failed" condition. A run where ever
 ## 10. Known limitations
 
 - **Coordinated omission is corrected only for paced echo.** Response time needs a schedule to measure against, so it is recorded only with `--rate` in echo mode. Unpaced echo (`--rate 0`) is a closed loop with no intended send times: its RTT percentiles still record one slow sample per stall and understate tail latency when the server pauses. Scenario action scripts and phases with a think time do not record response time either. To measure tail latency under stalls, set `--rate`.
-- **Memory per connection.** Each connection holds two histograms of about 136 KiB each, so about 270 KB per connection before any socket or TLS buffers; a paced echo connection adds a third for response time. 10,000 connections need about 2.7 GB for histograms alone. A local echo run with 1,000 connections at `--rate 1` peaked at about 420 MB resident.
+- **Memory per connection.** Each connection holds two histograms of about 136 KiB each, so about 270 KB per connection before any socket or TLS buffers; a paced echo connection adds a third for response time, and every connection adds about 20 KB for its time series interval. The run keeps one merged interval histogram per point, at most 600, about 12 MB. 10,000 connections need about 2.7 GB for histograms alone. A local echo run with 1,000 connections at `--rate 1` peaked at about 420 MB resident.
 - **Reply matching.** Echo replies are matched by `--match` (default `first`, see [section 3.1](#31-how-replies-are-matched-echo-mode)). With `first`, unsolicited server frames are taken as replies.
 - **Single generator.** All load comes from one process. wsblast does not detect when the generator itself is the bottleneck (CPU saturation, file descriptor limit, ephemeral ports). It prints a warning when `-c` plus 64 exceeds the open file limit (`ulimit -n`). Watch the generator's CPU when RTT matters.
 - **Timer resolution.** Per-connection rates above about 1000 msg/s are approximate (see [section 8.3](#83-timer-resolution)).

@@ -233,6 +233,7 @@ impl WorkerSession {
             .is_none_or(|phase| phase.think_time.is_zero());
         #[cfg(not(feature = "scenario"))]
         let record_response_time = true;
+        self.metrics.interval_uses_response = schedule.is_some() && record_response_time;
 
         let mut ping_ticker = self.keepalive_ticker();
 
