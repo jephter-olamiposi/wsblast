@@ -53,7 +53,11 @@ phases:                           # required, at least one
 | `metadata.tags` | list of strings | no | none | Not used by the run. |
 | `phases` | list of phases | yes | | At least one. Phase names must be unique. |
 
-Unknown keys are ignored without a warning. A misspelled optional field (for example `rate_per_con`) silently falls back to its default, so check spelling when a phase does not behave as expected. A misspelled required field is reported as missing.
+Unknown keys are rejected at every level: the top level, `metadata`, each phase and each action. A misspelled field fails validation with its name and the list of valid keys, so it cannot silently fall back to a default:
+
+```text
+Error: Configuration error: Invalid scenario: load.yaml: phases[0]: unknown field `conections`, expected one of `name`, `target`, `duration`, `connections`, `ramp_rate`, `rate_per_conn`, `payload`, `think_time`, `actions` at line 10 column 5
+```
 
 ## 2. Phase fields
 
@@ -98,13 +102,25 @@ Each action is a map with a `type` key. Type names are case-sensitive: `Send`, `
 
 ### Close code rules
 
-`code` must be between 1000 and 4999 and must not be 1004, 1005, 1006 or 1015. RFC 6455 forbids an endpoint from sending those four codes. Any other value fails validation:
+`code` must be one an endpoint is allowed to send:
+
+| Codes | Accepted | Why |
+| :--- | :--- | :--- |
+| 1000-1003 | yes | Defined by RFC 6455 (normal closure, going away, protocol error, unsupported data). |
+| 1004-1006 | no | 1004 is reserved; 1005 and 1006 must never be sent in a Close frame. |
+| 1007-1014 | yes | 1007-1011 are defined by RFC 6455, 1012-1014 are registered with IANA. |
+| 1015 | no | Must never be sent in a Close frame. |
+| 1016-2999 | no | Reserved by RFC 6455 for future protocol use. |
+| 3000-3999 | yes | Registered with IANA for libraries, frameworks and applications. |
+| 4000-4999 | yes | Private use by applications. |
+
+Any other value fails validation:
 
 ```text
-Error: Configuration error: Invalid scenario: close code 1005 cannot be sent; use 1000-4999 excluding 1004, 1005, 1006, 1015
+Error: Configuration error: Invalid scenario: close code 2000 cannot be sent; use 1000-1003, 1007-1014 or 3000-4999
 ```
 
-Codes 1016 to 2999 are reserved by RFC 6455 for future use; wsblast accepts them and sends them as given. Use 1000 (normal closure), 1001 (going away), or an application code in 4000 to 4999.
+Use 1000 (normal closure), 1001 (going away), or an application code in 4000 to 4999.
 
 ## 4. How a phase runs
 
@@ -199,10 +215,11 @@ The whole file is validated before any connection is opened, including phases th
 | Zero `duration` | `phase 'warmup': duration must be greater than zero` |
 | Unparsable duration | `phase 'warmup': Configuration error: Invalid duration 'abc': expected a non-negative number with a unit of ...` |
 | Missing required field | ``load.yaml: phases[0]: missing field `duration` at line 6 column 5`` |
+| Unknown or misspelled key | ``load.yaml: phases[0]: unknown field `conections`, expected one of `name`, `target`, ... at line 10 column 5`` |
 | Unknown action type | ``load.yaml: phases[0].actions[0].type: unknown variant `send`, expected one of `Send`, `Wait`, `Close`, `Ping` `` |
 | `count: 0` | `phase 'warmup': send action count must be greater than zero` |
 | Zero `Wait` or `Ping` duration | `phase 'warmup': wait action duration must be greater than zero` |
-| Forbidden close code | `close code 1005 cannot be sent; use 1000-4999 excluding 1004, 1005, 1006, 1015` |
+| Forbidden or reserved close code | `close code 2000 cannot be sent; use 1000-1003, 1007-1014 or 3000-4999` |
 | `--phase` names a missing phase | `phase 'nope' not found; available phases: soak, spike` |
 | A phase that will run has no target from the command line, the phase or the scenario | ``phase 'spike': no target URL; set `target` on this phase or at the top level of the scenario, or pass a URL on the command line`` |
 

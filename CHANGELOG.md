@@ -64,6 +64,7 @@ v0.2.0 ships a smaller crate in which every feature works end to end. Several fe
 - The Docker image builds again: the Dockerfile copies the whole crate (the manifest's `[[bench]]` target was missing), installs the OpenSSL headers `native-tls` needs, and builds only `--bin wsblast`; `.dockerignore` now excludes build output, VCS, CI, assets and local agent files.
 - `error_rate` no longer counts a failed echo request twice: it is now failed operations over attempted operations, so a run where every request times out reports 1.0 instead of 0.5; errors that end an already-sent message (reply timeout, read error or close while the reply is awaited) are classified when recorded and add no second attempt.
 - A scenario phase without a `target` no longer silently reuses the first phase's endpoint when neither `--url` nor a scenario-level `target` is set: validation rejects it and names the phase, the CLI > phase > scenario precedence is resolved for every phase, and text and Markdown reports list every executed phase's target (JSON adds an optional `phase_targets` array).
+- Scenario files now reject unknown keys at the top level and in `metadata`, phases and actions, naming the misspelled key (`conections:` used to fall back silently to a default), and `Close` actions only accept the close codes an endpoint may send (1000-1003, 1007-1014, 3000-4999) instead of also accepting the reserved 1016-2999 range.
 
 ## [0.1.1] - 2026-09-04
 
