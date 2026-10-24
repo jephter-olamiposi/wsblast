@@ -35,6 +35,7 @@ pub struct BaselineComparison {
     pub improvements: Vec<Improvement>,
 }
 
+/// `pct_change` is the signed relative change from baseline to current, in percent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Regression {
     pub metric: String,
@@ -43,6 +44,8 @@ pub struct Regression {
     pub pct_change: f64,
 }
 
+/// `pct_change` is the signed relative change from baseline to current, in
+/// percent: positive for a throughput gain, negative for a latency drop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Improvement {
     pub metric: String,
@@ -149,7 +152,7 @@ pub fn compare_metrics(
                 metric: metric_name.clone(),
                 baseline: baseline_val,
                 current: current_val,
-                pct_change: pct_change.abs(),
+                pct_change,
             });
         }
     }
@@ -292,7 +295,7 @@ fn render_text_comparison(comparison: &BaselineComparison, threshold: f64) -> St
                 &i.metric,
                 &format!("{:.3}", i.baseline),
                 &format!("{:.3}", i.current),
-                &format!("-{:.2}%", i.pct_change),
+                &format!("{:+.2}%", i.pct_change),
                 "✓ IMPROVEMENT",
             ]);
         }
@@ -350,7 +353,7 @@ fn render_markdown_comparison(comparison: &BaselineComparison, threshold: f64) -
         md.push_str("| :--- | ---: | ---: | ---: |\n");
         for i in &comparison.improvements {
             md.push_str(&format!(
-                "| {} | {:.3} | {:.3} | -{:.2}% |\n",
+                "| {} | {:.3} | {:.3} | {:+.2}% |\n",
                 i.metric, i.baseline, i.current, i.pct_change
             ));
         }
@@ -982,6 +985,69 @@ mod tests {
             parsed.throughput_msg_per_sec,
             metrics.throughput_msg_per_sec
         );
+    }
+
+    fn rows_for_metric(rendered: &str, metric: &str) -> Vec<String> {
+        rendered
+            .lines()
+            .filter(|line| line.contains(metric))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn comparison_reports_print_signed_improvement_change() {
+        let baseline = sample_metrics();
+        let mut faster = sample_metrics();
+        faster.throughput_msg_per_sec = 150.0;
+        let comparison = compare_metrics(&baseline, &faster, 10.0);
+
+        for format in [OutputFormat::Text, OutputFormat::Markdown] {
+            let rendered = render_comparison_report(&comparison, format, 10.0);
+            let rows = rows_for_metric(&rendered, "throughput_msg_per_sec");
+            assert_eq!(rows.len(), 1, "{rendered}");
+            assert!(rows[0].contains("+50.00%"), "{}", rows[0]);
+        }
+
+        let mut baseline = sample_metrics();
+        baseline.message_rtt = latency(1_000);
+        let mut lower_latency = sample_metrics();
+        lower_latency.message_rtt = latency(500);
+        let comparison = compare_metrics(&baseline, &lower_latency, 10.0);
+
+        for format in [OutputFormat::Text, OutputFormat::Markdown] {
+            let rendered = render_comparison_report(&comparison, format, 10.0);
+            let rows = rows_for_metric(&rendered, "message_rtt.p50_us");
+            assert_eq!(rows.len(), 1, "{rendered}");
+            assert!(rows[0].contains("-50.00%"), "{}", rows[0]);
+            assert!(!rows[0].contains("+50.00%"), "{}", rows[0]);
+        }
+    }
+
+    #[test]
+    fn improvement_pct_change_keeps_its_sign() {
+        let baseline = sample_metrics();
+        let mut faster = sample_metrics();
+        faster.throughput_msg_per_sec = 150.0;
+        let comparison = compare_metrics(&baseline, &faster, 10.0);
+        let improvement = comparison
+            .improvements
+            .iter()
+            .find(|item| item.metric == "throughput_msg_per_sec")
+            .unwrap();
+        assert_eq!(improvement.pct_change, 50.0);
+
+        let mut baseline = sample_metrics();
+        baseline.message_rtt = latency(1_000);
+        let mut lower_latency = sample_metrics();
+        lower_latency.message_rtt = latency(500);
+        let comparison = compare_metrics(&baseline, &lower_latency, 10.0);
+        let improvement = comparison
+            .improvements
+            .iter()
+            .find(|item| item.metric == "message_rtt.p50_us")
+            .unwrap();
+        assert_eq!(improvement.pct_change, -50.0);
     }
 
     #[test]

@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prometheus counters now export with a single `_total` suffix instead of `_total_total`.
 - Duration flags no longer panic on negative, NaN, infinite or overflowing values (`-d infs`, `--duration=-1s`); they fail with `InvalidDuration`, and the parser now accepts `ns` and fractional values for every unit (`1.5ms`, `0.5us`).
 - Repeated `-H` flags with the same header name now send every value instead of keeping only the last one; a `-H` header still replaces a default handshake header of the same name (such as `Host`).
+- Comparison reports print improvements with their real sign (throughput 100 to 150 shows `+50.00%`, not `-50.00%`); `improvements[].pct_change` in comparison JSON is now the signed change instead of its absolute value.
 
 ## [0.1.1] - 2026-09-04
 
