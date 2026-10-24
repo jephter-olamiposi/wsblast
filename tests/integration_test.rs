@@ -1354,6 +1354,127 @@ async fn test_no_reconnect_keeps_single_session_per_worker() {
     cancel_server.cancel();
 }
 
+/// Spawns a server that echoes the first `replies` text frames of every
+/// connection and then keeps reading without answering.
+async fn spawn_echo_then_silent_server(
+    replies: usize,
+) -> (Url, tokio_util::sync::CancellationToken) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let target_url = Url::parse(&format!("ws://127.0.0.1:{}", addr.port())).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_server = cancel.clone();
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Ok((stream, _)) = listener.accept() => {
+                    tokio::spawn(async move {
+                        let Ok(ws_stream) = tokio_tungstenite::accept_async(stream).await else {
+                            return;
+                        };
+                        let (mut sink, mut reader) = ws_stream.split();
+                        let mut echoed = 0;
+                        while let Some(Ok(msg)) = reader.next().await {
+                            if let Message::Text(t) = msg
+                                && echoed < replies
+                            {
+                                let _ = sink.send(Message::Text(t)).await;
+                                echoed += 1;
+                            }
+                        }
+                    });
+                }
+                _ = cancel_server.cancelled() => break,
+            }
+        }
+    });
+
+    (target_url, cancel)
+}
+
+/// Echo configuration where every worker makes one session and gives up on
+/// the first reply that does not arrive within 50ms.
+fn single_session_echo_config(target_url: Url) -> LoadTestConfig {
+    let mut config = echo_test_config(target_url);
+    config.connections = 3;
+    config.duration = Duration::from_millis(500);
+    config.message_timeout = Duration::from_millis(50);
+    config.no_reconnect = true;
+    config
+}
+
+#[tokio::test]
+async fn test_error_rate_is_one_when_every_request_times_out() {
+    let (target_url, cancel_server) = spawn_silent_server().await;
+
+    let metrics = Runner::new(single_session_echo_config(target_url))
+        .run()
+        .await
+        .unwrap();
+
+    assert_eq!(metrics.total_messages_sent, 3, "{metrics:?}");
+    assert_eq!(
+        metrics.error_breakdown.get(&ErrorCategory::Timeout),
+        Some(&3)
+    );
+    assert_eq!(metrics.error_rate, 1.0, "{metrics:?}");
+
+    cancel_server.cancel();
+}
+
+#[tokio::test]
+async fn test_error_rate_is_one_when_the_target_refuses_connections() {
+    let dead_url = Url::parse("ws://127.0.0.1:59997").unwrap();
+
+    let metrics = Runner::new(single_session_echo_config(dead_url))
+        .run()
+        .await
+        .unwrap();
+
+    assert_eq!(metrics.total_messages_sent, 0);
+    assert_eq!(metrics.error_breakdown.values().sum::<u64>(), 3);
+    assert_eq!(metrics.error_rate, 1.0, "{metrics:?}");
+}
+
+#[tokio::test]
+async fn test_error_rate_is_zero_on_a_clean_run() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    let mut config = single_session_echo_config(target_url);
+    config.duration = Duration::from_millis(200);
+    config.message_timeout = Duration::from_secs(2);
+    let metrics = Runner::new(config).run().await.unwrap();
+
+    assert!(metrics.total_messages_sent > 0);
+    assert!(metrics.error_breakdown.is_empty(), "{metrics:?}");
+    assert_eq!(metrics.error_rate, 0.0);
+
+    cancel_server.cancel();
+}
+
+#[tokio::test]
+async fn test_error_rate_counts_a_timed_out_request_once() {
+    let (target_url, cancel_server) = spawn_echo_then_silent_server(3).await;
+
+    let metrics = Runner::new(single_session_echo_config(target_url))
+        .run()
+        .await
+        .unwrap();
+
+    // Each of the 3 workers gets 3 replies, then its fourth request times out:
+    // 3 failed requests out of 12 sent.
+    assert_eq!(metrics.total_messages_sent, 12, "{metrics:?}");
+    assert_eq!(metrics.total_messages_recv, 9, "{metrics:?}");
+    assert_eq!(
+        metrics.error_breakdown.get(&ErrorCategory::Timeout),
+        Some(&3)
+    );
+    assert_eq!(metrics.error_rate, 0.25, "{metrics:?}");
+
+    cancel_server.cancel();
+}
+
 #[tokio::test]
 async fn test_echo_server_close_is_not_counted_as_reply() {
     let (target_url, cancel_server) = spawn_closing_echo_server(3).await;

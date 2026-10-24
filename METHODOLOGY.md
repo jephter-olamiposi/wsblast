@@ -139,7 +139,7 @@ Because of bucket rounding, a percentile can be up to 0.1 % above the true sampl
 | `elapsed` | From just before the first worker is spawned to the moment the run is cancelled (see [section 8](#8-run-duration-and-shutdown)). |
 | `throughput_msg_per_sec` | `max(total_messages_sent, total_messages_recv) / elapsed_secs` |
 | `throughput_bytes_per_sec` | `(total_bytes_sent + total_bytes_recv) / elapsed_secs` |
-| `error_rate` | `errors / (total_messages_sent + errors)`, where `errors` is the sum of `error_breakdown`. 0 when the denominator is 0. |
+| `error_rate` | `errors / attempted`, where `errors` is the sum of `error_breakdown` and `attempted = total_messages_sent + (errors - sent_message_errors)`. `sent_message_errors` are the errors that end a message already counted as sent (see [section 6.2](#62-reading-the-error-rate)). 0 when `attempted` is 0. |
 
 `elapsed_secs` has a floor of 0.0001 s to avoid division by zero.
 
@@ -159,10 +159,19 @@ The progress bar and the TUI show a live "Msg/s" computed as received messages d
 
 ### 6.2 Reading the error rate
 
-The denominator counts sent messages plus errors, because a failed connection attempt sends nothing but must still lower the rate. Two consequences:
+The error rate is failed operations divided by attempted operations. An attempted operation is either a sent message or an attempt that failed before a message was sent. Every error is classified when it is recorded:
 
-- A target that refuses every connection gives `error_rate = 1.0` (no messages, only errors).
-- In echo mode a timed-out request is counted once as sent and once as an error. If every request times out, the error rate is 0.5, not 1.0. A local run against a server that replies after 50 ms, with `--message-timeout 20ms`, reported 51 messages sent, 51 `timeout` errors and `error_rate = 0.5`.
+| Error | Adds an attempt | Examples |
+| :--- | :--- | :--- |
+| Failure before a message was sent | Yes | A failed handshake or reconnect attempt, a failed write, a read error in stream or listen mode, a graphql-ws `error` message during the subscription. |
+| Failure of a message already counted as sent | No | An echo reply that does not arrive within `--message-timeout`, a read error or a stream that ends while the reply is awaited, a graphql-ws `connection_init` that gets no `connection_ack` (timeout, `connection_error`, close or read error). |
+
+So every failed operation is counted exactly once:
+
+- A target that refuses every connection gives `error_rate = 1.0` (no messages, only failed attempts).
+- In echo mode a request that times out is one attempt and one failure. If every request times out, the error rate is 1.0.
+- A run where 9 of 12 echo requests are answered and the other 3 time out gives `3 / 12 = 0.25`.
+- A request still in flight when the run ends counts as attempted but not as failed (see [section 8.2](#82-shutdown-semantics)).
 
 `--max-error-rate` takes a fraction between 0.0 and 1.0 and passes when `error_rate <= threshold`.
 
