@@ -261,6 +261,7 @@ pub struct GraphQLWSStartPayload {
 
 #[cfg(feature = "scenario")]
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScenarioConfig {
     pub version: String,
     /// Optional target endpoint for every phase. CLI `--url` takes precedence.
@@ -272,6 +273,7 @@ pub struct ScenarioConfig {
 
 #[cfg(feature = "scenario")]
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScenarioMeta {
     pub name: String,
     pub description: Option<String>,
@@ -280,6 +282,7 @@ pub struct ScenarioMeta {
 
 #[cfg(feature = "scenario")]
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PhaseConfig {
     pub name: String,
     /// Optional endpoint override for this phase.
@@ -301,7 +304,7 @@ pub struct PhaseConfig {
 
 #[cfg(feature = "scenario")]
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum ActionConfig {
     Send {
         payload: Option<String>,
@@ -617,16 +620,18 @@ fn invalid_phase(phase: &str, message: &str) -> ConfigError {
     ConfigError::InvalidScenario(format!("phase '{phase}': {message}"))
 }
 
+/// Accepts the close codes an endpoint may send: 1000-1003 and 1007-1011
+/// from RFC 6455, 1012-1014 from the IANA registry, and the library and
+/// application ranges 3000-4999. RFC 6455 forbids sending 1004-1006 and
+/// 1015, and reserves 1016-2999 for future protocol use.
 #[cfg(feature = "scenario")]
 fn validate_close_code(code: u16) -> Result<u16> {
-    const RESERVED: [u16; 4] = [1004, 1005, 1006, 1015];
-    if (1000..=4999).contains(&code) && !RESERVED.contains(&code) {
-        Ok(code)
-    } else {
-        Err(ConfigError::InvalidScenario(format!(
-            "close code {code} cannot be sent; use 1000-4999 excluding 1004, 1005, 1006, 1015"
+    match code {
+        1000..=1003 | 1007..=1014 | 3000..=4999 => Ok(code),
+        _ => Err(ConfigError::InvalidScenario(format!(
+            "close code {code} cannot be sent; use 1000-1003, 1007-1014 or 3000-4999"
         ))
-        .into())
+        .into()),
     }
 }
 
@@ -1404,6 +1409,72 @@ mod tests {
             .compile(Some("missing"))
             .unwrap_err();
         assert!(error.to_string().contains("phase 'missing' not found"));
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn scenario_close_codes_follow_rfc_6455_ranges() {
+        let accepted = [
+            1000, 1001, 1002, 1003, 1007, 1010, 1014, 3000, 3999, 4000, 4999,
+        ];
+        let rejected = [
+            0, 999, 1004, 1005, 1006, 1015, 1016, 1100, 2000, 2999, 5000, 65535,
+        ];
+        for code in accepted {
+            assert_eq!(validate_close_code(code).ok(), Some(code), "{code}");
+        }
+        for code in rejected {
+            let error = validate_close_code(code).unwrap_err().to_string();
+            assert!(error.contains(&format!("close code {code}")), "{error}");
+        }
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn scenario_yaml_rejects_unknown_keys_by_name() {
+        let valid = r#"
+version: "1.0"
+target: "ws://127.0.0.1:9001"
+metadata:
+  name: "strict"
+  description: "text"
+  tags: ["a"]
+phases:
+  - name: "load"
+    duration: "1s"
+    connections: 2
+    actions:
+      - type: Send
+        count: 2
+      - type: Wait
+        duration: "10ms"
+      - type: Ping
+        interval: "10ms"
+      - type: Close
+        code: 1000
+        reason: "done"
+"#;
+        serde_yaml::from_str::<ScenarioConfig>(valid).expect("valid scenario");
+
+        for (typo, fixed) in [
+            ("tagret:", "target:"),
+            ("descripton:", "description:"),
+            ("conections:", "connections:"),
+            ("cout:", "count:"),
+            ("durration: \"10ms\"", "duration: \"10ms\""),
+            ("intervall:", "interval:"),
+            ("reson:", "reason:"),
+        ] {
+            let yaml = valid.replacen(fixed, typo, 1);
+            let error = serde_yaml::from_str::<ScenarioConfig>(&yaml)
+                .expect_err(typo)
+                .to_string();
+            let key = typo.split(':').next().unwrap_or(typo);
+            assert!(
+                error.contains(&format!("unknown field `{key}`")),
+                "{typo}: {error}"
+            );
+        }
     }
 
     #[cfg(feature = "scenario")]
