@@ -245,7 +245,7 @@ Pacing, ramp, think time and `Wait`/`Ping` actions all use Tokio timers, which h
 | 2000 | 1978 | 1958 |
 | 5000 | 4846 | 4970 |
 
-These numbers depend on the machine, the OS and its load. For a high aggregate rate, prefer more connections at a moderate per-connection rate.
+These numbers depend on the machine, the OS and its load. Windows wakes timers at its default timer resolution of about 15.6 ms, so each paced connection there sends at most about 64 msg/s, whatever `--rate` asks for. On Windows, reach high rates with more connections, or leave `--rate` unset for unpaced echo load. For a high aggregate rate, prefer more connections at a moderate per-connection rate.
 
 ## 9. SLO evaluation and exit codes
 
