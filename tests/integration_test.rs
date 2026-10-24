@@ -1098,3 +1098,50 @@ async fn test_scenario_executor_runs_every_phase() {
 
     cancel_server.cancel();
 }
+
+#[cfg(feature = "scenario")]
+#[tokio::test]
+async fn test_scenario_executor_cancel_token_skips_remaining_phases() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    let phase = |name: &str| PhaseConfig {
+        name: name.to_string(),
+        target: Some(target_url.to_string()),
+        duration: "5s".to_string(),
+        connections: 2,
+        ramp_rate: 0,
+        rate_per_conn: 20,
+        payload: None,
+        think_time: None,
+        actions: Vec::new(),
+    };
+
+    let scenario = ScenarioConfig {
+        version: "1.0".to_string(),
+        target: None,
+        metadata: ScenarioMeta {
+            name: "cancelled".to_string(),
+            description: None,
+            tags: None,
+        },
+        phases: vec![phase("first"), phase("second")],
+    };
+
+    let executor = ScenarioExecutor::new(&scenario, scenario_base_config(target_url), None, None)
+        .unwrap()
+        .with_signal_handling(false);
+    let cancel = executor.cancel_token();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        cancel.cancel();
+    });
+
+    let started = std::time::Instant::now();
+    let (worker_metrics, _, connections) = executor.run().await.unwrap();
+
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(connections, 2);
+    assert_eq!(worker_metrics.len(), 2);
+
+    cancel_server.cancel();
+}
