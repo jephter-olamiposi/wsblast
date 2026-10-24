@@ -59,6 +59,7 @@ v0.2.0 ships a smaller crate in which every feature works end to end. Several fe
 - Comparison reports print improvements with their real sign (throughput 100 to 150 shows `+50.00%`, not `-50.00%`); `improvements[].pct_change` in comparison JSON is now the signed change instead of its absolute value.
 - `install.sh` downloads the release assets that are actually published (`wsblast-<target>.tar.gz`), verifies their `.sha256` checksum before installing, and fails with a clear message when the GitHub API lookup fails instead of assuming `v0.1.0`; releases now build `x86_64-apple-darwin` on `macos-latest` and add `aarch64-unknown-linux-gnu`.
 - The Docker image builds again: the Dockerfile copies the whole crate (the manifest's `[[bench]]` target was missing), installs the OpenSSL headers `native-tls` needs, and builds only `--bin wsblast`; `.dockerignore` now excludes build output, VCS, CI, assets and local agent files.
+- `error_rate` no longer counts a failed echo request twice: it is now failed operations over attempted operations, so a run where every request times out reports 1.0 instead of 0.5; errors that end an already-sent message (reply timeout, read error or close while the reply is awaited) are classified when recorded and add no second attempt.
 
 ## [0.1.1] - 2026-09-04
 

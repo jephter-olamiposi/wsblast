@@ -380,4 +380,4 @@ Edge cases:
 - Compare runs of the same mode. A stream or listen report has an empty RTT histogram (all percentiles 0), so comparing it with an echo report flags every RTT percentile.
 - The comparison JSON (`--format json`) lists only the regressions and improvements, not the two reports. Archive the reports themselves if you need the raw values later.
 
-A local check: comparing a clean echo report with one from a run where every request timed out listed `error_rate` (0 to 0.5) and `errors.timeout` (0 to 51) as regressions with `pct_change` 100; `--fail-on-regression` made the same command exit with 2, and without it the exit code was 0.
+A local check: comparing a clean echo report with one from a run where every request timed out listed `error_rate` (0 to 1) and `errors.timeout` (0 to 51) as regressions with `pct_change` 100; `--fail-on-regression` made the same command exit with 2, and without it the exit code was 0.

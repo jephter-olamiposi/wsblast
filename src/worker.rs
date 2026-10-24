@@ -3,7 +3,7 @@
 use crate::cli::TestMode;
 use crate::config::{LoadTestConfig, PayloadConfig, ReplyMatch};
 use crate::error::ErrorCategory;
-use crate::metrics::WorkerMetrics;
+use crate::metrics::{ErrorScope, WorkerMetrics};
 use bytes::Bytes;
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use std::sync::Arc;
@@ -262,8 +262,10 @@ impl WorkerSession {
             tokio::select! {
                 res = sink.send(msg) => {
                     if let Err(err) = res {
-                        self.metrics
-                            .record_error(categorize_session_error(&err, ErrorDirection::Write));
+                        self.metrics.record_error(
+                            categorize_session_error(&err, ErrorDirection::Write),
+                            ErrorScope::Attempt,
+                        );
                         break;
                     }
                     self.metrics.record_message_sent(frame_len);
@@ -299,11 +301,12 @@ impl WorkerSession {
                 // A server Close ends the session; it is not the reply.
                 Ok(Ok(None)) => break,
                 Ok(Err(cat)) => {
-                    self.metrics.record_error(cat);
+                    self.metrics.record_error(cat, ErrorScope::SentMessage);
                     break;
                 }
                 Err(_) => {
-                    self.metrics.record_error(ErrorCategory::Timeout);
+                    self.metrics
+                        .record_error(ErrorCategory::Timeout, ErrorScope::SentMessage);
                     break;
                 }
             }
@@ -354,10 +357,10 @@ impl WorkerSession {
                     let msg = self.render_payload(seq);
                     let len = message_byte_len(&msg);
                     if let Err(e) = sink.send(msg).await {
-                        self.metrics.record_error(categorize_session_error(
-                            &e,
-                            ErrorDirection::Write,
-                        ));
+                        self.metrics.record_error(
+                            categorize_session_error(&e, ErrorDirection::Write),
+                            ErrorScope::Attempt,
+                        );
                         break;
                     }
                     self.metrics.record_message_sent(len);
@@ -392,10 +395,10 @@ impl WorkerSession {
                         }
                         Some(Ok(Message::Close(_))) | None => break,
                         Some(Err(e)) => {
-                            self.metrics.record_error(categorize_session_error(
-                                &e,
-                                ErrorDirection::Read,
-                            ));
+                            self.metrics.record_error(
+                                categorize_session_error(&e, ErrorDirection::Read),
+                                ErrorScope::Attempt,
+                            );
                             break;
                         }
                         _ => {}
@@ -446,10 +449,10 @@ impl WorkerSession {
                         }
                         Some(Ok(Message::Close(_))) | None => break,
                         Some(Err(e)) => {
-                            self.metrics.record_error(categorize_session_error(
-                                &e,
-                                ErrorDirection::Read,
-                            ));
+                            self.metrics.record_error(
+                                categorize_session_error(&e, ErrorDirection::Read),
+                                ErrorScope::Attempt,
+                            );
                             break;
                         }
                         _ => {}
@@ -534,10 +537,10 @@ impl WorkerSession {
                             let start_time = Instant::now();
 
                             if let Err(err) = sink.send(msg).await {
-                                self.metrics.record_error(categorize_session_error(
-                                    &err,
-                                    ErrorDirection::Write,
-                                ));
+                                self.metrics.record_error(
+                                    categorize_session_error(&err, ErrorDirection::Write),
+                                    ErrorScope::Attempt,
+                                );
                                 break 'script;
                             }
 
@@ -576,11 +579,14 @@ impl WorkerSession {
                                     }
                                     Ok(Ok(None)) => break 'script,
                                     Ok(Err(cat)) => {
-                                        self.metrics.record_error(cat);
+                                        self.metrics.record_error(cat, ErrorScope::SentMessage);
                                         break 'script;
                                     }
                                     Err(_) => {
-                                        self.metrics.record_error(ErrorCategory::Timeout);
+                                        self.metrics.record_error(
+                                            ErrorCategory::Timeout,
+                                            ErrorScope::SentMessage,
+                                        );
                                         break 'script;
                                     }
                                 }
@@ -606,10 +612,10 @@ impl WorkerSession {
                     ScenarioAction::Ping(interval) => {
                         if let Err(err) = sink.send(Message::Ping(Bytes::from_static(b"hb"))).await
                         {
-                            self.metrics.record_error(categorize_session_error(
-                                &err,
-                                ErrorDirection::Write,
-                            ));
+                            self.metrics.record_error(
+                                categorize_session_error(&err, ErrorDirection::Write),
+                                ErrorScope::Attempt,
+                            );
                             break 'script;
                         }
                         tokio::select! {
@@ -750,7 +756,8 @@ impl WorkerSession {
         let graphql_config = match &self.config.graphql_ws {
             Some(cfg) => cfg,
             None => {
-                self.metrics.record_error(ErrorCategory::ProtocolError);
+                self.metrics
+                    .record_error(ErrorCategory::ProtocolError, ErrorScope::Attempt);
                 return SessionEnd::Finished;
             }
         };
@@ -767,15 +774,18 @@ impl WorkerSession {
         let init_json = match serde_json::to_string(&init_msg) {
             Ok(json) => json,
             Err(_) => {
-                self.metrics.record_error(ErrorCategory::ProtocolError);
+                self.metrics
+                    .record_error(ErrorCategory::ProtocolError, ErrorScope::Attempt);
                 return SessionEnd::Finished;
             }
         };
         let init_len = init_json.len();
         let init_message = Message::Text(Utf8Bytes::from(init_json));
         if let Err(e) = sink.send(init_message).await {
-            self.metrics
-                .record_error(categorize_session_error(&e, ErrorDirection::Write));
+            self.metrics.record_error(
+                categorize_session_error(&e, ErrorDirection::Write),
+                ErrorScope::Attempt,
+            );
             return self.session_end();
         }
         self.metrics.record_message_sent(init_len);
@@ -790,7 +800,7 @@ impl WorkerSession {
                     return self.session_end();
                 }
                 _ = &mut ack_timeout => {
-                    self.metrics.record_error(ErrorCategory::Timeout);
+                    self.metrics.record_error(ErrorCategory::Timeout, ErrorScope::SentMessage);
                     return self.session_end();
                 }
                 _ = async {
@@ -812,7 +822,10 @@ impl WorkerSession {
                                         break;
                                     }
                                     GraphQLWSMessage::ConnectionError { .. } => {
-                                        self.metrics.record_error(ErrorCategory::ProtocolError);
+                                        self.metrics.record_error(
+                                            ErrorCategory::ProtocolError,
+                                            ErrorScope::SentMessage,
+                                        );
                                         return self.session_end();
                                     }
                                     GraphQLWSMessage::Ping => {
@@ -829,12 +842,17 @@ impl WorkerSession {
                             }
                         }
                         Some(Ok(Message::Close(_))) | None => {
-                            self.metrics.record_error(ErrorCategory::UnexpectedClose);
+                            self.metrics.record_error(
+                                ErrorCategory::UnexpectedClose,
+                                ErrorScope::SentMessage,
+                            );
                             return self.session_end();
                         }
                         Some(Err(e)) => {
-                            self.metrics
-                                .record_error(categorize_session_error(&e, ErrorDirection::Read));
+                            self.metrics.record_error(
+                                categorize_session_error(&e, ErrorDirection::Read),
+                                ErrorScope::SentMessage,
+                            );
                             return self.session_end();
                         }
                         _ => {}
@@ -866,15 +884,18 @@ impl WorkerSession {
         let start_json = match serde_json::to_string(&start_msg) {
             Ok(json) => json,
             Err(_) => {
-                self.metrics.record_error(ErrorCategory::ProtocolError);
+                self.metrics
+                    .record_error(ErrorCategory::ProtocolError, ErrorScope::Attempt);
                 return SessionEnd::Finished;
             }
         };
         let start_len = start_json.len();
         let start_message = Message::Text(Utf8Bytes::from(start_json));
         if let Err(e) = sink.send(start_message).await {
-            self.metrics
-                .record_error(categorize_session_error(&e, ErrorDirection::Write));
+            self.metrics.record_error(
+                categorize_session_error(&e, ErrorDirection::Write),
+                ErrorScope::Attempt,
+            );
             return self.session_end();
         }
         self.metrics.record_message_sent(start_len);
@@ -908,10 +929,16 @@ impl WorkerSession {
                                         self.metrics.record_message_recv(text.len(), None);
                                     }
                                     GraphQLWSMessage::Error { .. } => {
-                                        self.metrics.record_error(ErrorCategory::ProtocolError);
+                                        self.metrics.record_error(
+                                            ErrorCategory::ProtocolError,
+                                            ErrorScope::Attempt,
+                                        );
                                     }
                                     GraphQLWSMessage::ConnectionError { .. } => {
-                                        self.metrics.record_error(ErrorCategory::ProtocolError);
+                                        self.metrics.record_error(
+                                            ErrorCategory::ProtocolError,
+                                            ErrorScope::Attempt,
+                                        );
                                     }
                                     GraphQLWSMessage::Complete { .. } => {
                                         subscription_complete = true;
@@ -936,10 +963,10 @@ impl WorkerSession {
                             break;
                         }
                         Some(Err(e)) => {
-                            self.metrics.record_error(categorize_session_error(
-                                &e,
-                                ErrorDirection::Read,
-                            ));
+                            self.metrics.record_error(
+                                categorize_session_error(&e, ErrorDirection::Read),
+                                ErrorScope::Attempt,
+                            );
                             break;
                         }
                         _ => {}
@@ -961,7 +988,8 @@ impl WorkerSession {
         let stop_json = match serde_json::to_string(&stop_msg) {
             Ok(json) => json,
             Err(_) => {
-                self.metrics.record_error(ErrorCategory::ProtocolError);
+                self.metrics
+                    .record_error(ErrorCategory::ProtocolError, ErrorScope::Attempt);
                 return SessionEnd::Finished;
             }
         };
@@ -976,7 +1004,8 @@ impl WorkerSession {
 
         if !subscription_complete {
             // Connection closed unexpectedly
-            self.metrics.record_error(ErrorCategory::UnexpectedClose);
+            self.metrics
+                .record_error(ErrorCategory::UnexpectedClose, ErrorScope::Attempt);
             return self.session_end();
         }
 

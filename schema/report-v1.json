@@ -185,7 +185,7 @@
           "minimum": 0
         },
         "error_rate": {
-          "description": "errors / (total_messages_sent + errors), where errors is the sum of error_breakdown. 0 when the denominator is 0.",
+          "description": "Failed operations divided by attempted operations: errors / (total_messages_sent + errors that happened before a message was sent), where errors is the sum of error_breakdown. An error that ends an already-sent message (an echo reply timeout, a read error or a close while the reply is awaited) is counted as a failure but not as a second attempt. 0 when no operation was attempted. See METHODOLOGY.md section 6.",
           "type": "number",
           "minimum": 0,
           "maximum": 1

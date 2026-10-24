@@ -64,6 +64,19 @@ pub struct LiveSnapshot {
     pub unsolicited_frames: u64,
 }
 
+/// How a recorded error relates to the attempted operations that form the
+/// error-rate denominator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorScope {
+    /// The failed operation never produced a sent message (a handshake, a
+    /// write, a stream read), so it counts as an attempted operation itself.
+    Attempt,
+    /// The error ends a message that is already counted as sent (a reply
+    /// timeout, a read error or a close while the reply is awaited), so it
+    /// adds no second attempt.
+    SentMessage,
+}
+
 /// Task-local metrics container owned by a single worker to eliminate mutex contention.
 #[derive(Clone, Debug)]
 pub struct WorkerMetrics {
@@ -74,6 +87,8 @@ pub struct WorkerMetrics {
     pub bytes_sent: u64,
     pub bytes_recv: u64,
     pub errors: HashMap<ErrorCategory, u64>,
+    /// Errors in `errors` recorded with [`ErrorScope::SentMessage`].
+    pub sent_message_errors: u64,
     /// Handshakes recorded after this worker's first one; every other entry in
     /// `handshake_hist` is a first handshake.
     pub reconnects: u64,
@@ -108,6 +123,7 @@ impl WorkerMetrics {
             bytes_sent: 0,
             bytes_recv: 0,
             errors: HashMap::new(),
+            sent_message_errors: 0,
             reconnects: 0,
             unsolicited_frames: 0,
             live,
@@ -141,7 +157,7 @@ impl WorkerMetrics {
 
     #[inline]
     pub fn record_connection_failed(&mut self, err: ErrorCategory) {
-        self.record_error(err);
+        self.record_error(err, ErrorScope::Attempt);
         self.live.connections_failed.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -186,8 +202,11 @@ impl WorkerMetrics {
     }
 
     #[inline]
-    pub fn record_error(&mut self, err: ErrorCategory) {
+    pub fn record_error(&mut self, err: ErrorCategory, scope: ErrorScope) {
         *self.errors.entry(err).or_insert(0) += 1;
+        if scope == ErrorScope::SentMessage {
+            self.sent_message_errors += 1;
+        }
         self.live.total_errors.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -315,6 +334,7 @@ impl AggregatedMetrics {
         let mut total_bytes_recv = 0u64;
         let mut total_reconnects = 0u64;
         let mut total_unsolicited_frames = 0u64;
+        let mut sent_message_errors = 0u64;
         let mut error_breakdown = HashMap::new();
 
         for w in workers {
@@ -326,16 +346,20 @@ impl AggregatedMetrics {
             total_bytes_recv += w.bytes_recv;
             total_reconnects += w.reconnects;
             total_unsolicited_frames += w.unsolicited_frames;
+            sent_message_errors += w.sent_message_errors;
 
             for (category, count) in w.errors {
                 *error_breakdown.entry(category).or_insert(0) += count;
             }
         }
 
+        // Failed operations over attempted operations: every sent message, plus
+        // every failure that happened before a message could be sent. An error
+        // that ends an already-sent message is a failure but not a new attempt.
         let total_errors: u64 = error_breakdown.values().sum();
-        let total_ops = total_messages_sent + total_errors;
-        let error_rate = if total_ops > 0 {
-            total_errors as f64 / total_ops as f64
+        let attempted_ops = total_messages_sent + total_errors.saturating_sub(sent_message_errors);
+        let error_rate = if attempted_ops > 0 {
+            (total_errors as f64 / attempted_ops as f64).min(1.0)
         } else {
             0.0
         };
@@ -408,6 +432,54 @@ mod aggregation_tests {
         assert_eq!(snapshot.connections_established, 1);
         assert_eq!(snapshot.connections_failed, 2);
         assert_eq!(snapshot.reconnects, 2);
+    }
+
+    fn error_rate_of(record: impl FnOnce(&mut WorkerMetrics)) -> f64 {
+        let mut worker = WorkerMetrics::new(LiveMetrics::new()).expect("worker metrics");
+        record(&mut worker);
+        AggregatedMetrics::merge(vec![worker], Duration::from_secs(1), 1)
+            .expect("merge")
+            .error_rate
+    }
+
+    #[test]
+    fn error_rate_is_failed_over_attempted_operations() {
+        let all_timed_out = error_rate_of(|w| {
+            for _ in 0..4 {
+                w.record_message_sent(10);
+                w.record_error(ErrorCategory::Timeout, ErrorScope::SentMessage);
+            }
+        });
+        assert_eq!(all_timed_out, 1.0);
+
+        let clean = error_rate_of(|w| {
+            for _ in 0..5 {
+                w.record_message_sent(10);
+                w.record_message_recv(10, Some(Duration::from_millis(1)));
+            }
+        });
+        assert_eq!(clean, 0.0);
+
+        let refused = error_rate_of(|w| {
+            for _ in 0..3 {
+                w.record_connection_failed(ErrorCategory::TcpConnect);
+            }
+        });
+        assert_eq!(refused, 1.0);
+
+        // 8 sent messages (one times out, one hits a read error while its
+        // reply is awaited), 1 failed handshake and 1 failed write: 4 failures
+        // over 10 attempted operations.
+        let mixed = error_rate_of(|w| {
+            w.record_connection_failed(ErrorCategory::TcpConnect);
+            for _ in 0..8 {
+                w.record_message_sent(10);
+            }
+            w.record_error(ErrorCategory::Timeout, ErrorScope::SentMessage);
+            w.record_error(ErrorCategory::ReadError, ErrorScope::SentMessage);
+            w.record_error(ErrorCategory::WriteError, ErrorScope::Attempt);
+        });
+        assert_eq!(mixed, 0.4);
     }
 
     #[test]
