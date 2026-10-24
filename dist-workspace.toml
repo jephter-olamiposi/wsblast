@@ -43,11 +43,7 @@ github-custom-job-permissions = { "publish-crates" = { contents = "read", id-tok
 # tap = "jephter-olamiposi/homebrew-tap"
 # formula = "wsblast"
 
-# native-tls links OpenSSL, so aarch64 Linux is built on a native arm64
-# runner instead of being cross-compiled from x86_64.
+# ring compiles C and assembly for the target, so aarch64 Linux is built on
+# a native arm64 runner instead of being cross-compiled from x86_64.
 [dist.github-custom-runners]
 aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
-
-[dist.dependencies.apt]
-libssl-dev = "*"
-pkg-config = "*"

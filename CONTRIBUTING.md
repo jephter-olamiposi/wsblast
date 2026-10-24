@@ -18,8 +18,9 @@ Security problems should not be filed as public issues; see
    rustup toolchain install stable --component rustfmt --component clippy
    ```
 
-2. On Linux, the default `native-tls` backend links OpenSSL, so you also need
-   `pkg-config` and the OpenSSL headers (`libssl-dev` on Debian and Ubuntu).
+2. Make sure a C compiler is installed (`build-essential` on Debian and
+   Ubuntu): `ring`, the rustls crypto provider, compiles C code. TLS uses
+   rustls only, so OpenSSL is not needed.
 
 3. Clone and build:
 
