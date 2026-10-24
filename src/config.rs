@@ -35,6 +35,8 @@ pub struct LoadTestConfig {
     pub(crate) connections: usize,
     pub(crate) ramp_rate: u64,
     pub(crate) duration: Duration,
+    /// A staged load profile; empty for a constant connection count.
+    pub(crate) stages: Vec<Stage>,
     pub(crate) max_requests: Option<u64>,
     pub(crate) rate_per_conn: u64,
     pub(crate) payload: PayloadConfig,
@@ -114,6 +116,14 @@ impl LoadTestConfig {
     /// Total run time, including the connection ramp.
     pub fn duration(&self) -> Duration {
         self.duration
+    }
+
+    /// The staged load profile, or an empty slice when the run holds a
+    /// constant connection count. With stages, [`connections`](Self::connections)
+    /// is the highest stage target and [`duration`](Self::duration) the sum of
+    /// the stage durations.
+    pub fn stages(&self) -> &[Stage] {
+        &self.stages
     }
 
     /// Cap on messages sent across all workers, if any.
@@ -196,6 +206,7 @@ pub struct LoadTestConfigBuilder {
     connections: usize,
     ramp_rate: u64,
     duration: Duration,
+    stages: Vec<Stage>,
     max_requests: Option<u64>,
     rate_per_conn: u64,
     payload: PayloadConfig,
@@ -232,6 +243,7 @@ impl LoadTestConfigBuilder {
             connections: 50,
             ramp_rate: 0,
             duration: Duration::from_secs(10),
+            stages: Vec::new(),
             max_requests: None,
             rate_per_conn: 0,
             payload: PayloadConfig::from_text(DEFAULT_TEXT_PAYLOAD.to_string()),
@@ -267,6 +279,37 @@ impl LoadTestConfigBuilder {
     /// Sets the total run time, including the connection ramp.
     pub fn duration(mut self, duration: Duration) -> Self {
         self.duration = duration;
+        self
+    }
+
+    /// Runs a staged load profile instead of a constant connection count.
+    ///
+    /// Each stage moves the number of open connections linearly from the
+    /// previous stage's target (0 for the first stage) to its own target over
+    /// its duration. When the count falls, the most recently opened
+    /// connections are closed first. The run lasts the sum of the stage
+    /// durations and opens at most the highest target at once, which
+    /// replace [`duration`](Self::duration) and
+    /// [`connections`](Self::connections). Stages cannot be combined with
+    /// [`ramp_rate`](Self::ramp_rate).
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use wsblast::{LoadTestConfig, Stage};
+    ///
+    /// let config = LoadTestConfig::builder("ws://127.0.0.1:9001")
+    ///     .stages(vec![
+    ///         Stage::new(Duration::from_secs(30), 100),
+    ///         Stage::new(Duration::from_secs(120), 100),
+    ///         Stage::new(Duration::from_secs(30), 0),
+    ///     ])
+    ///     .build()?;
+    /// assert_eq!(config.connections(), 100);
+    /// assert_eq!(config.duration(), Duration::from_secs(180));
+    /// # Ok::<(), wsblast::WsBlastError>(())
+    /// ```
+    pub fn stages(mut self, stages: Vec<Stage>) -> Self {
+        self.stages = stages;
         self
     }
 
@@ -422,7 +465,11 @@ impl LoadTestConfigBuilder {
     ///
     /// - [`ConfigError::InvalidUrl`] or [`ConfigError::UnsupportedScheme`] for
     ///   a target that does not parse or is not `ws://` or `wss://`.
-    /// - [`ConfigError::ZeroConcurrency`] for zero connections.
+    /// - [`ConfigError::ZeroConcurrency`] for zero connections, or for stages
+    ///   whose targets are all zero.
+    /// - [`ConfigError::InvalidOption`] for a stage with a zero duration.
+    /// - [`ConfigError::UnsupportedOption`] for stages combined with a ramp
+    ///   rate.
     /// - [`ConfigError::InvalidOption`] for a zero request limit, or for a
     ///   missing GraphQL operation or non-object GraphQL variables or
     ///   extensions in GraphQL mode.
@@ -434,8 +481,13 @@ impl LoadTestConfigBuilder {
     ///   non-default [`ReplyMatch`] outside [`TestMode::Echo`], a JSON reply
     ///   match whose pointer is invalid or whose payload lacks `{{seq}}`, or
     ///   GraphQL settings outside GraphQL mode.
-    pub fn build(self) -> Result<LoadTestConfig> {
+    pub fn build(mut self) -> Result<LoadTestConfig> {
         let target_url = parse_target_url(&self.target)?;
+        if !self.stages.is_empty() {
+            validate_stages(&self.stages, self.ramp_rate)?;
+            self.connections = self.stages.iter().map(|s| s.target).max().unwrap_or(0);
+            self.duration = self.stages.iter().map(|s| s.duration).sum();
+        }
         validate_connections(self.connections)?;
         validate_max_requests(self.max_requests)?;
         if let ReplyMatch::JsonPointer(pointer) = &self.reply_match
@@ -456,6 +508,7 @@ impl LoadTestConfigBuilder {
             connections: self.connections,
             ramp_rate: self.ramp_rate,
             duration: self.duration,
+            stages: self.stages,
             max_requests: self.max_requests,
             rate_per_conn: self.rate_per_conn,
             payload: self.payload,
@@ -477,6 +530,97 @@ impl LoadTestConfigBuilder {
             no_reconnect: !self.reconnect,
             reply_match: self.reply_match,
         })
+    }
+}
+
+fn validate_stages(stages: &[Stage], ramp_rate: u64) -> Result<()> {
+    if ramp_rate > 0 {
+        return Err(ConfigError::UnsupportedOption(
+            "--stages sets the connection ramp itself and cannot be combined with --ramp-rate"
+                .to_string(),
+        )
+        .into());
+    }
+    if let Some(index) = stages.iter().position(|s| s.duration.is_zero()) {
+        return Err(ConfigError::InvalidOption(format!(
+            "stage {} has a zero duration; every stage needs a duration greater than zero",
+            index + 1
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// One stage of a staged load profile: over `duration`, the number of open
+/// connections moves linearly from the previous stage's target to `target`.
+///
+/// See [`LoadTestConfigBuilder::stages`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Stage {
+    /// How long the stage lasts.
+    pub duration: Duration,
+    /// Connections open at the end of the stage.
+    pub target: usize,
+}
+
+impl Stage {
+    /// Creates a stage that reaches `target` connections after `duration`.
+    pub fn new(duration: Duration, target: usize) -> Self {
+        Self { duration, target }
+    }
+
+    /// Parses a comma-separated list of `DURATION:TARGET` stages, such as
+    /// `30s:100,2m:100,30s:0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidOption`] for an empty list or a stage
+    /// that is not `DURATION:TARGET`, and [`ConfigError::InvalidDuration`] for
+    /// a duration that does not parse.
+    pub fn parse_list(spec: &str) -> Result<Vec<Stage>> {
+        let stages = spec
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                let invalid = || {
+                    ConfigError::InvalidOption(format!(
+                        "invalid stage '{part}': expected DURATION:CONNECTIONS, such as 30s:100"
+                    ))
+                };
+                let (duration, target) = part.split_once(':').ok_or_else(invalid)?;
+                let target = target.trim().parse::<usize>().map_err(|_| invalid())?;
+                let duration = parse_human_duration(duration.trim())?;
+                Ok(Stage::new(duration, target))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if stages.is_empty() {
+            return Err(ConfigError::InvalidOption(
+                "--stages needs at least one DURATION:CONNECTIONS stage, such as 30s:100"
+                    .to_string(),
+            )
+            .into());
+        }
+        Ok(stages)
+    }
+
+    /// The number of connections a staged run should have open `elapsed`
+    /// after it started, rounded to the nearest connection.
+    pub(crate) fn target_at(stages: &[Stage], elapsed: Duration) -> usize {
+        let mut from = 0usize;
+        let mut stage_start = Duration::ZERO;
+        for stage in stages {
+            let stage_end = stage_start + stage.duration;
+            if elapsed < stage_end {
+                let progress = (elapsed - stage_start).as_secs_f64() / stage.duration.as_secs_f64();
+                let value = from as f64 + (stage.target as f64 - from as f64) * progress;
+                return value.round() as usize;
+            }
+            from = stage.target;
+            stage_start = stage_end;
+        }
+        from
     }
 }
 
@@ -1461,10 +1605,17 @@ impl LoadTestConfig {
             min_throughput: cli.min_throughput,
         };
 
+        let stages = cli
+            .stages
+            .as_deref()
+            .map(Stage::parse_list)
+            .transpose()?
+            .unwrap_or_default();
         let mut builder = LoadTestConfig::builder(raw_url)
             .connections(cli.connections)
             .ramp_rate(cli.ramp_rate)
             .duration(duration)
+            .stages(stages)
             .rate_per_connection(cli.rate)
             .mode(cli.mode)
             .connect_timeout(connect_timeout)
@@ -1511,6 +1662,13 @@ impl LoadTestConfig {
     /// phase values are invalid, or when CLI validation fails.
     #[cfg(feature = "scenario")]
     pub(crate) fn from_scenario_config(scenario: &ScenarioConfig, cli: &Cli) -> Result<Self> {
+        if cli.stages.is_some() {
+            return Err(ConfigError::UnsupportedOption(
+                "--stages cannot be used with --scenario; give each scenario phase its own connections and ramp_rate"
+                    .to_string(),
+            )
+            .into());
+        }
         if cli.tui {
             return Err(ConfigError::UnsupportedOption(
                 "the interactive TUI is not supported with --scenario; use the standard progress output"
@@ -1679,6 +1837,61 @@ pub(crate) fn parse_header_pair(header: &str) -> Result<(HeaderName, HeaderValue
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn stage_lists_parse_and_reject_malformed_stages() {
+        let stages = Stage::parse_list("30s:100, 2m:100,30s:0").unwrap();
+        assert_eq!(
+            stages,
+            [
+                Stage::new(Duration::from_secs(30), 100),
+                Stage::new(Duration::from_secs(120), 100),
+                Stage::new(Duration::from_secs(30), 0),
+            ]
+        );
+        for bad in ["", "30s", "30s:many", "soon:10", ",,"] {
+            assert!(Stage::parse_list(bad).is_err(), "{bad:?} parsed");
+        }
+    }
+
+    #[test]
+    fn stage_targets_move_linearly_between_stages() {
+        let stages = Stage::parse_list("10s:100,10s:100,10s:20").unwrap();
+        let at = |secs: f64| Stage::target_at(&stages, Duration::from_secs_f64(secs));
+        assert_eq!(at(0.0), 0);
+        assert_eq!(at(2.5), 25);
+        assert_eq!(at(10.0), 100);
+        assert_eq!(at(15.0), 100);
+        assert_eq!(at(25.0), 60);
+        assert_eq!(at(30.0), 20);
+        assert_eq!(at(99.0), 20);
+    }
+
+    #[test]
+    fn stages_set_connections_and_duration_and_are_validated() {
+        let target = "ws://127.0.0.1:9001";
+        let config = LoadTestConfig::builder(target)
+            .connections(5)
+            .duration(Duration::from_secs(1))
+            .stages(Stage::parse_list("1s:10,2s:40,1s:0").unwrap())
+            .build()
+            .unwrap();
+        assert_eq!(config.connections(), 40);
+        assert_eq!(config.duration(), Duration::from_secs(4));
+        assert_eq!(config.stages().len(), 3);
+
+        let error = |stages: &str, ramp: u64| {
+            LoadTestConfig::builder(target)
+                .ramp_rate(ramp)
+                .stages(Stage::parse_list(stages).unwrap())
+                .build()
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(error("1s:10", 5).contains("--ramp-rate"));
+        assert!(error("1s:10,0s:5", 0).contains("stage 2 has a zero duration"));
+        assert!(error("1s:0,1s:0", 0).contains("greater than zero"));
+    }
     use super::*;
 
     #[test]

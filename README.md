@@ -49,6 +49,9 @@ wsblast ws://127.0.0.1:9001 -c 50 -d 10s --tui
 
 # Exit with 2 if p99 exceeds 25 ms or more than 1% of operations fail
 wsblast ws://127.0.0.1:9001 -c 50 -d 15s --max-p99 25ms --max-error-rate 0.01
+
+# Ramp up to 200 connections over 30 s, hold for 2 minutes, ramp down over 30 s
+wsblast ws://127.0.0.1:9001 --stages 30s:200,2m:200,30s:0 -r 10
 ```
 
 No server to test yet? `cargo run --release --example echo_server` in a clone of the repository starts an echo server on `127.0.0.1:9001`.
@@ -102,6 +105,7 @@ The most used options; `wsblast --help` lists them all.
 | `-c, --connections` | `50` | Concurrent connections |
 | `-d, --duration` | `10s` | Total run time, including the ramp |
 | `--ramp-rate` | `0` | Connections opened per second (`0` opens all at once) |
+| `--stages` | | Load profile instead of `-c`, `-d` and `--ramp-rate`: `DURATION:CONNECTIONS` stages such as `30s:100,2m:100,30s:0` |
 | `-r, --rate` | `0` | Messages per second per connection (`0` is unthrottled) |
 | `-n, --requests` | | Stop after this many messages in total |
 | `-p, --payload` / `--payload-file` | JSON template | Payload; `{{seq}}`, `{{timestamp}}` and `{{worker_id}}` are filled in per frame |

@@ -123,7 +123,7 @@ mod worker;
 pub use cli::{OutputFormat, TestMode};
 #[cfg(feature = "scenario")]
 pub use config::ScenarioConfig;
-pub use config::{LoadTestConfig, LoadTestConfigBuilder, ReplyMatch, SloThresholds};
+pub use config::{LoadTestConfig, LoadTestConfigBuilder, ReplyMatch, SloThresholds, Stage};
 pub use error::{ConfigError, ErrorCategory, Result, WorkerError, WsBlastError};
 pub use metrics::{AggregatedMetrics, LatencyStats, LiveSnapshot};
 #[cfg(feature = "scenario")]

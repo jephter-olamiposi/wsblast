@@ -2,6 +2,7 @@ complete -c wsblast -s u -l url -d 'Target WebSocket endpoint flag (alternative 
 complete -c wsblast -s c -l connections -d 'Number of concurrent WebSocket connection workers' -r
 complete -c wsblast -l ramp-rate -d 'Connection ramp rate in workers per second (0 = spawn all connections immediately)' -r
 complete -c wsblast -s d -l duration -d 'Total test duration including the connection ramp (e.g., \'10s\', \'30s\', \'2m\', \'500ms\')' -r
+complete -c wsblast -l stages -d 'Staged load profile instead of -c, -d and --ramp-rate: comma-separated DURATION:CONNECTIONS stages, each moving the connection count linearly from the previous target (starting at 0), e.g. \'30s:100,2m:100,30s:0\'' -r
 complete -c wsblast -s n -l requests -d 'Maximum total messages to send across all workers (optional limit)' -r
 complete -c wsblast -s r -l rate -d 'Message rate per connection per second (0 = unthrottled / maximum possible)' -r
 complete -c wsblast -s p -l payload -d 'Inline message payload to send (supports {{timestamp}}, {{worker_id}}, {{seq}})' -r

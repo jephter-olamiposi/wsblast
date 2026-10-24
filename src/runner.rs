@@ -2,7 +2,7 @@
 //! scenarios: worker spawning, the connection ramp, run duration, signals and
 //! the final metrics merge.
 
-use crate::config::LoadTestConfig;
+use crate::config::{LoadTestConfig, Stage};
 #[cfg(feature = "scenario")]
 use crate::config::{ScenarioConfig, ScenarioPhase};
 use crate::connect::ConnectTarget;
@@ -18,6 +18,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+
+/// How often a staged run adjusts its connection count.
+const STAGE_TICK: Duration = Duration::from_millis(10);
 
 /// Runs one load test: opens the configured connections, drives them until
 /// the duration or request limit is reached, and merges their metrics.
@@ -85,13 +88,14 @@ impl Runner {
         &self,
         worker_id: usize,
         target: &Arc<ConnectTarget>,
+        cancel_token: CancellationToken,
         metrics: WorkerMetrics,
     ) -> WorkerSession {
         let session = WorkerSession::new(
             worker_id,
             Arc::clone(&self.config),
             Arc::clone(target),
-            self.cancel_token.clone(),
+            cancel_token,
             metrics,
         );
         #[cfg(feature = "scenario")]
@@ -198,6 +202,96 @@ impl Runner {
         )
     }
 
+    /// Waits until the run is cancelled, by its timer, a limit or a signal,
+    /// drawing the progress bar meanwhile unless it is disabled.
+    async fn wait_until_done(&self, start_time: Instant) {
+        if !self.config.no_progress && !self.config.tui {
+            let pb = ProgressBar::new(self.config.duration.as_millis() as u64);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {percent}% | Conns: {msg} | Press Ctrl+C to stop")
+                    .unwrap_or_else(|_| ProgressStyle::default_bar())
+                    .progress_chars("#>-"),
+            );
+
+            // The refresh tick races cancellation so the run ends, and
+            // `elapsed` is taken, when the token fires rather than at the
+            // next refresh.
+            let mut refresh = tokio::time::interval(Duration::from_millis(100));
+            refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = self.cancel_token.cancelled() => break,
+                    _ = refresh.tick() => {}
+                }
+                let snap = self.live_metrics.snapshot();
+                let elapsed = start_time.elapsed();
+                let elapsed_ms = elapsed.as_millis() as u64;
+                pb.set_position(elapsed_ms.min(self.config.duration.as_millis() as u64));
+
+                let rps = if elapsed.as_secs_f64() > 0.0 {
+                    snap.messages_received as f64 / elapsed.as_secs_f64()
+                } else {
+                    0.0
+                };
+
+                pb.set_message(format!(
+                    "Active: {} | Msg/s: {:.1} | Recv: {} | Err: {}",
+                    snap.active_connections, rps, snap.messages_received, snap.total_errors
+                ));
+            }
+
+            pb.finish_and_clear();
+        } else {
+            self.cancel_token.cancelled().await;
+        }
+    }
+
+    /// Opens and closes connections to follow the configured stages until
+    /// the run is cancelled, and returns every worker it started.
+    async fn run_stages(
+        &self,
+        target: &Arc<ConnectTarget>,
+        interval_store: &Arc<IntervalStore>,
+        start_time: Instant,
+    ) -> Vec<tokio::task::JoinHandle<WorkerMetrics>> {
+        let mut open: Vec<(CancellationToken, tokio::task::JoinHandle<WorkerMetrics>)> = Vec::new();
+        let mut closed = Vec::new();
+        let mut next_id = 0usize;
+        let mut tick = tokio::time::interval(STAGE_TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.cancel_token.cancelled() => break,
+                _ = tick.tick() => {}
+            }
+            let wanted = Stage::target_at(&self.config.stages, start_time.elapsed());
+            while open.len() < wanted {
+                let Ok(metrics) = WorkerMetrics::new(Arc::clone(&self.live_metrics)) else {
+                    break;
+                };
+                let metrics =
+                    metrics.with_interval(IntervalRecorder::new(Arc::clone(interval_store)));
+                let token = self.cancel_token.child_token();
+                let session = self.create_session(next_id, target, token.clone(), metrics);
+                open.push((token, tokio::spawn(session.run())));
+                next_id += 1;
+            }
+            // Ramp down by closing the most recently opened connections.
+            while open.len() > wanted {
+                let Some((token, handle)) = open.pop() else {
+                    break;
+                };
+                token.cancel();
+                closed.push(handle);
+            }
+        }
+        closed.extend(open.into_iter().map(|(_, handle)| handle));
+        closed
+    }
+
     /// Runs the worker pool and returns the unmerged outcome.
     ///
     /// # Errors
@@ -262,26 +356,6 @@ impl Runner {
             duration_token.cancel();
         });
 
-        let mut handles = Vec::with_capacity(total_connections);
-        for worker_id in 0..total_connections {
-            if self.cancel_token.is_cancelled() {
-                break;
-            }
-
-            let metrics = WorkerMetrics::new(Arc::clone(&self.live_metrics))?
-                .with_interval(IntervalRecorder::new(Arc::clone(&interval_store)));
-            handles.push(tokio::spawn(
-                self.create_session(worker_id, &target, metrics).run(),
-            ));
-
-            if let Some(delay) = spawn_delay {
-                tokio::select! {
-                    _ = tokio::time::sleep(delay) => {}
-                    _ = self.cancel_token.cancelled() => break,
-                }
-            }
-        }
-
         if let Some(max_reqs) = self.config.max_requests {
             let req_token = self.cancel_token.clone();
             let live = Arc::clone(&self.live_metrics);
@@ -300,50 +374,42 @@ impl Runner {
             });
         }
 
-        if !self.config.no_progress && !self.config.tui {
-            let pb = ProgressBar::new(test_duration.as_millis() as u64);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {percent}% | Conns: {msg} | Press Ctrl+C to stop")
-                    .unwrap_or_else(|_| ProgressStyle::default_bar())
-                    .progress_chars("#>-"),
-            );
-
-            // The refresh tick races cancellation so the run ends, and
-            // `elapsed` is taken, when the token fires rather than at the
-            // next refresh.
-            let mut refresh = tokio::time::interval(Duration::from_millis(100));
-            refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = self.cancel_token.cancelled() => break,
-                    _ = refresh.tick() => {}
+        let (handles, connections, not_started) = if self.config.stages.is_empty() {
+            let mut handles = Vec::with_capacity(total_connections);
+            for worker_id in 0..total_connections {
+                if self.cancel_token.is_cancelled() {
+                    break;
                 }
-                let snap = self.live_metrics.snapshot();
-                let elapsed = start_time.elapsed();
-                let elapsed_ms = elapsed.as_millis() as u64;
-                pb.set_position(elapsed_ms.min(test_duration.as_millis() as u64));
 
-                let rps = if elapsed.as_secs_f64() > 0.0 {
-                    snap.messages_received as f64 / elapsed.as_secs_f64()
-                } else {
-                    0.0
-                };
-
-                pb.set_message(format!(
-                    "Active: {} | Msg/s: {:.1} | Recv: {} | Err: {}",
-                    snap.active_connections, rps, snap.messages_received, snap.total_errors
+                let metrics = WorkerMetrics::new(Arc::clone(&self.live_metrics))?
+                    .with_interval(IntervalRecorder::new(Arc::clone(&interval_store)));
+                handles.push(tokio::spawn(
+                    self.create_session(worker_id, &target, self.cancel_token.clone(), metrics)
+                        .run(),
                 ));
-            }
 
-            pb.finish_and_clear();
+                if let Some(delay) = spawn_delay {
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        _ = self.cancel_token.cancelled() => break,
+                    }
+                }
+            }
+            self.wait_until_done(start_time).await;
+            let not_started = (total_connections - handles.len()) as u64;
+            (handles, total_connections as u64, not_started)
         } else {
-            self.cancel_token.cancelled().await;
-        }
+            // Every slot a staged run opens is one it tried, so none is
+            // reported as not started.
+            let (handles, ()) = tokio::join!(
+                self.run_stages(&target, &interval_store, start_time),
+                self.wait_until_done(start_time)
+            );
+            let opened = handles.len() as u64;
+            (handles, opened, 0)
+        };
 
         let elapsed = start_time.elapsed();
-        let not_started = (total_connections - handles.len()) as u64;
 
         let mut worker_metrics = Vec::with_capacity(handles.len());
         for handle in handles {
@@ -358,7 +424,7 @@ impl Runner {
         Ok(RunOutcome {
             worker_metrics,
             elapsed,
-            connections: total_connections as u64,
+            connections,
             not_started,
             started_at: start_time,
             time_series,

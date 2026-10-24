@@ -29,7 +29,13 @@ Contents:
 
 Workers are spawned in order. With `--ramp-rate R` (workers per second), worker `i` starts at `i / R` seconds. With `--ramp-rate 0` (the default) all workers start at once.
 
-The ramp counts toward `--duration` (see [section 8](#8-run-duration-and-shutdown)). If `(connections - 1) / R` is at least the duration, wsblast prints a warning before the run, and the slots that were never started are reported as failed (see [section 7](#7-connection-accounting-and-reconnects)).
+The ramp counts toward `--duration` (see [section 8](#8-run-duration-and-shutdown)). If `(connections - 1) / R` is at least the duration, wsblast prints a warning before the run, and the slots that were never started are reported as not started (see [section 7](#7-connection-accounting-and-reconnects)).
+
+### 2.1.1 Load stages
+
+`--stages D1:N1,D2:N2,...` replaces `-c`, `-d` and `--ramp-rate` with a load profile. Over stage `i`, the target number of open connections moves linearly from `N(i-1)` (0 before the first stage) to `Ni` over `Di`, and stays at the last target after the last stage. Every 10 ms the runner compares the number of running workers with the target rounded to the nearest connection, starts new workers when it is below and stops the most recently started workers when it is above. A stopped worker closes its connection with a normal WebSocket close; one stopped during its first handshake counts as interrupted.
+
+The run lasts the sum of the stage durations, `connections` in the report is the highest target, and `total_connections_attempted` counts every worker the run started, so a profile that ramps down and up again (`10s:100,10s:20,10s:100`) attempts more connections than its peak (180 here). No slot is reported as not started. The time series' `active_connections` shows the profile the run achieved; with `--rate`, its throughput follows the profile too. `--stages` cannot be used with `--scenario`, whose phases set their own connections and ramp.
 
 ### 2.2 Message pacing
 

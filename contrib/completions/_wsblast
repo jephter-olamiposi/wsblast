@@ -22,6 +22,7 @@ _wsblast() {
 '--ramp-rate=[Connection ramp rate in workers per second (0 = spawn all connections immediately)]:WORKERS_PER_SEC:_default' \
 '-d+[Total test duration including the connection ramp (e.g., '\''10s'\'', '\''30s'\'', '\''2m'\'', '\''500ms'\'')]:DURATION:_default' \
 '--duration=[Total test duration including the connection ramp (e.g., '\''10s'\'', '\''30s'\'', '\''2m'\'', '\''500ms'\'')]:DURATION:_default' \
+'(-c --connections -d --duration --ramp-rate)--stages=[Staged load profile instead of -c, -d and --ramp-rate\: comma-separated DURATION\:CONNECTIONS stages, each moving the connection count linearly from the previous target (starting at 0), e.g. '\''30s\:100,2m\:100,30s\:0'\'']:STAGES:_default' \
 '-n+[Maximum total messages to send across all workers (optional limit)]:NUM:_default' \
 '--requests=[Maximum total messages to send across all workers (optional limit)]:NUM:_default' \
 '-r+[Message rate per connection per second (0 = unthrottled / maximum possible)]:MSG_PER_SEC:_default' \

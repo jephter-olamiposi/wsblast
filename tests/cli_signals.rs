@@ -239,6 +239,26 @@ async fn conflicting_flags_exit_with_code_1() {
 }
 
 #[tokio::test]
+async fn stages_conflict_with_connections_duration_and_ramp_rate() {
+    for flag in [["-c", "5"], ["-d", "2s"], ["--ramp-rate", "5"]] {
+        let mut args = vec!["ws://127.0.0.1:9", "--stages", "1s:5"];
+        args.extend(flag);
+        let finished = run_wsblast(&args).await;
+        assert_eq!(
+            finished.code,
+            Some(1),
+            "{flag:?}\nstderr:\n{}",
+            finished.stderr
+        );
+        assert!(
+            finished.stderr.contains("cannot be used with"),
+            "{flag:?}\nstderr:\n{}",
+            finished.stderr
+        );
+    }
+}
+
+#[tokio::test]
 async fn help_and_version_exit_with_code_0() {
     let help = run_wsblast(&["--help"]).await;
     assert_eq!(help.code, Some(0), "stderr:\n{}", help.stderr);

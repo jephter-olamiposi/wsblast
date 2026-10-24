@@ -25,6 +25,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --ramp-rate 'Connection ramp rate in workers per second (0 = spawn all connections immediately)'
             cand -d 'Total test duration including the connection ramp (e.g., ''10s'', ''30s'', ''2m'', ''500ms'')'
             cand --duration 'Total test duration including the connection ramp (e.g., ''10s'', ''30s'', ''2m'', ''500ms'')'
+            cand --stages 'Staged load profile instead of -c, -d and --ramp-rate: comma-separated DURATION:CONNECTIONS stages, each moving the connection count linearly from the previous target (starting at 0), e.g. ''30s:100,2m:100,30s:0'''
             cand -n 'Maximum total messages to send across all workers (optional limit)'
             cand --requests 'Maximum total messages to send across all workers (optional limit)'
             cand -r 'Message rate per connection per second (0 = unthrottled / maximum possible)'

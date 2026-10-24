@@ -580,6 +580,17 @@ fn time_windows(metrics: &AggregatedMetrics) -> Vec<TimeWindow> {
         .collect()
 }
 
+/// Describes a staged load profile as `DURATION:TARGET` pairs, the syntax of
+/// `--stages`.
+fn stages_label(config: &LoadTestConfig) -> String {
+    config
+        .stages
+        .iter()
+        .map(|stage| format!("{:?}:{}", stage.duration, stage.target))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Formats seconds since the run started, with one decimal only when the
 /// value is not a whole number of seconds.
 fn format_secs(secs: f64) -> String {
@@ -715,6 +726,9 @@ fn render_text_report(
         "Connections (Concurrency)",
         &config.connections.to_string(),
     ]);
+    if !config.stages.is_empty() {
+        meta_table.add_row(vec!["Load Stages", &stages_label(config)]);
+    }
     meta_table.add_row(vec![
         "Elapsed Duration",
         &format!("{:.2?}", metrics.elapsed),
@@ -960,6 +974,9 @@ fn render_markdown_report(
         "- **Concurrency:** `{}` workers\n",
         config.connections
     ));
+    if !config.stages.is_empty() {
+        md.push_str(&format!("- **Load Stages:** `{}`\n", stages_label(config)));
+    }
     md.push_str(&format!(
         "- **Connections:** `{}` established / `{}` failed / `{}` reconnects\n",
         metrics.total_connections_established,

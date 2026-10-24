@@ -8,7 +8,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use url::Url;
 use wsblast::{
     AggregatedMetrics, ErrorCategory, LoadTestConfig, LoadTestConfigBuilder, OutputFormat,
-    ReplyMatch, Runner, SloThresholds, TestMode, evaluate_slos, render_report,
+    ReplyMatch, Runner, SloThresholds, Stage, TestMode, evaluate_slos, render_report,
 };
 #[cfg(feature = "scenario")]
 use wsblast::{ScenarioConfig, ScenarioExecutor};
@@ -1819,5 +1819,66 @@ async fn test_unpaced_time_series_reports_rtt_per_interval() {
     let samples: u64 = series.points.iter().map(|p| p.latency.count).sum();
     assert_eq!(samples, metrics.message_rtt.count, "{series:?}");
     assert!(series.points.iter().all(|p| p.active_connections <= 2));
+    cancel_server.cancel();
+}
+
+#[tokio::test]
+async fn test_stages_ramp_up_down_and_up_again() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    // Up to 4 connections, down to 1, up to 3: the last stage opens 2 new
+    // connections, so 6 slots are opened in all.
+    let metrics = run(LoadTestConfig::builder(target_url.as_str())
+        .payload_text("stage")
+        .stages(vec![
+            Stage::new(Duration::from_millis(300), 4),
+            Stage::new(Duration::from_millis(300), 1),
+            Stage::new(Duration::from_millis(300), 3),
+            Stage::new(Duration::from_millis(300), 3),
+        ]))
+    .await;
+
+    assert_eq!(metrics.total_connections_attempted, 6, "{metrics:?}");
+    assert_eq!(metrics.total_connections_established, 6, "{metrics:?}");
+    assert_eq!(metrics.total_connections_failed, 0, "{metrics:?}");
+    assert_eq!(metrics.total_connections_not_started, 0, "{metrics:?}");
+    assert!(metrics.error_breakdown.is_empty(), "{metrics:?}");
+    assert!(metrics.elapsed >= Duration::from_millis(1_200));
+    assert!(
+        metrics.elapsed < Duration::from_millis(1_600),
+        "{metrics:?}"
+    );
+    cancel_server.cancel();
+}
+
+#[tokio::test]
+async fn test_stages_follow_the_profile_over_time() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    let metrics = run(LoadTestConfig::builder(target_url.as_str())
+        .payload_text("stage")
+        .rate_per_connection(20)
+        .stages(vec![
+            Stage::new(Duration::from_secs(1), 10),
+            Stage::new(Duration::from_secs(1), 10),
+            Stage::new(Duration::from_secs(1), 0),
+        ]))
+    .await;
+
+    let active: Vec<u64> = metrics
+        .time_series
+        .points
+        .iter()
+        .map(|p| p.active_connections)
+        .collect();
+    assert_eq!(active.len(), 3, "{active:?}");
+    // The first sample lands as the last connections of the ramp open.
+    assert!(active[0] >= 8, "{active:?}");
+    assert_eq!(active[1], 10, "{active:?}");
+    assert!(active[2] <= 1, "{active:?}");
+    // About 5 connections on average in the first second, 10 in the second.
+    let sent = |i: usize| metrics.time_series.points[i].messages_sent;
+    assert!(sent(1) > sent(0) + 50, "{:?}", metrics.time_series);
+    assert_eq!(metrics.total_connections_attempted, 10, "{metrics:?}");
     cancel_server.cancel();
 }

@@ -53,6 +53,16 @@ pub(crate) struct Cli {
     )]
     pub duration: String,
 
+    /// Staged load profile instead of -c, -d and --ramp-rate: comma-separated
+    /// DURATION:CONNECTIONS stages, each moving the connection count linearly
+    /// from the previous target (starting at 0), e.g. '30s:100,2m:100,30s:0'
+    #[arg(
+        long = "stages",
+        value_name = "STAGES",
+        conflicts_with_all = ["connections", "duration", "ramp_rate"]
+    )]
+    pub stages: Option<String>,
+
     /// Maximum total messages to send across all workers (optional limit)
     #[arg(short = 'n', long = "requests", value_name = "NUM")]
     pub requests: Option<u64>,

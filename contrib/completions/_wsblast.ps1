@@ -28,6 +28,7 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--ramp-rate', '--ramp-rate', [CompletionResultType]::ParameterName, 'Connection ramp rate in workers per second (0 = spawn all connections immediately)')
             [CompletionResult]::new('-d', '-d', [CompletionResultType]::ParameterName, 'Total test duration including the connection ramp (e.g., ''10s'', ''30s'', ''2m'', ''500ms'')')
             [CompletionResult]::new('--duration', '--duration', [CompletionResultType]::ParameterName, 'Total test duration including the connection ramp (e.g., ''10s'', ''30s'', ''2m'', ''500ms'')')
+            [CompletionResult]::new('--stages', '--stages', [CompletionResultType]::ParameterName, 'Staged load profile instead of -c, -d and --ramp-rate: comma-separated DURATION:CONNECTIONS stages, each moving the connection count linearly from the previous target (starting at 0), e.g. ''30s:100,2m:100,30s:0''')
             [CompletionResult]::new('-n', '-n', [CompletionResultType]::ParameterName, 'Maximum total messages to send across all workers (optional limit)')
             [CompletionResult]::new('--requests', '--requests', [CompletionResultType]::ParameterName, 'Maximum total messages to send across all workers (optional limit)')
             [CompletionResult]::new('-r', '-r', [CompletionResultType]::ParameterName, 'Message rate per connection per second (0 = unthrottled / maximum possible)')
