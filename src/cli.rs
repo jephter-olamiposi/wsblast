@@ -105,7 +105,7 @@ pub struct Cli {
     )]
     pub message_timeout: String,
 
-    /// Echo reply matching: first (default: the first data frame after a send is the reply), exact, or json:<POINTER>
+    /// Echo reply matching: first (default: the first data frame after a send is the reply), exact, or json:POINTER (an RFC 6901 pointer such as json:/seq)
     ///
     /// first: the first text or binary frame received after a send is taken as
     /// the reply, even when it is an unrelated server push such as a broadcast or
@@ -113,11 +113,11 @@ pub struct Cli {
     ///
     /// exact: the reply must be byte-identical to the frame that was sent.
     ///
-    /// json:<POINTER>: the reply is parsed as JSON and the value at the RFC 6901
+    /// json:POINTER: the reply is parsed as JSON and the value at the RFC 6901
     /// pointer (e.g. json:/seq) must equal this request's {{seq}}, as a number or
     /// a numeric string. The payload must contain {{seq}}.
     ///
-    /// With exact and json:<POINTER>, other data frames are counted as unsolicited
+    /// With exact and json:POINTER, other data frames are counted as unsolicited
     /// and the worker keeps waiting for its reply until --message-timeout.
     #[arg(long = "match", value_name = "MODE", default_value = "first")]
     pub reply_match: String,
