@@ -85,10 +85,10 @@ The report is written before wsblast exits, also when the gate fails. [docs/ci.m
 | :--- | :--- | :--- |
 | `scenario` | on | `--scenario` and `--phase`: multi-phase YAML scenarios with per-phase targets, actions and think time ([docs/scenarios.md](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/scenarios.md)) |
 | `compare` | on | `--compare`, `--compare-threshold` and `--fail-on-regression` for two JSON reports |
-| `auth` | off | `--auth-type static` (bearer token) and `--auth-type apikey` |
-| `graphql-ws` | off | `--mode graphql-ws` for `graphql-transport-ws` and legacy `graphql-ws` subscriptions |
+| `auth` | on | `--auth-type static` (bearer token) and `--auth-type apikey` |
+| `graphql-ws` | on | `--mode graphql-ws` for `graphql-transport-ws` and legacy `graphql-ws` subscriptions |
 
-`cargo install wsblast --features full` enables all four. Without `auth`, credentials can still be sent with `-H "Authorization: Bearer $TOKEN"`.
+All four are on by default, so `cargo install wsblast` and the release binaries include them; `--features full` is an alias for the same set. Library users can opt out with `default-features = false` and enable only what they need. Without `auth`, credentials can still be sent with `-H "Authorization: Bearer $TOKEN"`.
 
 ## Command-line reference
 
