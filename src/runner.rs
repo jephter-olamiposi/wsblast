@@ -1,4 +1,6 @@
-//! Test execution orchestrator and worker pool management.
+//! `Runner` for one load test and `ScenarioExecutor` for multi-phase
+//! scenarios: worker spawning, the connection ramp, run duration, signals and
+//! the final metrics merge.
 
 use crate::config::LoadTestConfig;
 #[cfg(feature = "scenario")]
@@ -114,15 +116,54 @@ impl Runner {
         self
     }
 
-    /// Spawns the worker pool, tracks real-time progress, and aggregates final metrics.
+    /// Runs the load test and returns the merged metrics.
     ///
-    /// Cancellation via timeout or interrupt signal gracefully stops all worker loops
-    /// and ensures all in-flight session metrics are aggregated without data loss.
+    /// Workers are started all at once or at the configured ramp rate. The run
+    /// ends when the duration (which includes the ramp) elapses, when the
+    /// request limit is reached, when [`Runner::cancel_token`] is cancelled,
+    /// or on Ctrl+C or SIGTERM unless signal handling is disabled. Every
+    /// worker then stops and its metrics are merged, so an early end still
+    /// returns everything measured until then. Connection failures are counted
+    /// in the metrics, not returned as errors.
+    ///
+    /// A runner runs once: its token stays cancelled after the run, so create
+    /// a new runner for the next run.
     ///
     /// # Errors
     ///
-    /// Returns [`crate::error::WsBlastError::Metrics`] if per-worker telemetry
-    /// initialization or histogram aggregation fails.
+    /// Returns [`WsBlastError::Metrics`](crate::WsBlastError::Metrics) if a
+    /// latency histogram cannot be created or merged.
+    ///
+    /// # Examples
+    ///
+    /// Run in a background task, watch progress, and end the run early:
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    /// use std::time::Duration;
+    /// use wsblast::{LoadTestConfig, Runner};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> wsblast::Result<()> {
+    /// let config = LoadTestConfig::builder("ws://127.0.0.1:9001")
+    ///     .duration(Duration::from_secs(60))
+    ///     .build()?;
+    /// let runner = Arc::new(Runner::new(config).with_signal_handling(false));
+    ///
+    /// let task = tokio::spawn({
+    ///     let runner = Arc::clone(&runner);
+    ///     async move { runner.run().await }
+    /// });
+    ///
+    /// tokio::time::sleep(Duration::from_secs(5)).await;
+    /// println!("{} replies so far", runner.live_snapshot().messages_received);
+    /// runner.cancel_token().cancel();
+    ///
+    /// let metrics = task.await.expect("runner task panicked")?;
+    /// println!("{} messages in {:?}", metrics.total_messages_sent, metrics.elapsed);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn run(&self) -> crate::error::Result<AggregatedMetrics> {
         let outcome = self.run_and_collect().await?;
 
@@ -404,6 +445,7 @@ fn check_file_descriptor_limit(required_conns: usize) {
 
 /// Result of a scenario run.
 #[cfg(feature = "scenario")]
+#[cfg_attr(docsrs, doc(cfg(feature = "scenario")))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ScenarioOutcome {
@@ -416,7 +458,12 @@ pub struct ScenarioOutcome {
 }
 
 /// Runs the phases of a [`ScenarioConfig`] one after another.
+///
+/// Each phase gets its own [`Runner`] with the phase's connections, duration,
+/// ramp, rate, payload and actions; the base configuration supplies
+/// everything else. Phases are separated by a 500 ms pause.
 #[cfg(feature = "scenario")]
+#[cfg_attr(docsrs, doc(cfg(feature = "scenario")))]
 pub struct ScenarioExecutor {
     scenario_name: String,
     phases: Vec<ScenarioPhase>,
@@ -436,11 +483,16 @@ impl ScenarioExecutor {
     /// authentication, headers, timeouts, SLOs, and output preferences. Each
     /// phase overrides sizing, payload, and pacing.
     ///
+    /// For each phase the target is `target_override`, then the phase's
+    /// `target`, then the scenario's `target`. Set `phase` to run only the
+    /// named phase.
+    ///
     /// # Errors
     ///
-    /// Returns [`crate::error::ConfigError::InvalidScenario`] when the requested
-    /// phase is missing, a phase definition fails validation, or a phase has
-    /// no target from the command line, the phase, or the scenario.
+    /// Returns [`ConfigError::InvalidScenario`](crate::ConfigError::InvalidScenario)
+    /// when the scenario fails validation, the requested phase is missing, or a
+    /// phase has no target from any of the three sources, and URL errors for an
+    /// unparsable or non-WebSocket target.
     pub fn new(
         scenario: &ScenarioConfig,
         base_config: LoadTestConfig,
@@ -494,8 +546,8 @@ impl ScenarioExecutor {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::error::WsBlastError::Metrics`] if per-phase telemetry
-    /// initialization fails.
+    /// Returns [`WsBlastError::Metrics`](crate::WsBlastError::Metrics) if a
+    /// latency histogram cannot be created or merged.
     pub async fn run(&self) -> crate::error::Result<ScenarioOutcome> {
         let mut all_worker_metrics = Vec::new();
         let mut total_elapsed = Duration::ZERO;

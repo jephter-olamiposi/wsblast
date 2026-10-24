@@ -1,4 +1,5 @@
-//! wsblast - High-performance WebSocket load testing CLI with percentile latency & CI gating.
+//! The `wsblast` command-line entry point. The command lives in the library
+//! so the binary and the library share one engine.
 
 #[tokio::main]
 async fn main() {
