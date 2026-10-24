@@ -204,11 +204,6 @@ jobs:
   machete:
     name: Unused dependencies
     runs-on: ubuntu-latest
-    # cargo-machete currently reports rand and sha2 (unused today) plus
-    # flate2, prost-types and tower (only referenced through optional
-    # features). The v0.2.0 dependency cleanup removes all five; drop
-    # continue-on-error once it lands.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2

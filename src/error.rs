@@ -18,9 +18,6 @@ pub enum WsBlastError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
-    #[error("SLO threshold breached: {0}")]
-    SloBreach(String),
-
     #[error("Metrics initialization failed: {0}")]
     Metrics(String),
 }
@@ -45,11 +42,14 @@ pub enum ConfigError {
     #[error("Concurrency must be greater than zero, received {0}")]
     ZeroConcurrency(usize),
 
-    #[error("Rate must be greater than zero, received {0}")]
-    ZeroRate(u64),
-
     #[error("Invalid threshold specification: {0}")]
     InvalidThreshold(String),
+
+    #[error("Invalid authentication options: {0}")]
+    InvalidAuth(String),
+
+    #[error("Invalid option: {0}")]
+    InvalidOption(String),
 
     #[error("Invalid scenario: {0}")]
     InvalidScenario(String),
@@ -98,9 +98,6 @@ pub enum WorkerError {
 
     #[error("Connection closed unexpectedly: code={code:?}, reason={reason}")]
     UnexpectedClose { code: Option<u16>, reason: String },
-
-    #[error("Internal channel closed unexpectedly")]
-    ChannelClosed,
 }
 
 /// Error category taxonomy for metric aggregation and CI/CD diagnostic reporting.
@@ -148,7 +145,6 @@ impl From<&WorkerError> for ErrorCategory {
             WorkerError::Read(_) => Self::ReadError,
             WorkerError::Timeout(_) => Self::Timeout,
             WorkerError::UnexpectedClose { .. } => Self::UnexpectedClose,
-            WorkerError::ChannelClosed => Self::Other,
         }
     }
 }
