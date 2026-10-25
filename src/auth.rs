@@ -326,6 +326,37 @@ impl WarningLimiter {
     }
 }
 
+/// What a distributed run needs of a refreshed header: the coordinator
+/// reads each new value and sends it to its agents, and an agent keeps the
+/// value it receives in a header of its own, which its handshakes read as
+/// they would on a single machine.
+#[cfg(feature = "distributed")]
+impl LiveAuthHeader {
+    /// A header holding `value`, updated only through
+    /// [`replace`](Self::replace).
+    pub(crate) fn received(name: HeaderName, value: HeaderValue) -> Self {
+        Self::new(name, value)
+    }
+
+    /// The header name.
+    pub(crate) fn name(&self) -> &HeaderName {
+        &self.name
+    }
+
+    /// The current value.
+    pub(crate) fn current(&self) -> HeaderValue {
+        self.value
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Replaces the value for every later handshake.
+    pub(crate) fn replace(&self, value: HeaderValue) {
+        self.set(value);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

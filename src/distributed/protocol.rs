@@ -23,7 +23,7 @@ use std::time::Duration;
 /// message after `hello`.
 ///
 /// Version 2 added scenario phases (several `prepare` to `result` rounds on
-/// one connection) and capture records.
+/// one connection), capture records and refreshed authentication tokens.
 pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The shortest agent token accepted.
@@ -58,6 +58,9 @@ pub(crate) enum Message {
         elapsed: Duration,
         live: WireSnapshot,
     },
+    /// Coordinator to agent: the new value of a refreshed authentication
+    /// header, for every handshake from now on.
+    Token { value: String },
     /// Agent to coordinator: capture records of the phase in progress.
     Capture { records: Vec<WireRecord> },
     /// Coordinator to agent: end the run early (Ctrl+C on the coordinator).
@@ -92,6 +95,7 @@ impl Message {
             Self::Ready { .. } => "ready",
             Self::Start => "start",
             Self::Snapshot { .. } => "snapshot",
+            Self::Token { .. } => "token",
             Self::Capture { .. } => "capture",
             Self::Stop => "stop",
             Self::Result { .. } => "result",
@@ -256,6 +260,22 @@ pub(crate) struct WireCapture {
     pub(crate) limit: Option<u64>,
 }
 
+/// A header on the wire: name and value.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireHeader {
+    pub(crate) name: String,
+    pub(crate) value: String,
+}
+
+impl std::fmt::Debug for WireHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WireHeader")
+            .field("name", &self.name)
+            .field("value", &"[redacted]")
+            .finish()
+    }
+}
+
 /// GraphQL WS settings on the wire.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WireGraphql {
@@ -303,6 +323,10 @@ pub(crate) struct WireConfig {
     /// Set when the coordinator captures frames.
     #[serde(default)]
     pub(crate) capture: Option<WireCapture>,
+    /// The current value of an authentication header the coordinator
+    /// refreshes; later values arrive in `token` messages.
+    #[serde(default)]
+    pub(crate) live_auth: Option<WireHeader>,
 }
 
 fn unsupported(message: impl Into<String>) -> WsBlastError {
@@ -311,12 +335,6 @@ fn unsupported(message: impl Into<String>) -> WsBlastError {
 
 /// Rejects settings a distributed run does not support in this version.
 pub(crate) fn check_supported(config: &LoadTestConfig) -> Result<()> {
-    #[cfg(feature = "auth")]
-    if config.live_auth.is_some() {
-        return Err(unsupported(
-            "--auth-token-refresh is not supported with --agents",
-        ));
-    }
     if config.tui {
         return Err(unsupported(
             "--tui is not supported with --agents; the coordinator prints progress lines instead",
@@ -427,6 +445,14 @@ impl WireConfig {
         });
         #[cfg(not(feature = "graphql-ws"))]
         let graphql = None;
+        #[cfg(feature = "auth")]
+        let live_auth = config
+            .live_auth
+            .as_ref()
+            .map(|live| wire_header(live.name(), &live.current()))
+            .transpose()?;
+        #[cfg(not(feature = "auth"))]
+        let live_auth = None;
         Ok(Self {
             target: config.target_url.to_string(),
             mode: mode_name(config.mode),
@@ -455,6 +481,7 @@ impl WireConfig {
             graphql,
             phase: None,
             capture: None,
+            live_auth,
         })
     }
 
@@ -535,6 +562,20 @@ impl WireConfig {
             }
         }
         let mut config = builder.build()?;
+        if let Some(header) = self.live_auth {
+            #[cfg(feature = "auth")]
+            {
+                let (name, value) = header.parse()?;
+                config.live_auth = Some(crate::auth::LiveAuthHeader::received(name, value));
+            }
+            #[cfg(not(feature = "auth"))]
+            {
+                let _ = header;
+                return Err(unsupported(
+                    "a refreshed authentication token needs the 'auth' feature, which this agent's build of wsblast does not include",
+                ));
+            }
+        }
         if let Some(share) = self.stage_share {
             if share.agents == 0 || share.index >= share.agents {
                 return Err(ConfigError::InvalidOption(format!(
@@ -556,6 +597,48 @@ impl WireConfig {
         }
         Ok(config)
     }
+}
+
+/// A header for the wire. The value is never part of an error message.
+#[cfg(feature = "auth")]
+pub(crate) fn wire_header(
+    name: &http::HeaderName,
+    value: &http::HeaderValue,
+) -> Result<WireHeader> {
+    let value = value.to_str().map_err(|_| {
+        WsBlastError::from(ConfigError::InvalidHeader(format!(
+            "the value of header '{name}' is not visible ASCII and cannot be sent to agents"
+        )))
+    })?;
+    Ok(WireHeader {
+        name: name.as_str().to_string(),
+        value: value.to_string(),
+    })
+}
+
+impl WireHeader {
+    /// The header name and a sensitive value. The value is never part of an
+    /// error message.
+    #[cfg(feature = "auth")]
+    pub(crate) fn parse(&self) -> Result<(http::HeaderName, http::HeaderValue)> {
+        let name = http::HeaderName::from_bytes(self.name.as_bytes()).map_err(|_| {
+            ConfigError::InvalidHeader(format!("invalid header name '{}'", self.name))
+        })?;
+        Ok((name, sensitive_value(&self.value)?))
+    }
+}
+
+/// A header value marked sensitive. The value is never part of an error
+/// message.
+#[cfg(feature = "auth")]
+pub(crate) fn sensitive_value(value: &str) -> Result<http::HeaderValue> {
+    let mut value = http::HeaderValue::from_str(value).map_err(|_| {
+        ConfigError::InvalidHeader(
+            "the refreshed authentication header value is not a valid header value".to_string(),
+        )
+    })?;
+    value.set_sensitive(true);
+    Ok(value)
 }
 
 #[cfg(feature = "scenario")]
@@ -1249,6 +1332,13 @@ phases:
 
     #[test]
     fn version_2_messages_round_trip() {
+        let token = Message::Token {
+            value: "Bearer abc".to_string(),
+        };
+        assert!(matches!(
+            Message::decode(&token.encode()).unwrap(),
+            Message::Token { value } if value == "Bearer abc"
+        ));
         let record = WireRecord {
             t_us: 5,
             worker: 1,
@@ -1267,6 +1357,11 @@ phases:
             Message::decode(&encoded).unwrap(),
             Message::Capture { records } if records == [record]
         ));
+        let header = WireHeader {
+            name: "authorization".to_string(),
+            value: "Bearer secret".to_string(),
+        };
+        assert!(!format!("{header:?}").contains("secret"));
     }
 
     #[test]

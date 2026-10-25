@@ -1065,6 +1065,137 @@ async fn a_scenario_capture_spans_every_phase() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An echo server that records the `Authorization` header of every
+/// handshake and closes each connection after `replies` echoes, so workers
+/// reconnect.
+async fn spawn_recording_target(
+    stop: &CancellationToken,
+    replies: usize,
+) -> (
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+) {
+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://127.0.0.1:{}/", listener.local_addr().unwrap().port());
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stop = stop.clone();
+    let recorded = std::sync::Arc::clone(&seen);
+    tokio::spawn(async move {
+        loop {
+            let (tcp, _) = tokio::select! {
+                accepted = listener.accept() => accepted.unwrap(),
+                () = stop.cancelled() => return,
+            };
+            let seen = std::sync::Arc::clone(&recorded);
+            tokio::spawn(async move {
+                #[allow(clippy::result_large_err)]
+                let record = |request: &Request, response: Response| {
+                    let value = request
+                        .headers()
+                        .get("authorization")
+                        .map(|v| v.to_str().unwrap().to_string());
+                    seen.lock().unwrap().push(value);
+                    Ok(response)
+                };
+                let Ok(ws) = tokio_tungstenite::accept_hdr_async(tcp, record).await else {
+                    return;
+                };
+                let (mut sink, mut reader) = ws.split();
+                let mut echoed = 0;
+                while let Some(Ok(message)) = reader.next().await {
+                    if let Message::Text(text) = message {
+                        let _ = sink.send(Message::Text(text)).await;
+                        echoed += 1;
+                        if echoed == replies {
+                            let _ = sink.send(Message::Close(None)).await;
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    (url, seen)
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refreshed_tokens_reach_every_agent() {
+    let harness = harness(2, None).await;
+    let (target, seen) = spawn_recording_target(&harness.stop, 15).await;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("distributed-refresh");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let counter = dir.join("count");
+    let script = dir.join("token.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "n=$(cat '{counter}' 2>/dev/null || echo 0)\nn=$((n + 1))\necho $n > '{counter}'\necho secret-token-$n\n",
+            counter = counter.display()
+        ),
+    )
+    .unwrap();
+    let command = format!("sh '{}'", script.display());
+    let agents = harness.agents.join(",");
+    let finished = wsblast(
+        &[
+            &target,
+            "-c",
+            "2",
+            "-d",
+            "2500ms",
+            "-r",
+            "60",
+            "--no-progress",
+            "--auth-type",
+            "static",
+            "--auth-token-cmd",
+            &command,
+            "--auth-token-refresh",
+            "300ms",
+            "--agents",
+            &agents,
+        ],
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+    // Tokens never appear in the coordinator's output.
+    assert!(
+        !finished.stderr.contains("secret-token"),
+        "{}",
+        finished.stderr
+    );
+    assert!(
+        !finished.stdout.contains("secret-token"),
+        "{}",
+        finished.stdout
+    );
+
+    let tokens: Vec<u32> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|value| {
+            value
+                .as_deref()
+                .and_then(|v| v.strip_prefix("Bearer secret-token-"))
+                .and_then(|n| n.parse().ok())
+                .unwrap_or_else(|| panic!("unexpected header {value:?}"))
+        })
+        .collect();
+    assert!(tokens.len() >= 6, "too few handshakes: {tokens:?}");
+    // The first handshakes carry the token of the run's start, and both
+    // agents' reconnects late in the run carry refreshed ones: an agent left
+    // with the first token would show it there.
+    assert!(tokens[..2].iter().all(|&n| n <= 2), "{tokens:?}");
+    let late = &tokens[tokens.len() * 2 / 3..];
+    assert!(late.iter().all(|&n| n >= 3), "{tokens:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_of_another_protocol_version_gets_a_clear_error() {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;

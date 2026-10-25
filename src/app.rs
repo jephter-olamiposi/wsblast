@@ -490,10 +490,6 @@ fn check_distributed_options(cli: &Cli) -> Result<()> {
     if cli.tui {
         unsupported.push("--tui");
     }
-    #[cfg(feature = "auth")]
-    if cli.auth_token_refresh.is_some() {
-        unsupported.push("--auth-token-refresh");
-    }
     if cli.prometheus_listen.is_some() {
         unsupported.push("--prometheus-listen");
     }
@@ -564,7 +560,8 @@ async fn run_distributed(cli: &Cli) -> Result<()> {
     #[cfg(not(feature = "scenario"))]
     let config = LoadTestConfig::from_cli(cli.clone())?;
     // Credentials are resolved here, once, and sent to the agents as
-    // handshake headers; a refreshed token was rejected above.
+    // handshake headers; a refreshed token is pushed to them as it changes,
+    // for as long as the guard lives.
     #[cfg(feature = "auth")]
     let mut config = config;
     #[cfg(feature = "auth")]

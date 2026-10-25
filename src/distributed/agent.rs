@@ -476,14 +476,18 @@ where
     let live = LiveMetrics::new();
     let mut wait = SETUP_TIMEOUT;
     loop {
-        let (wire, start_timeout) = match recv_within(stream, wait, cancel).await {
-            Ok(Message::Prepare {
-                config,
-                start_timeout,
-            }) => (config, start_timeout),
-            Ok(Message::Stop) | Err(RecvError::Closed(_)) => return Ok(()),
-            Ok(other) => return Err(unexpected(&other, "prepare")),
-            Err(RecvError::Invalid(reason)) => return Err(reason),
+        let (wire, start_timeout) = loop {
+            match recv_within(stream, wait, cancel).await {
+                Ok(Message::Prepare {
+                    config,
+                    start_timeout,
+                }) => break (config, start_timeout),
+                // The next `prepare` carries the current value.
+                Ok(Message::Token { .. }) => {}
+                Ok(Message::Stop) | Err(RecvError::Closed(_)) => return Ok(()),
+                Ok(other) => return Err(unexpected(&other, "prepare")),
+                Err(RecvError::Invalid(reason)) => return Err(reason),
+            }
         };
         // The coordinator sends the next phase once every agent's result is
         // in, at most the agent timeout after the end of this one.
@@ -524,6 +528,21 @@ fn phase_runner(
         Some(_) => Err(
             "invalid configuration: scenario phases need the 'scenario' feature, which this agent's build of wsblast does not include"
                 .to_string(),
+        ),
+    }
+}
+
+/// Applies a refreshed authentication header value. The value is never
+/// logged.
+#[cfg(feature = "auth")]
+fn apply_token(live: Option<&crate::auth::LiveAuthHeader>, value: &str, peer: SocketAddr) {
+    let Some(live) = live else {
+        return;
+    };
+    match super::protocol::sensitive_value(value) {
+        Ok(value) => live.replace(value),
+        Err(_) => eprintln!(
+            "wsblast agent: ignored a refreshed authentication header from {peer} that is not a valid header value"
         ),
     }
 }
@@ -591,6 +610,8 @@ where
         "wsblast agent: test from {peer}{phase_label}: {} with {sizing}",
         config.target_url
     );
+    #[cfg(feature = "auth")]
+    let live_auth = config.live_auth.clone();
 
     // The runner is built once `start` arrives, so a capture counts from the
     // same instant as the run; this one only resolves the target.
@@ -607,11 +628,19 @@ where
         .await
         .map_err(closed)?;
 
-    match recv_within(stream, start_timeout + START_SLACK, cancel).await {
-        Ok(Message::Start) => {}
-        Ok(Message::Stop) | Err(RecvError::Closed(_)) => return Ok(PhaseEnd::CoordinatorGone),
-        Ok(other) => return Err(unexpected(&other, "start")),
-        Err(RecvError::Invalid(reason)) => return Err(reason),
+    let start_wait = tokio::time::Instant::now() + start_timeout + START_SLACK;
+    loop {
+        let limit = start_wait.saturating_duration_since(tokio::time::Instant::now());
+        match recv_within(stream, limit, cancel).await {
+            Ok(Message::Start) => break,
+            #[cfg(feature = "auth")]
+            Ok(Message::Token { value }) => apply_token(live_auth.as_ref(), &value, peer),
+            #[cfg(not(feature = "auth"))]
+            Ok(Message::Token { .. }) => {}
+            Ok(Message::Stop) | Err(RecvError::Closed(_)) => return Ok(PhaseEnd::CoordinatorGone),
+            Ok(other) => return Err(unexpected(&other, "start")),
+            Err(RecvError::Invalid(reason)) => return Err(reason),
+        }
     }
 
     let started_at_unix_ms = SystemTime::now()
@@ -679,6 +708,8 @@ where
             }
             received = recv(stream), if !coordinator_gone => match received {
                 Ok(Message::Stop) => run_cancel.cancel(),
+                #[cfg(feature = "auth")]
+                Ok(Message::Token { value }) => apply_token(live_auth.as_ref(), &value, peer),
                 Ok(_) | Err(RecvError::Invalid(_)) => {}
                 Err(RecvError::Closed(_)) => {
                     coordinator_gone = true;

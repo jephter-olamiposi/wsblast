@@ -2,7 +2,7 @@
 //! [`Coordinator`] (`wsblast URL --agents ...`) that splits a run between
 //! them, starts them together and merges their results. A scenario runs
 //! phase by phase, each phase split, started and merged the same way; frame
-//! capture works across the agents too.
+//! capture and refreshed authentication tokens work across the agents too.
 //!
 //! The coordinator and the agents talk over a WebSocket control channel,
 //! authenticated with a shared token sent as `Authorization: Bearer` and

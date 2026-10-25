@@ -31,7 +31,8 @@ use url::Url;
 /// Default for [`Coordinator::agent_timeout`].
 pub const DEFAULT_AGENT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How often the coordinator refreshes its live counters.
+/// How often the coordinator refreshes its live counters and its check for
+/// a refreshed authentication token.
 const LIVE_TICK: Duration = Duration::from_millis(100);
 
 /// Pause between scenario phases, as on a single machine.
@@ -214,6 +215,7 @@ struct Follow {
     stop: watch::Receiver<bool>,
     deadline: tokio::time::Instant,
     agent_timeout: Duration,
+    token: Option<watch::Receiver<String>>,
     #[cfg(feature = "capture")]
     capture: Option<CaptureSink>,
 }
@@ -285,9 +287,8 @@ impl Coordinator {
     ///
     /// Returns a configuration error for an invalid or repeated agent
     /// address, a token shorter than 16 characters, a setting distributed
-    /// runs do not support in this version (a refreshed auth token, the
-    /// TUI), or a configuration that cannot be split, such as fewer
-    /// connections than agents.
+    /// runs do not support (the TUI), or a configuration that cannot be
+    /// split, such as fewer connections than agents.
     pub fn new<I, S>(config: LoadTestConfig, agents: I, token: impl Into<String>) -> Result<Self>
     where
         I: IntoIterator<Item = S>,
@@ -750,6 +751,11 @@ impl Coordinator {
                 share.capture = Some(super::protocol::WireCapture { limit });
             }
         }
+        let token_value = shares
+            .first()
+            .and_then(|share| share.live_auth.as_ref())
+            .map(|h| h.value.clone());
+
         // The barrier: every agent still in the run prepares this phase.
         let prepares = futures_util::future::join_all(session.links.iter_mut().zip(shares).map(
             |(link, share)| async move {
@@ -836,6 +842,7 @@ impl Coordinator {
         let capture_sink = session.start_capture(start, &self.agent_names())?;
 
         let (stop_tx, stop_rx) = watch::channel(false);
+        let (token_tx, token_rx) = watch::channel(token_value.clone().unwrap_or_default());
         let result_deadline =
             tokio::time::Instant::from_std(start + spec.config.duration + self.agent_timeout);
         let mut tasks = Vec::with_capacity(self.agents.len());
@@ -850,6 +857,7 @@ impl Coordinator {
                 stop: stop_rx.clone(),
                 deadline: result_deadline,
                 agent_timeout: self.agent_timeout,
+                token: token_value.is_some().then(|| token_rx.clone()),
                 #[cfg(feature = "capture")]
                 capture: capture_sink.clone(),
             };
@@ -861,6 +869,7 @@ impl Coordinator {
             })));
         }
         drop(stop_rx);
+        drop(token_rx);
         #[cfg(feature = "capture")]
         drop(capture_sink);
 
@@ -875,6 +884,8 @@ impl Coordinator {
         let mut ticker = tokio::time::interval(LIVE_TICK);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut stop_sent = false;
+        #[cfg(feature = "auth")]
+        let mut token_warned = false;
         let finished = loop {
             tokio::select! {
                 finished = &mut all => break finished,
@@ -900,9 +911,26 @@ impl Coordinator {
                             sum.total_errors
                         ));
                     }
+                    #[cfg(feature = "auth")]
+                    if let (Some(live_auth), Some(_)) = (&spec.config.live_auth, &token_value) {
+                        match live_auth.current().to_str() {
+                            Ok(value) if *token_tx.borrow() != value => {
+                                let _ = token_tx.send(value.to_string());
+                            }
+                            Ok(_) => {}
+                            Err(_) if !token_warned => {
+                                token_warned = true;
+                                eprintln!(
+                                    "Warning: a refreshed authentication header value is not visible ASCII and cannot be sent to the agents; they keep the previous value"
+                                );
+                            }
+                            Err(_) => {}
+                        }
+                    }
                 }
             }
         };
+        drop(token_tx);
         if let Some(bar) = progress {
             bar.finish_and_clear();
         }
@@ -1406,10 +1434,12 @@ async fn follow_agent(
         mut stop,
         mut deadline,
         agent_timeout,
+        mut token,
         #[cfg(feature = "capture")]
         capture,
     } = follow;
     let mut stopped = false;
+    let mut token_open = token.is_some();
     loop {
         tokio::select! {
             received = recv(&mut link.stream) => match received {
@@ -1451,6 +1481,22 @@ async fn follow_agent(
                 }
                 Err(RecvError::Invalid(reason)) => return (None, Err(reason)),
             },
+            changed = async {
+                match token.as_mut() {
+                    Some(token) => token.changed().await,
+                    None => std::future::pending().await,
+                }
+            }, if token_open => {
+                if changed.is_err() {
+                    token_open = false;
+                    continue;
+                }
+                let value = token
+                    .as_mut()
+                    .map(|token| token.borrow_and_update().clone())
+                    .unwrap_or_default();
+                let _ = send(&mut link.sink, &Message::Token { value }).await;
+            }
             _ = stop.changed(), if !stopped => {
                 stopped = true;
                 if *stop.borrow() {
