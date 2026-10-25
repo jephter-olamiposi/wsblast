@@ -140,7 +140,7 @@ pub use timeseries::{IntervalLatency, TimeSeries, TimeSeriesPoint};
 pub mod __private {
     pub use crate::app::run_cli;
     pub use crate::config::parse_human_duration;
-    pub use crate::metrics::{LiveMetrics, WorkerMetrics};
+    pub use crate::metrics::{CounterShard, LiveMetrics, WorkerMetrics};
 
     /// Merges per-worker metrics as the runner does at the end of a run.
     pub fn merge_worker_metrics(

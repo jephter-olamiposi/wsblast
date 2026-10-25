@@ -8,7 +8,6 @@ use crate::metrics::{ErrorScope, WorkerMetrics};
 use bytes::Bytes;
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::{MissedTickBehavior, interval};
@@ -243,14 +242,6 @@ impl WorkerSession {
                 break;
             }
 
-            if let Some(max_reqs) = self.config.max_requests
-                && self.metrics.live.messages_sent.load(Ordering::Relaxed) >= max_reqs
-            {
-                self.cancel_token.cancel();
-                let _ = sink.send(Message::Close(None)).await;
-                break;
-            }
-
             let due = schedule.as_ref().map(|s| s.next_due);
             if let Some(due) = due {
                 // Keepalive ticks that land while waiting for the pacing slot
@@ -278,6 +269,12 @@ impl WorkerSession {
                 if pt.tick().now_or_never().is_some() {
                     let _ = sink.send(Message::Ping(Bytes::from_static(b"hb"))).await;
                 }
+            }
+
+            if !self.claim_send() {
+                self.cancel_token.cancel();
+                let _ = sink.send(Message::Close(None)).await;
+                break;
             }
 
             let msg = self.render_payload(seq);
@@ -387,16 +384,13 @@ impl WorkerSession {
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
-            if let Some(max_reqs) = self.config.max_requests
-                && self.metrics.live.messages_sent.load(Ordering::Relaxed) >= max_reqs
-            {
-                self.cancel_token.cancel();
-                let _ = sink.send(Message::Close(None)).await;
-                break;
-            }
-
             tokio::select! {
                 _ = ticker.tick() => {
+                    if !self.claim_send() {
+                        self.cancel_token.cancel();
+                        let _ = sink.send(Message::Close(None)).await;
+                        break;
+                    }
                     let msg = self.render_payload(seq);
                     let len = message_byte_len(&msg);
                     if let Err(e) = sink.send(msg).await {
@@ -555,10 +549,7 @@ impl WorkerSession {
                 match action {
                     ScenarioAction::Send { payload, count } => {
                         for _ in 0..*count {
-                            if self.cancel_token.is_cancelled() || self.max_requests_reached() {
-                                if self.max_requests_reached() {
-                                    self.cancel_token.cancel();
-                                }
+                            if self.cancel_token.is_cancelled() {
                                 let _ = sink.send(Message::Close(None)).await;
                                 break 'script;
                             }
@@ -571,6 +562,12 @@ impl WorkerSession {
                                         break 'script;
                                     }
                                 }
+                            }
+
+                            if !self.claim_send() {
+                                self.cancel_token.cancel();
+                                let _ = sink.send(Message::Close(None)).await;
+                                break 'script;
                             }
 
                             let active_payload = payload.as_ref().unwrap_or(&self.config.payload);
@@ -688,7 +685,15 @@ impl WorkerSession {
     fn max_requests_reached(&self) -> bool {
         self.config
             .max_requests
-            .is_some_and(|max| self.metrics.live.messages_sent.load(Ordering::Relaxed) >= max)
+            .is_some_and(|max| self.metrics.live.requests_exhausted(max))
+    }
+
+    /// Claims the next send against `--requests`. Returns false once the
+    /// limit is used up; always true without a limit.
+    fn claim_send(&self) -> bool {
+        self.config
+            .max_requests
+            .is_none_or(|max| self.metrics.live.claim_request(max))
     }
 
     /// Pauses for the phase think-time, returning false when cancellation fires.

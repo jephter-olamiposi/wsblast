@@ -676,7 +676,7 @@ async fn test_requests_limit_enforcement() {
 
     // Must finish well under the 30s configured duration
     assert!(elapsed < Duration::from_secs(5));
-    assert!(metrics.total_messages_sent >= 30);
+    assert_eq!(metrics.total_messages_sent, 30);
     assert_eq!(metrics.error_rate, 0.0);
 
     cancel_server.cancel();
@@ -1880,5 +1880,50 @@ async fn test_stages_follow_the_profile_over_time() {
     let sent = |i: usize| metrics.time_series.points[i].messages_sent;
     assert!(sent(1) > sent(0) + 50, "{:?}", metrics.time_series);
     assert_eq!(metrics.total_connections_attempted, 10, "{metrics:?}");
+    cancel_server.cancel();
+}
+
+#[tokio::test]
+async fn test_request_limit_is_exact_with_many_connections() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    for mode in [TestMode::Echo, TestMode::Stream] {
+        let metrics = run(echo_test_config(&target_url)
+            .mode(mode)
+            .connections(40)
+            .duration(Duration::from_secs(10))
+            .max_requests(101))
+        .await;
+
+        // Each send is claimed before it is made, so 40 connections racing
+        // for the last messages cannot overshoot the limit.
+        assert_eq!(metrics.total_messages_sent, 101, "{mode:?}: {metrics:?}");
+        assert!(
+            metrics.elapsed < Duration::from_secs(5),
+            "{mode:?}: {metrics:?}"
+        );
+    }
+    cancel_server.cancel();
+}
+
+#[tokio::test]
+async fn test_live_counters_add_up_across_shards() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    // More workers than shards, so several workers share each shard.
+    let runner = Runner::new(
+        echo_test_config(&target_url)
+            .connections(64)
+            .duration(Duration::from_millis(500))
+            .build()
+            .unwrap(),
+    );
+    let metrics = runner.run().await.unwrap();
+    let live = runner.live_snapshot();
+
+    assert_eq!(live.connections_established, 64);
+    assert_eq!(live.messages_sent, metrics.total_messages_sent);
+    assert_eq!(live.bytes_sent, metrics.total_bytes_sent);
+    assert_eq!(live.active_connections, 0);
     cancel_server.cancel();
 }

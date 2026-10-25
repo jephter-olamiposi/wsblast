@@ -20,11 +20,15 @@ fn bench_histogram_recording(c: &mut Criterion) {
 fn bench_live_atomic_counters(c: &mut Criterion) {
     let live = LiveMetrics::new();
 
+    let shard = live.shard(0);
+
     c.bench_function("atomic_counter_increment", |b| {
         b.iter(|| {
-            live.messages_received
+            shard
+                .messages_received
                 .fetch_add(black_box(1), Ordering::Relaxed);
-            live.bytes_received
+            shard
+                .bytes_received
                 .fetch_add(black_box(128), Ordering::Relaxed);
         });
     });

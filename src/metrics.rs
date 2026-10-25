@@ -7,12 +7,14 @@ use hdrhistogram::Histogram;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
-/// Atomic counters queried during execution for live terminal and TUI progress updates.
+/// One shard of the live counters, aligned to its own cache lines so that
+/// workers updating different shards do not contend for the same line.
 #[derive(Debug, Default)]
-pub struct LiveMetrics {
+#[repr(align(128))]
+pub struct CounterShard {
     /// Connections currently open.
     pub active_connections: AtomicU64,
     /// Workers that completed their first handshake.
@@ -35,26 +37,82 @@ pub struct LiveMetrics {
     pub unsolicited_frames: AtomicU64,
 }
 
+/// A request-limit counter on its own cache lines.
+#[derive(Debug, Default)]
+#[repr(align(128))]
+struct ClaimCounter(AtomicU64);
+
+/// Live counters of a run, read for progress, the TUI and the time series.
+///
+/// Every message updates several counters. If all workers updated the same
+/// atomics, every update would move their cache line between CPU cores, so
+/// the counters are split into shards and each worker writes to one of them.
+/// [`LiveMetrics::snapshot`] adds the shards up.
+#[derive(Debug)]
+pub struct LiveMetrics {
+    shards: Box<[CounterShard]>,
+    next_shard: AtomicUsize,
+    /// Sends claimed against `--requests`; touched only when a limit is set.
+    requests_claimed: ClaimCounter,
+}
+
+impl Default for LiveMetrics {
+    fn default() -> Self {
+        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        Self {
+            shards: (0..cores * 2).map(|_| CounterShard::default()).collect(),
+            next_shard: AtomicUsize::new(0),
+            requests_claimed: ClaimCounter::default(),
+        }
+    }
+}
+
 impl LiveMetrics {
     /// Returns a zeroed registry ready to share between workers.
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
-    /// Captures a point-in-time snapshot of atomic telemetry counters with relaxed consistency.
+    /// Picks the shard for a new worker, round robin.
+    fn assign_shard(&self) -> usize {
+        self.next_shard.fetch_add(1, Ordering::Relaxed) % self.shards.len()
+    }
+
+    /// The counters of shard `index`.
+    pub fn shard(&self, index: usize) -> &CounterShard {
+        &self.shards[index % self.shards.len()]
+    }
+
+    /// Claims one send against a request limit of `max`. Returns false once
+    /// `max` sends have been claimed, so the run never sends more than `max`
+    /// messages in total.
+    pub(crate) fn claim_request(&self, max: u64) -> bool {
+        self.requests_claimed.0.fetch_add(1, Ordering::Relaxed) < max
+    }
+
+    /// Whether `max` sends have been claimed.
+    pub(crate) fn requests_exhausted(&self, max: u64) -> bool {
+        self.requests_claimed.0.load(Ordering::Relaxed) >= max
+    }
+
+    /// Captures a point-in-time snapshot by adding up every shard, with
+    /// relaxed consistency.
     pub fn snapshot(&self) -> LiveSnapshot {
-        LiveSnapshot {
-            active_connections: self.active_connections.load(Ordering::Relaxed),
-            connections_established: self.connections_established.load(Ordering::Relaxed),
-            connections_failed: self.connections_failed.load(Ordering::Relaxed),
-            reconnects: self.reconnects.load(Ordering::Relaxed),
-            messages_sent: self.messages_sent.load(Ordering::Relaxed),
-            messages_received: self.messages_received.load(Ordering::Relaxed),
-            bytes_sent: self.bytes_sent.load(Ordering::Relaxed),
-            bytes_received: self.bytes_received.load(Ordering::Relaxed),
-            total_errors: self.total_errors.load(Ordering::Relaxed),
-            unsolicited_frames: self.unsolicited_frames.load(Ordering::Relaxed),
+        let mut snap = LiveSnapshot::default();
+        for shard in &*self.shards {
+            let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+            snap.active_connections += load(&shard.active_connections);
+            snap.connections_established += load(&shard.connections_established);
+            snap.connections_failed += load(&shard.connections_failed);
+            snap.reconnects += load(&shard.reconnects);
+            snap.messages_sent += load(&shard.messages_sent);
+            snap.messages_received += load(&shard.messages_received);
+            snap.bytes_sent += load(&shard.bytes_sent);
+            snap.bytes_received += load(&shard.bytes_received);
+            snap.total_errors += load(&shard.total_errors);
+            snap.unsolicited_frames += load(&shard.unsolicited_frames);
         }
+        snap
     }
 }
 
@@ -130,6 +188,8 @@ pub struct WorkerMetrics {
     /// does for paced echo sessions.
     pub(crate) interval_uses_response: bool,
     pub(crate) live: Arc<LiveMetrics>,
+    /// The live counter shard this worker updates.
+    shard: usize,
 }
 
 fn latency_histogram() -> WsResult<Histogram<u64>> {
@@ -165,8 +225,15 @@ impl WorkerMetrics {
             interrupted: false,
             interval: None,
             interval_uses_response: false,
+            shard: live.assign_shard(),
             live,
         })
+    }
+
+    /// The live counter shard this worker updates.
+    #[inline]
+    fn counters(&self) -> &CounterShard {
+        self.live.shard(self.shard)
     }
 
     /// Sends this worker's latency samples to the run's time series.
@@ -186,7 +253,7 @@ impl WorkerMetrics {
     #[inline]
     pub fn record_handshake(&mut self, duration: Duration) {
         self.record_handshake_latency(duration);
-        self.live
+        self.counters()
             .connections_established
             .fetch_add(1, Ordering::Relaxed);
     }
@@ -197,33 +264,41 @@ impl WorkerMetrics {
     pub(crate) fn record_reconnect(&mut self, duration: Duration) {
         self.record_handshake_latency(duration);
         self.reconnects += 1;
-        self.live.reconnects.fetch_add(1, Ordering::Relaxed);
+        self.counters().reconnects.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]
     fn record_handshake_latency(&mut self, duration: Duration) {
         let micros = duration.as_micros().clamp(1, 60_000_000) as u64;
         let _ = self.handshake_hist.record(micros);
-        self.live.active_connections.fetch_add(1, Ordering::Relaxed);
+        self.counters()
+            .active_connections
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]
     pub(crate) fn record_connection_failed(&mut self, err: ErrorCategory) {
         self.record_error(err, ErrorScope::Attempt);
-        self.live.connections_failed.fetch_add(1, Ordering::Relaxed);
+        self.counters()
+            .connections_failed
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]
     pub(crate) fn record_connection_closed(&mut self) {
-        self.live.active_connections.fetch_sub(1, Ordering::Relaxed);
+        self.counters()
+            .active_connections
+            .fetch_sub(1, Ordering::Relaxed);
     }
 
     #[inline]
     pub(crate) fn record_message_sent(&mut self, bytes: usize) {
         self.messages_sent += 1;
         self.bytes_sent += bytes as u64;
-        self.live.messages_sent.fetch_add(1, Ordering::Relaxed);
-        self.live
+        self.counters()
+            .messages_sent
+            .fetch_add(1, Ordering::Relaxed);
+        self.counters()
             .bytes_sent
             .fetch_add(bytes as u64, Ordering::Relaxed);
     }
@@ -242,8 +317,10 @@ impl WorkerMetrics {
                 interval.record(micros);
             }
         }
-        self.live.messages_received.fetch_add(1, Ordering::Relaxed);
-        self.live
+        self.counters()
+            .messages_received
+            .fetch_add(1, Ordering::Relaxed);
+        self.counters()
             .bytes_received
             .fetch_add(bytes as u64, Ordering::Relaxed);
     }
@@ -270,7 +347,7 @@ impl WorkerMetrics {
             return;
         }
         self.unsolicited_frames += count;
-        self.live
+        self.counters()
             .unsolicited_frames
             .fetch_add(count, Ordering::Relaxed);
     }
@@ -281,7 +358,7 @@ impl WorkerMetrics {
         if scope == ErrorScope::SentMessage {
             self.sent_message_errors += 1;
         }
-        self.live.total_errors.fetch_add(1, Ordering::Relaxed);
+        self.counters().total_errors.fetch_add(1, Ordering::Relaxed);
     }
 }
 

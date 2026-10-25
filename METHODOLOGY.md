@@ -19,8 +19,8 @@ Contents:
 
 - One process, one multi-threaded Tokio runtime.
 - Each connection (`-c`) is one Tokio task, called a worker. A worker owns one WebSocket at a time and runs one session loop on it.
-- Each worker records into its own metrics: two HDR histograms (handshake latency and message RTT) and plain integer counters. Nothing on the measurement path takes a lock.
-- Workers also bump shared relaxed atomics. These feed only the progress bar and the TUI. The final report does not use them.
+- Each worker records into its own metrics: HDR histograms (handshake latency, message RTT and, for paced echo, response time) and plain integer counters. Nothing on the measurement path takes a lock.
+- Workers also bump relaxed atomic counters that feed the progress bar, the TUI and the time series ([section 6.3](#63-time-series)). They are split into cache-line-aligned shards, twice as many as the machine has CPU cores, and workers are assigned to shards round robin, so workers on different cores rarely write to the same cache line. In a C benchmark on a 4-core machine, three relaxed adds per message cost about 138 ns on shared counters and about 4 ns on per-thread shards. The final report's totals come from the per-worker metrics, not from these counters.
 - When the run ends, every worker returns its metrics and the runner merges them into one report (`AggregatedMetrics::merge`).
 
 ## 2. Load models
@@ -54,7 +54,7 @@ The first request of a session is due when the session starts, so a paced connec
 
 ### 2.3 Request cap
 
-`-n, --requests N` caps the total messages sent across all workers. Each worker checks the shared sent counter before each send, and a watcher task checks it every 5 ms. When the cap is reached the run is cancelled. Because the check and the send are not one atomic step, concurrent workers can exceed the cap by up to about one message per connection. In a scenario the counter is shared by all phases, so the cap applies to the whole scenario: once it is reached, later phases are cancelled as soon as they start.
+`-n, --requests N` caps the total messages sent across all workers. Right before each send a worker claims one message from a shared counter, and a worker whose claim comes after the `N`th stops and cancels the run; a watcher task also checks the counter every 5 ms. Because every send is claimed first, the run never sends more than `N` messages. A claim followed by a failed write still uses up one of the `N`. In a scenario the counter is shared by all phases, so the cap applies to the whole scenario: once it is reached, later phases are cancelled as soon as they start.
 
 ### 2.4 Keepalive pings
 

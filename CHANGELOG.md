@@ -13,7 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Per-interval time series. Every report now breaks the run down by time: messages, bytes, errors, active connections, throughput and latency percentiles per interval. The interval is 1 second for runs up to 10 minutes and longer for longer runs, so a series never exceeds 600 points. The JSON report has a `time_series` object with every point; the text and Markdown reports summarise it in at most 10 rows. The library exports `TimeSeries`, `TimeSeriesPoint` and `IntervalLatency`. See METHODOLOGY.md section 6.3.
 - Load stages. `--stages 30s:100,2m:100,30s:0` (and `LoadTestConfigBuilder::stages` with the new `Stage` type) runs a load profile instead of a constant connection count: each stage moves the number of open connections linearly to its target, and ramping down closes the most recently opened connections first. It replaces `-c`, `-d` and `--ramp-rate`, which it cannot be combined with, and the report lists the stages. See METHODOLOGY.md section 2.1.1.
 
+### Fixed
+- `-n, --requests` no longer overshoots its cap. Workers checked the sent counter and then sent, so concurrent workers could exceed the cap by about one message per connection (104 messages for `-n 101` with 40 connections). Each send is now claimed from a shared counter first, so a run sends at most the cap.
+
 ### Changed
+- The live counters behind the progress bar, the TUI and the time series are split into cache-line-aligned shards, so workers on different CPU cores no longer contend for the same counters on every message. The final report is unchanged.
 - Paced echo sends follow a fixed schedule instead of skipping missed ticks. A request that is late because an earlier reply was slow is sent as soon as that reply arrives, so a connection keeps `--rate` on average while the server keeps up. Achieved rates at high `--rate` values now match the requested rate.
 - **Breaking for SLO gates:** in a paced echo run, `--max-p50`, `--max-p95`, `--max-p99` and `--max-p999` gate on response time instead of round-trip time, and the checks are named `Response time p99` and so on. A run whose server cannot keep up with `--rate` can now fail a latency gate it passed before. Unpaced runs still gate on round-trip time.
 

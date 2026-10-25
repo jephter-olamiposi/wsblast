@@ -361,11 +361,7 @@ impl Runner {
             let live = Arc::clone(&self.live_metrics);
             tokio::spawn(async move {
                 while !req_token.is_cancelled() {
-                    if live
-                        .messages_sent
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                        >= max_reqs
-                    {
+                    if live.requests_exhausted(max_reqs) {
                         req_token.cancel();
                         break;
                     }
