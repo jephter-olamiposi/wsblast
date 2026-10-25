@@ -133,14 +133,58 @@ impl AssetCommand {
 /// `--help` and `--version` print to stdout and exit with 0 as clap does.
 /// Every other parse error prints clap's message to stderr and exits with 1,
 /// the code wsblast uses for configuration errors.
-fn parse_cli() -> Cli {
+///
+/// clap only recognises a subcommand as the first argument: in
+/// `wsblast -c 2 mock` the word `mock` is the target URL. Such a command
+/// line fails with a note on where subcommands go, instead of an invalid
+/// URL or an unexpected-argument error about the subcommand's own flags.
+fn parse_cli() -> Result<Cli> {
     match Cli::try_parse() {
-        Ok(cli) => cli,
+        Ok(cli) => {
+            if let Some(name) = cli.url.as_deref().filter(|url| is_subcommand_name(url)) {
+                return Err(WsBlastError::Config(ConfigError::InvalidOption(
+                    misplaced_subcommand(name),
+                )));
+            }
+            Ok(cli)
+        }
         Err(err) => {
             let _ = err.print();
+            if err.use_stderr() {
+                // A misplaced subcommand followed by its own flags fails
+                // to parse before the URL can be checked.
+                if let Some(name) = std::env::args().skip(2).find(|arg| is_subcommand_name(arg)) {
+                    eprintln!(
+                        "\nNote: if '{name}' is meant as a subcommand, {}",
+                        subcommand_usage(&name)
+                    );
+                }
+            }
             std::process::exit(if err.use_stderr() { 1 } else { 0 });
         }
     }
+}
+
+/// Whether `word` names a subcommand of this build, the hidden asset
+/// commands included.
+fn is_subcommand_name(word: &str) -> bool {
+    matches!(word, "completions" | "man")
+        || Cli::command()
+            .get_subcommands()
+            .any(|sub| sub.get_name() == word)
+}
+
+fn subcommand_usage(name: &str) -> String {
+    format!(
+        "it must come first, followed only by its own flags: wsblast {name} [OPTIONS] (see wsblast {name} --help)"
+    )
+}
+
+fn misplaced_subcommand(name: &str) -> String {
+    format!(
+        "'{name}' is a subcommand, not a target URL; {}",
+        subcommand_usage(name)
+    )
 }
 
 #[cfg(feature = "compare")]
@@ -575,7 +619,7 @@ async fn run_app() -> Result<()> {
         return command.print();
     }
 
-    let cli = parse_cli();
+    let cli = parse_cli()?;
 
     #[cfg(feature = "mock")]
     if let Some(crate::cli::Command::Mock(args)) = &cli.command {
