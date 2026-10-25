@@ -356,13 +356,11 @@ pub(crate) struct Cli {
     pub agent_ca: Option<PathBuf>,
 
     /// A subcommand instead of a load test.
-    #[cfg(any(feature = "mock", feature = "distributed"))]
     #[command(subcommand)]
     pub command: Option<Command>,
 }
 
 /// Subcommands. `wsblast <URL>` without one runs a load test.
-#[cfg(any(feature = "mock", feature = "distributed"))]
 #[derive(Debug, Clone, clap::Subcommand)]
 pub(crate) enum Command {
     /// Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file
@@ -371,6 +369,8 @@ pub(crate) enum Command {
     /// Run a load agent that generates load for a coordinator (`wsblast URL --agents ...`), one test at a time
     #[cfg(feature = "distributed")]
     Agent(AgentArgs),
+    /// Render a saved JSON report (from --format json) as HTML, Markdown or text without running a test
+    Render(RenderArgs),
 }
 
 /// Flags of `wsblast agent`.
@@ -397,6 +397,44 @@ pub(crate) struct AgentArgs {
     /// PEM private key for --tls-cert
     #[arg(long = "tls-key", value_name = "PEM", requires = "tls_cert")]
     pub tls_key: Option<PathBuf>,
+}
+
+
+/// Flags of `wsblast render`.
+#[derive(Debug, Clone, clap::Args)]
+pub(crate) struct RenderArgs {
+    /// JSON report written by `wsblast --format json` (schema 1.x)
+    #[arg(value_name = "REPORT.json")]
+    pub report: PathBuf,
+
+    /// Format to render
+    #[arg(long = "format", value_enum, default_value_t = RenderFormat::Html)]
+    pub format: RenderFormat,
+
+    /// Write the rendered report to FILE instead of stdout
+    #[arg(short = 'o', long = "output", value_name = "FILE")]
+    pub output: Option<PathBuf>,
+}
+
+/// The formats `wsblast render` writes. A saved report is already JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum RenderFormat {
+    /// Self-contained HTML page with charts of the time series
+    Html,
+    /// GitHub Flavored Markdown
+    Markdown,
+    /// Terminal tables
+    Text,
+}
+
+impl From<RenderFormat> for OutputFormat {
+    fn from(format: RenderFormat) -> Self {
+        match format {
+            RenderFormat::Html => Self::Html,
+            RenderFormat::Markdown => Self::Markdown,
+            RenderFormat::Text => Self::Text,
+        }
+    }
 }
 
 /// Flags of `wsblast mock`.

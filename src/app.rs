@@ -101,6 +101,7 @@ impl AssetCommand {
                         let page_name = match name.as_str() {
                             "mock" => "wsblast-mock",
                             "agent" => "wsblast-agent",
+                            "render" => "wsblast-render",
                             _ => "",
                         };
                         let sub = command
@@ -200,6 +201,49 @@ fn run_compare(cli: &Cli) -> Result<()> {
         std::process::exit(2);
     }
 
+    Ok(())
+}
+
+/// `wsblast render`: reads a saved JSON report and renders it without
+/// running a test. The exit code does not reflect the report's SLO result.
+fn run_render(args: &crate::cli::RenderArgs) -> Result<()> {
+    let path = args.report.display().to_string();
+    let json = std::fs::read_to_string(&args.report).map_err(|e| {
+        WsBlastError::Io(std::io::Error::new(
+            e.kind(),
+            format!("cannot read report '{path}': {e}"),
+        ))
+    })?;
+    let saved = report::SavedReport::parse(&json).map_err(|reason| {
+        WsBlastError::Config(ConfigError::InvalidOption(format!("'{path}': {reason}")))
+    })?;
+    // The report does not record when the run happened; the file's
+    // modification time is when it was written.
+    let saved_at = std::fs::metadata(&args.report)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .map(|time| ("Report saved", crate::clock::rfc3339_utc(time)));
+    let rendered = report::render_view(&saved.view(saved_at), args.format.into());
+
+    match &args.output {
+        Some(output) => {
+            std::fs::write(output, &rendered).map_err(|e| {
+                WsBlastError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("cannot write '{}': {e}", output.display()),
+                ))
+            })?;
+            eprintln!("Wrote {}", output.display());
+        }
+        None => {
+            use std::io::Write;
+            let mut stdout = std::io::stdout().lock();
+            match writeln!(stdout, "{rendered}").and_then(|()| stdout.flush()) {
+                Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {}
+                result => result?,
+            }
+        }
+    }
     Ok(())
 }
 
@@ -476,6 +520,10 @@ async fn run_app() -> Result<()> {
     #[cfg(feature = "distributed")]
     if let Some(crate::cli::Command::Agent(args)) = &cli.command {
         return crate::distributed::run_agent_command(args).await;
+    }
+
+    if let Some(crate::cli::Command::Render(args)) = &cli.command {
+        return run_render(args);
     }
 
     // Handle compare command first (doesn't run load test)

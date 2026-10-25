@@ -124,6 +124,18 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
+(render)
+_arguments "${_arguments_options[@]}" : \
+'--format=[Format to render]:FORMAT:((html\:"Self-contained HTML page with charts of the time series"
+markdown\:"GitHub Flavored Markdown"
+text\:"Terminal tables"))' \
+'-o+[Write the rendered report to FILE instead of stdout]:FILE:_files' \
+'--output=[Write the rendered report to FILE instead of stdout]:FILE:_files' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':report -- JSON report written by `wsblast --format json` (schema 1.x):_files' \
+&& ret=0
+;;
         esac
     ;;
 esac
@@ -134,6 +146,7 @@ _wsblast_commands() {
     local commands; commands=(
 'mock:Run a local WebSocket test server\: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file' \
 'agent:Run a load agent that generates load for a coordinator (\`wsblast URL --agents ...\`), one test at a time' \
+'render:Render a saved JSON report (from --format json) as HTML, Markdown or text without running a test' \
     )
     _describe -t commands 'wsblast commands' commands "$@"
 }
@@ -146,6 +159,11 @@ _wsblast__subcmd__agent_commands() {
 _wsblast__subcmd__mock_commands() {
     local commands; commands=()
     _describe -t commands 'wsblast mock commands' commands "$@"
+}
+(( $+functions[_wsblast__subcmd__render_commands] )) ||
+_wsblast__subcmd__render_commands() {
+    local commands; commands=()
+    _describe -t commands 'wsblast render commands' commands "$@"
 }
 
 if [ "$funcstack[1]" = "_wsblast" ]; then

@@ -204,22 +204,24 @@ fn live_html_report_is_one_self_contained_page() {
     assert!(html.contains("5s:20, 15s:20, 5s:0"));
 }
 
-// The compiled binary.
+// `wsblast render`, through the compiled binary.
 
-#[cfg(feature = "compare")]
 fn fixture(name: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/live_report")
         .join(name)
 }
 
-#[cfg(feature = "compare")]
+fn scratch(name: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("render_{}_{name}", std::process::id()))
+}
+
 struct Output {
     code: Option<i32>,
+    stdout: String,
     stderr: String,
 }
 
-#[cfg(feature = "compare")]
 fn wsblast(args: &[&std::ffi::OsStr]) -> Output {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_wsblast"))
         .args(args)
@@ -228,13 +230,177 @@ fn wsblast(args: &[&std::ffi::OsStr]) -> Output {
         .expect("run wsblast");
     Output {
         code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
 }
 
-#[cfg(feature = "compare")]
 fn os(text: &str) -> &std::ffi::OsStr {
     text.as_ref()
+}
+
+#[test]
+fn render_writes_html_from_a_saved_report() {
+    let report = fixture("constant.json");
+    let out = scratch("constant.html");
+    let result = wsblast(&[
+        os("render"),
+        report.as_os_str(),
+        os("--format"),
+        os("html"),
+        os("-o"),
+        out.as_os_str(),
+    ]);
+    assert_eq!(result.code, Some(0), "{}", result.stderr);
+    assert!(result.stdout.is_empty(), "{}", result.stdout);
+    let html = std::fs::read_to_string(&out).expect("html written");
+    assert!(html.starts_with("<!doctype html>"));
+    assert_eq!(html.matches("<svg class=\"chart\"").count(), 4);
+    assert!(html.contains("FAIL: 2 of 3 SLO checks failed"), "{html}");
+    assert!(html.contains("Response Time (from schedule)"));
+    assert!(html.contains("Not recorded in the JSON report"));
+    assert!(html.contains("Report saved"));
+    assert!(!html.contains("http://") && !html.contains("https://"));
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn render_defaults_to_html_on_stdout_and_markdown_matches_the_live_report() {
+    let report = fixture("constant.json");
+    let html = wsblast(&[os("render"), report.as_os_str()]);
+    assert_eq!(html.code, Some(0), "{}", html.stderr);
+    assert!(html.stdout.starts_with("<!doctype html>"));
+
+    // Markdown does not show the rate, the one setting a JSON report lacks,
+    // so a saved report renders exactly as the live run printed it.
+    for (name, format) in [("constant", "markdown"), ("scenario", "markdown")] {
+        let rendered = wsblast(&[
+            os("render"),
+            fixture(&format!("{name}.json")).as_os_str(),
+            os("--format"),
+            os(format),
+        ]);
+        assert_eq!(rendered.code, Some(0), "{}", rendered.stderr);
+        let live = std::fs::read_to_string(fixture(&format!("{name}.md")))
+            .unwrap()
+            .replace("\r\n", "\n");
+        assert_eq!(rendered.stdout.replace("\r\n", "\n"), format!("{live}\n"));
+    }
+
+    let text = wsblast(&[
+        os("render"),
+        fixture("scenario.json").as_os_str(),
+        os("--format"),
+        os("text"),
+    ]);
+    assert_eq!(text.code, Some(0), "{}", text.stderr);
+    assert!(text.stdout.contains("Target URL (phase 'spike')"));
+    assert!(text.stdout.contains("not recorded in the JSON report"));
+}
+
+#[test]
+fn render_reads_reports_from_wsblast_0_2_0() {
+    // A 0.2.0 report: no time series, response time, interrupted counter or
+    // capture totals.
+    let latency = serde_json::json!({
+        "count": 10, "min_us": 100, "mean_us": 150.0, "max_us": 400,
+        "std_dev_us": 20.0, "p50_us": 140, "p75_us": 160, "p90_us": 200,
+        "p95_us": 250, "p99_us": 390, "p999_us": 400, "p9999_us": 400,
+    });
+    let report = serde_json::json!({
+        "schema_version": "1.0.0",
+        "target_url": "ws://127.0.0.1:9001/",
+        "connections": 2,
+        "duration_secs": 1.5,
+        "mode": "Echo",
+        "metrics": {
+            "total_connections_attempted": 2,
+            "total_connections_established": 2,
+            "total_connections_failed": 0,
+            "total_reconnects": 0,
+            "total_unsolicited_frames": 0,
+            "total_messages_sent": 10,
+            "total_messages_recv": 10,
+            "total_bytes_sent": 50,
+            "total_bytes_recv": 50,
+            "elapsed": { "secs": 1, "nanos": 500_000_000 },
+            "throughput_msg_per_sec": 6.67,
+            "throughput_bytes_per_sec": 66.7,
+            "error_rate": 0.0,
+            "handshake_latency": latency,
+            "message_rtt": latency,
+            "error_breakdown": {},
+        },
+        "slo": { "passed": true, "checks": [] },
+    });
+    let path = scratch("v020.json");
+    std::fs::write(&path, report.to_string()).unwrap();
+
+    let html = wsblast(&[os("render"), path.as_os_str()]);
+    assert_eq!(html.code, Some(0), "{}", html.stderr);
+    assert!(html.stdout.contains("This report has no time series"));
+    assert!(!html.stdout.contains("<svg"));
+    assert!(!html.stdout.contains("Response Time"));
+    assert!(html.stdout.contains("No SLO thresholds were set"));
+
+    for format in ["text", "markdown"] {
+        let rendered = wsblast(&[os("render"), path.as_os_str(), os("--format"), os(format)]);
+        assert_eq!(rendered.code, Some(0), "{format}: {}", rendered.stderr);
+        assert!(rendered.stdout.contains("ws://127.0.0.1:9001/"));
+        assert!(!rendered.stdout.contains("Time Window"));
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn render_exits_with_1_for_missing_or_foreign_files() {
+    let missing = scratch("missing.json");
+    let result = wsblast(&[os("render"), missing.as_os_str()]);
+    assert_eq!(result.code, Some(1));
+    assert!(
+        result.stderr.contains("cannot read report"),
+        "{}",
+        result.stderr
+    );
+    assert!(result.stdout.is_empty());
+
+    let cases = [
+        ("not-json.json", "<html></html>", "not valid JSON"),
+        (
+            "other.json",
+            r#"{"name": "package", "version": "1.0.0"}"#,
+            "not a wsblast JSON report",
+        ),
+        (
+            "future.json",
+            r#"{"schema_version": "2.0.0"}"#,
+            "unsupported report schema version '2.0.0'",
+        ),
+        (
+            "partial.json",
+            r#"{"schema_version": "1.0.0", "target_url": "ws://h/"}"#,
+            "not a wsblast JSON report",
+        ),
+    ];
+    for (name, content, message) in cases {
+        let path = scratch(name);
+        std::fs::write(&path, content).unwrap();
+        let result = wsblast(&[os("render"), path.as_os_str()]);
+        assert_eq!(result.code, Some(1), "{name}");
+        assert!(result.stderr.contains(message), "{name}: {}", result.stderr);
+        assert!(result.stdout.is_empty(), "{name}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    let result = wsblast(&[
+        os("render"),
+        fixture("constant.json").as_os_str(),
+        os("--format"),
+        os("json"),
+    ]);
+    assert_eq!(result.code, Some(1), "a saved report is already JSON");
+    let result = wsblast(&[os("render")]);
+    assert_eq!(result.code, Some(1), "the report path is required");
 }
 
 #[cfg(feature = "compare")]

@@ -660,9 +660,9 @@ fn latency_check(name: &str, target: Duration, actual: Duration, samples: u64) -
 /// What a report shows about the run besides its metrics and SLO result.
 ///
 /// A live run builds it from its [`LoadTestConfig`]
-/// ([`ReportView::from_config`]). It holds only what the JSON report also
-/// records, plus optional fields for the settings it does not record, so a
-/// report read back from JSON can be rendered by the same code.
+/// ([`ReportView::from_config`]); `wsblast render` builds it from a saved JSON
+/// report ([`SavedReport::view`]), which records less of the configuration,
+/// so the fields a JSON report lacks are optional.
 pub(crate) struct ReportView<'a> {
     /// Target URL after parsing; for a scenario, the first phase's.
     pub(crate) target_url: &'a str,
@@ -706,6 +706,58 @@ impl<'a> ReportView<'a> {
             )),
             metrics,
             slo,
+        }
+    }
+}
+
+/// A JSON report (schema 1.x) read back from a file, as written by
+/// `--format json`. Fields added after 0.2.0 default when absent, and
+/// `schema_version` is checked by [`SavedReport::parse`].
+#[derive(Debug, Deserialize)]
+pub(crate) struct SavedReport {
+    target_url: String,
+    connections: usize,
+    mode: String,
+    #[serde(default)]
+    phase_targets: Vec<PhaseTarget>,
+    metrics: AggregatedMetrics,
+    slo: SloEvaluation,
+}
+
+impl SavedReport {
+    /// Parses a saved report, rejecting JSON that is not a wsblast schema
+    /// 1.x report.
+    pub(crate) fn parse(json: &str) -> std::result::Result<Self, String> {
+        let value: serde_json::Value =
+            serde_json::from_str(json).map_err(|e| format!("not valid JSON: {e}"))?;
+        match value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some(version) if version.starts_with("1.") => {}
+            Some(version) => {
+                return Err(format!(
+                    "unsupported report schema version '{version}' (this wsblast reads 1.x)"
+                ));
+            }
+            None => return Err("no schema_version field; not a wsblast JSON report".into()),
+        }
+        serde_json::from_value(value).map_err(|e| format!("not a wsblast JSON report: {e}"))
+    }
+
+    /// The view the renderers read. The JSON report does not record the
+    /// message rate or the load stages, so both are unknown.
+    pub(crate) fn view(&self, timestamp: Option<(&'static str, String)>) -> ReportView<'_> {
+        ReportView {
+            target_url: &self.target_url,
+            connections: self.connections,
+            mode: Cow::Borrowed(&self.mode),
+            rate_per_conn: None,
+            stages: None,
+            phase_targets: &self.phase_targets,
+            timestamp,
+            metrics: &self.metrics,
+            slo: &self.slo,
         }
     }
 }

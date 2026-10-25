@@ -91,6 +91,7 @@ complete -c wsblast -n "__fish_wsblast_needs_command" -s h -l help -d 'Print hel
 complete -c wsblast -n "__fish_wsblast_needs_command" -s V -l version -d 'Print version'
 complete -c wsblast -n "__fish_wsblast_needs_command" -a "mock" -d 'Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file'
 complete -c wsblast -n "__fish_wsblast_needs_command" -a "agent" -d 'Run a load agent that generates load for a coordinator (`wsblast URL --agents ...`), one test at a time'
+complete -c wsblast -n "__fish_wsblast_needs_command" -a "render" -d 'Render a saved JSON report (from --format json) as HTML, Markdown or text without running a test'
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l listen -d 'Address to listen on (host:port; port 0 picks a free port)' -r
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l delay -d 'Hold every reply for this long after its request arrived (e.g. \'20ms\')' -r
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l jitter -d 'Add a uniformly distributed extra delay between 0 and this to every reply' -r
@@ -105,3 +106,8 @@ complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -l token -d 'Toke
 complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -l tls-cert -d 'PEM certificate chain to serve the control channel over TLS (wss://)' -r -F
 complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -l tls-key -d 'PEM private key for --tls-cert' -r -F
 complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -s h -l help -d 'Print help'
+complete -c wsblast -n "__fish_wsblast_using_subcommand render" -l format -d 'Format to render' -r -f -a "html\t'Self-contained HTML page with charts of the time series'
+markdown\t'GitHub Flavored Markdown'
+text\t'Terminal tables'"
+complete -c wsblast -n "__fish_wsblast_using_subcommand render" -s o -l output -d 'Write the rendered report to FILE instead of stdout' -r -F
+complete -c wsblast -n "__fish_wsblast_using_subcommand render" -s h -l help -d 'Print help (see more with \'--help\')'

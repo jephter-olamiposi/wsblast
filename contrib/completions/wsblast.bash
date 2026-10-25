@@ -22,6 +22,9 @@ _wsblast() {
             wsblast,mock)
                 cmd="wsblast__subcmd__mock"
                 ;;
+            wsblast,render)
+                cmd="wsblast__subcmd__render"
+                ;;
             *)
                 ;;
         esac
@@ -29,7 +32,7 @@ _wsblast() {
 
     case "${cmd}" in
         wsblast)
-            opts="-u -c -d -n -r -p -H -o -h -V --url --connections --ramp-rate --duration --stages --requests --rate --payload --payload-file --binary --header --subprotocol --mode --connect-timeout --message-timeout --match --ping-interval --max-p50 --max-p95 --max-p99 --max-p999 --max-error-rate --min-throughput --auth-type --auth-token --auth-token-cmd --auth-token-cmd-timeout --auth-token-refresh --auth-header --auth-apikey --auth-apikey-header --graphql-ws-operation-name --graphql-ws-operation --graphql-ws-variables --graphql-ws-extensions --format --compare --compare-threshold --fail-on-regression --capture --capture-limit --output --tui --no-progress --no-reconnect --prometheus-listen --otel-endpoint --otel-interval --otel-service-name --scenario --phase --agents --agent-token --agent-timeout --agent-ca --help --version mock agent"
+            opts="-u -c -d -n -r -p -H -o -h -V --url --connections --ramp-rate --duration --stages --requests --rate --payload --payload-file --binary --header --subprotocol --mode --connect-timeout --message-timeout --match --ping-interval --max-p50 --max-p95 --max-p99 --max-p999 --max-error-rate --min-throughput --auth-type --auth-token --auth-token-cmd --auth-token-cmd-timeout --auth-token-refresh --auth-header --auth-apikey --auth-apikey-header --graphql-ws-operation-name --graphql-ws-operation --graphql-ws-variables --graphql-ws-extensions --format --compare --compare-threshold --fail-on-regression --capture --capture-limit --output --tui --no-progress --no-reconnect --prometheus-listen --otel-endpoint --otel-interval --otel-service-name --scenario --phase --agents --agent-token --agent-timeout --agent-ca --help --version mock agent render"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -340,6 +343,32 @@ _wsblast() {
                     return 0
                     ;;
                 --replay)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        wsblast__subcmd__render)
+            opts="-o -h --format --output --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --format)
+                    COMPREPLY=($(compgen -W "html markdown text" -- "${cur}"))
+                    return 0
+                    ;;
+                --output)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -o)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

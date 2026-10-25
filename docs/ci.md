@@ -11,6 +11,7 @@ Contents:
 5. [GitLab CI](#5-gitlab-ci)
 6. [Plain shell](#6-plain-shell)
 7. [Baseline comparison rules](#7-baseline-comparison-rules)
+8. [HTML report](#8-html-report)
 
 ## 1. Exit codes
 
@@ -74,7 +75,7 @@ When a run can outlast the token and connections may reconnect, set the refresh 
 
 Remember that latency SLOs (`--max-p50`, `--max-p95`, `--max-p99`, `--max-p999`) need `--mode echo` (the default). With `--rate` they gate on response time, which includes the time a request waited behind a slow reply; without it they gate on round-trip time. Set `--rate` for a gate that catches server stalls. Stream and listen mode can still be gated on `--max-error-rate` and `--min-throughput`.
 
-wsblast writes one format per run. To get both a machine-readable record and a readable summary from one run, write JSON and render the summary from it with `jq`, as in the recipes below.
+wsblast writes one format per run. To get both a machine-readable record and a readable summary from one run, write JSON and render the summary from it, either with `wsblast render` ([section 8](#8-html-report)) or with `jq`, as in the recipes below.
 
 ## 4. GitHub Actions
 
@@ -394,3 +395,50 @@ Edge cases:
 - The comparison JSON (`--format json`) lists only the regressions and improvements, not the two reports. Archive the reports themselves if you need the raw values later.
 
 A local check: comparing a clean echo report with one from a run where every request timed out listed `error_rate` (0 to 1) and `errors.timeout` (0 to 51) as regressions with `pct_change` 100; `--fail-on-regression` made the same command exit with 2, and without it the exit code was 0.
+
+## 8. HTML report
+
+`--format html` writes the report as one self-contained HTML file: the run's settings, a pass or fail banner with every SLO check, the key numbers (throughput, error rate, p50 and p99 of the latency the gate reads), the latency percentiles, the error breakdown, and four charts of the time series: throughput, p99 latency, active connections and errors per interval. The charts are inline SVG and the styles are inline CSS. The page loads nothing from the network and runs no script, so it opens offline, from a downloaded CI artifact, and in light or dark mode. Each chart has a text description and a table of its points for screen readers and for copying values.
+
+```bash
+wsblast "$TARGET_URL" -c 50 -d 30s -r 20 --max-p99 50ms \
+  --no-progress --format html -o report.html > /dev/null
+```
+
+The JSON report stays the machine-readable record, so a CI job usually writes JSON and turns it into HTML afterwards with `wsblast render`, which reads a saved report and renders it without running a test:
+
+```bash
+wsblast render report.json -o report.html               # HTML (the default)
+wsblast render report.json --format markdown -o report.md
+wsblast render report.json --format text                # terminal tables on stdout
+```
+
+`wsblast render` reads any schema 1.x report, including reports written by wsblast 0.2.0. Parts an older report lacks are left out of the page; a report without a time series has no charts. The JSON report does not record `--rate`, `--stages` or the run's date, so the rendered page shows the rate as not recorded and the date as the time the JSON file was last modified. Without `-o` the rendered report is printed to stdout; with `-o` it is written to the file only.
+
+Exit codes of `wsblast render`: 0 when the report was rendered, whatever its SLO result; 1 when the file is missing or unreadable, is not JSON, is not a wsblast report, or has a schema version other than 1.x, or when the output file cannot be written. Gate on the run's own exit code, not on `render`.
+
+In GitHub Actions, render the HTML in an `always()` step and upload it next to the JSON report:
+
+```yaml
+      - name: Run load test with SLO gate
+        run: |
+          wsblast "$TARGET_URL" -c 50 -d 30s -r 20 \
+            --max-p99 50ms --max-error-rate 0.01 \
+            --no-progress --format json -o report.json > /dev/null
+
+      - name: Render HTML report
+        if: always() && hashFiles('report.json') != ''
+        run: wsblast render report.json -o report.html
+
+      - name: Archive reports
+        if: always() && hashFiles('report.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: wsblast-report
+          path: |
+            report.json
+            report.html
+          retention-days: 30
+```
+
+Download the artifact from the run's summary page and open `report.html` in a browser. A stored JSON report, for example a baseline from an earlier run, can be rendered the same way at any time later. In GitLab CI, add `report.html` to `artifacts: paths`.

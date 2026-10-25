@@ -87,6 +87,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --version 'Print version'
             cand mock 'Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file'
             cand agent 'Run a load agent that generates load for a coordinator (`wsblast URL --agents ...`), one test at a time'
+            cand render 'Render a saved JSON report (from --format json) as HTML, Markdown or text without running a test'
         }
         &'wsblast;mock'= {
             cand --listen 'Address to listen on (host:port; port 0 picks a free port)'
@@ -107,6 +108,13 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --tls-key 'PEM private key for --tls-cert'
             cand -h 'Print help'
             cand --help 'Print help'
+        }
+        &'wsblast;render'= {
+            cand --format 'Format to render'
+            cand -o 'Write the rendered report to FILE instead of stdout'
+            cand --output 'Write the rendered report to FILE instead of stdout'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
         }
     ]
     $completions[$command]

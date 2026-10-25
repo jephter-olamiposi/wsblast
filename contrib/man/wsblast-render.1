@@ -1,0 +1,36 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH wsblast-render 1  "wsblast-render 0.2.0" 
+.SH NAME
+wsblast\-render \- Render a saved JSON report (from \-\-format json) as HTML, Markdown or text without running a test
+.SH SYNOPSIS
+\fBwsblast render\fR [\fB\-\-format\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIREPORT.json\fR> 
+.SH DESCRIPTION
+Render a saved JSON report (from \-\-format json) as HTML, Markdown or text without running a test
+.SH OPTIONS
+.TP
+\fB\-\-format\fR \fI<FORMAT>\fR [default: html]
+Format to render
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+html: Self\-contained HTML page with charts of the time series
+.IP \(bu 2
+markdown: GitHub Flavored Markdown
+.IP \(bu 2
+text: Terminal tables
+.RE
+.TP
+\fB\-o\fR, \fB\-\-output\fR \fI<FILE>\fR
+Write the rendered report to FILE instead of stdout
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+<\fIREPORT.json\fR>
+JSON report written by `wsblast \-\-format json` (schema 1.x)
+.SH VERSION
+v0.2.0

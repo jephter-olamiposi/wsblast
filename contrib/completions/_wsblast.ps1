@@ -90,6 +90,7 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--version', '--version', [CompletionResultType]::ParameterName, 'Print version')
             [CompletionResult]::new('mock', 'mock', [CompletionResultType]::ParameterValue, 'Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file')
             [CompletionResult]::new('agent', 'agent', [CompletionResultType]::ParameterValue, 'Run a load agent that generates load for a coordinator (`wsblast URL --agents ...`), one test at a time')
+            [CompletionResult]::new('render', 'render', [CompletionResultType]::ParameterValue, 'Render a saved JSON report (from --format json) as HTML, Markdown or text without running a test')
             break
         }
         'wsblast;mock' {
@@ -112,6 +113,14 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--tls-key', '--tls-key', [CompletionResultType]::ParameterName, 'PEM private key for --tls-cert')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'wsblast;render' {
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Format to render')
+            [CompletionResult]::new('-o', '-o', [CompletionResultType]::ParameterName, 'Write the rendered report to FILE instead of stdout')
+            [CompletionResult]::new('--output', '--output', [CompletionResultType]::ParameterName, 'Write the rendered report to FILE instead of stdout')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
             break
         }
     })
