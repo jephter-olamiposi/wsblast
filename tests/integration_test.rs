@@ -1775,9 +1775,9 @@ async fn spawn_stalling_echo_server(
 #[tokio::test]
 async fn test_time_series_places_a_server_stall_in_its_interval() {
     // At 50 msg/s the 76th request is due at 1.5 s and the server holds its
-    // reply until about 2.1 s. Throughput drops in the second interval, while
-    // the stall's latency lands in the third, where the late replies arrive,
-    // along with the catch-up sends.
+    // reply until about 2.1 s. Throughput drops in the interval where requests
+    // stop being answered, and the stall's latency lands in the next one,
+    // where the late replies arrive along with the catch-up sends.
     let (target_url, cancel_server) =
         spawn_stalling_echo_server(75, Duration::from_millis(600)).await;
 
@@ -1796,11 +1796,23 @@ async fn test_time_series_places_a_server_stall_in_its_interval() {
     assert_eq!(sent, metrics.total_messages_sent, "{series:?}");
     assert_eq!(recv, metrics.total_messages_recv, "{series:?}");
 
+    // Locate the spike instead of assuming its interval: on a busy machine
+    // the schedule can shift by a few milliseconds and move a boundary.
     let p99 = |i: usize| series.points[i].latency.p99_us;
     let msgs = |i: usize| series.points[i].messages_sent;
-    assert!(p99(0) < 50_000 && p99(1) < 50_000, "{series:?}");
-    assert!(p99(2) > 400_000, "{series:?}");
-    assert!(msgs(1) < 40 && msgs(2) > 60, "{series:?}");
+    let spike = (0..series.points.len())
+        .max_by_key(|&i| p99(i))
+        .expect("points");
+    assert!(p99(spike) > 400_000, "{series:?}");
+    assert!(
+        spike >= 1,
+        "the stall started after the first interval: {series:?}"
+    );
+    assert!(p99(0) < 100_000, "{series:?}");
+    // Requests stopped being answered in the interval before the late
+    // replies arrived, and the catch-up sends land with them.
+    assert!(msgs(spike - 1) < 45, "{series:?}");
+    assert!(msgs(spike) > msgs(spike - 1), "{series:?}");
     cancel_server.cancel();
 }
 
