@@ -15,6 +15,7 @@ Contents:
 9. [SLO evaluation and exit codes](#9-slo-evaluation-and-exit-codes)
 10. [Known limitations](#10-known-limitations)
 11. [Frame capture](#11-frame-capture)
+12. [Distributed runs](#12-distributed-runs)
 
 ## 1. Execution model
 
@@ -328,7 +329,7 @@ A paced echo run (`--rate`) records response time, so its latency checks are nam
 | Exit code | Meaning |
 | :--- | :--- |
 | 0 | The run completed, every configured SLO passed (or none were set), and at least one connection was established. |
-| 1 | Invalid command-line arguments (unknown flag, missing value, conflicting flags), configuration or runtime error (invalid URL, scheme or duration, latency SLO outside echo mode, invalid scenario, unreadable file, report write failure), or every connection slot failed and no SLO failed. |
+| 1 | Invalid command-line arguments (unknown flag, missing value, conflicting flags), configuration or runtime error (invalid URL, scheme or duration, latency SLO outside echo mode, invalid scenario, unreadable file, report write failure), every connection slot failed and no SLO failed, or, in a distributed run, an agent failed before the start or was lost after it and no SLO failed ([section 12.4](#124-lost-agents)). |
 | 2 | At least one SLO failed. Also used by `--compare --fail-on-regression` when a regression is found. Nothing else exits with 2. |
 
 SLOs are checked before the "all connections failed" condition. A run where every connection fails and an SLO also fails (for example `--max-error-rate 0.5`) exits with 2, not 1. The report is always printed (and written with `-o`) before the process exits with 1 or 2 after a completed run.
@@ -338,7 +339,7 @@ SLOs are checked before the "all connections failed" condition. A run where ever
 - **Coordinated omission is corrected only for paced echo.** Response time needs a schedule to measure against, so it is recorded only with `--rate` in echo mode. Unpaced echo (`--rate 0`) is a closed loop with no intended send times: its RTT percentiles still record one slow sample per stall and understate tail latency when the server pauses. Scenario action scripts and phases with a think time do not record response time either. To measure tail latency under stalls, set `--rate`.
 - **Memory per connection.** Each connection holds two histograms of about 136 KiB each, so about 270 KB per connection before any socket or TLS buffers; a paced echo connection adds a third for response time, and every connection adds about 20 KB for its time series interval. The run keeps one merged interval histogram per point, at most 600, about 12 MB. 10,000 connections need about 2.7 GB for histograms alone. A local echo run with 1,000 connections at `--rate 1` peaked at about 420 MB resident.
 - **Reply matching.** Echo replies are matched by `--match` (default `first`, see [section 3.1](#31-how-replies-are-matched-echo-mode)). With `first`, unsolicited server frames are taken as replies.
-- **Single generator.** All load comes from one process. wsblast does not detect when the generator itself is the bottleneck (CPU saturation, file descriptor limit, ephemeral ports). It prints a warning when `-c` plus 64 exceeds the open file limit (`ulimit -n`). Watch the generator's CPU when RTT matters.
+- **Single generator.** Without `--agents`, all load comes from one process ([section 12](#12-distributed-runs) spreads it over several machines). wsblast does not detect when the generator itself is the bottleneck (CPU saturation, file descriptor limit, ephemeral ports). It prints a warning when `-c` plus 64 exceeds the open file limit (`ulimit -n`). Watch the generator's CPU when RTT matters.
 - **Timer resolution.** Per-connection rates above about 1000 msg/s are approximate (see [section 8.3](#83-timer-resolution)).
 - **Live export lags by one interval.** The latency that `--prometheus-listen` and `--otel-endpoint` publish is that of the last completed time-series interval, not of the moment of the read, and the final partial interval is not published (see [section 6.4](#64-live-export)).
 - **Payload bytes only.** Byte counts exclude framing, TLS and handshake traffic, so they understate wire bandwidth.
@@ -403,3 +404,40 @@ A record is dropped, and counted, when:
 The workers never wait, so capture cannot slow the load down by more than the per-frame cost above, but a run that produces frames faster than the disk takes them loses records rather than slowing down. `frames_written + frames_dropped` is every record the run produced. The writer is flushed and the file closed after every worker has stopped and before the report is printed. The report prints `Capture: N frames written, M dropped (FILE)`, and the JSON report carries `metrics.capture` with `path`, `frames_written`, `frames_dropped` and `limit` (absent when the run did not capture).
 
 `wsblast mock --replay FILE` sends the `recv` frames of a capture back to new connections with their recorded timing; see [docs/mock.md](docs/mock.md). A capture is meant for debugging and replay, not for high-rate runs: keep the default limit, or expect drops, when a run sends more than a few hundred thousand frames per second.
+
+## 12. Distributed runs
+
+With `--agents` (feature `distributed`), a coordinator splits one run between several machines running `wsblast agent`, starts them together and merges their results. The coordinator generates no load. [docs/distributed.md](docs/distributed.md) describes the setup, the protocol and the security model; this section defines the numbers.
+
+### 12.1 What each agent runs
+
+Each agent runs its share of the configuration as an ordinary run on its own machine: the same workers, pacing, reconnects, timers and shutdown as sections 1 to 8, and its own live counters, request cap and time series. The share:
+
+- `-c`, `-n` and `--ramp-rate` are divided as evenly as possible, the remainder going to the first agents in `--agents` order, one each (`-c 10` over 3 agents: 4, 3, 3).
+- `--stages`: every agent follows the whole profile and opens its part of the target at every moment, `target(t)` divided as above, so the agents' counts add up to the profile's target at every point ([section 2.1.1](#211-load-stages)).
+- `--rate` is per connection and unchanged; every other setting is unchanged.
+- A share of zero (more agents than connections, than `-n` or than a non-zero `--ramp-rate`) is rejected before anything connects.
+
+Before the start, each agent rebuilds its configuration with the same validation as the command line, resolves the target and builds its TLS settings, as a single run does before its clock starts ([section 4](#4-timing)), and reports ready. The coordinator starts the agents only when every one of them is ready.
+
+### 12.2 How results are merged
+
+Every agent sends, once, its counters, its error breakdown, the number of slots that were interrupted and not started, and its three histograms (handshake, RTT, response time) as the `(value, count)` pair of every non-empty bucket. Rebuilt with the same bounds and precision ([section 5.1](#51-bounds-and-precision)), each histogram has exactly the agent's buckets, and the coordinator adds the rebuilt histograms as a single run adds its workers' histograms. So:
+
+- Counters, byte counts, error categories, reconnects, unsolicited frames and slot counts are sums over the agents.
+- Percentiles, minimum, maximum, mean and standard deviation are computed on the merged histograms: the p99 of a distributed run is the p99 of every sample from every agent, identical to the p99 one process with all the workers would compute from the same samples. Percentiles are never averaged.
+- `total_connections_attempted` is the sum of the agents' slots, so the identities of [section 7](#7-connection-accounting-and-reconnects) hold for the merged report, and `error_rate` uses the merged counts ([section 6](#6-counters-rates-and-formulas)).
+- The live counters each agent sends every second only drive the coordinator's progress bar. They are never merged into the report.
+
+### 12.3 Time across machines
+
+No measurement uses a wall clock or compares clocks of different machines. Every latency sample is taken on one agent with its monotonic clock, so the agents' clocks need no synchronisation.
+
+- **Start skew.** The coordinator sends `start` to every agent at once, on concurrent writes, as soon as the last one is ready. Agent `i` starts when the message arrives, one control-channel latency `d_i` after it was sent. The start times of two agents therefore differ by at most `max(d_i) - min(d_i)`, which is below the largest one-way latency and so below the largest control round trip. The coordinator measures that round trip during the hello exchange and prints it as the start skew bound. On one network segment it is well under a millisecond; between regions it can be tens of milliseconds.
+- **`elapsed`** is the coordinator's time from sending `start` to receiving the last result, with no grace period added or subtracted. It is longer than any agent's own run time by the latency of the start message plus the time to encode and transfer the last result, usually milliseconds, and throughput (`max(sent, received) / elapsed`) is that much lower than the sum of the agents' own throughputs. A lost agent ([section 12.4](#124-lost-agents)) does not extend `elapsed`: the clock stops at the last result that arrived.
+- **Time series.** Each agent's series is counted from its own start, and points with the same interval index are merged: counters and open connections are summed, the duration is the longest of the agents' for that index, throughput is recomputed from the sums, and the latency comes from the sum of the agents' interval histograms, which they send next to their series. So interval percentiles are also those of every sample. Interval `k` of the merged series covers each agent's `[k, k + 1)` intervals, which are shifted against each other by the start skew. `active_connections` adds values sampled up to one skew apart.
+- **Duration and limits.** Each agent ends its own run at its `--duration` or its share of `-n`. Ctrl+C or SIGTERM on the coordinator sends `stop`, and each agent ends its run as on a local Ctrl+C ([section 8.2](#82-shutdown-semantics)) and still sends its result.
+
+### 12.4 Lost agents
+
+An agent is lost when, after the start, it disconnects, reports an error, or sends no result within `--agent-timeout` (default 30 s) after the end of its duration, or after a `stop`. A lost agent's measurements never reach the coordinator, and its work is not given to another agent, so nothing is counted twice: the report covers the agents that finished, as if the lost agents' connections had never been configured. The text and Markdown reports show `Agents: N (lost: ...)`, the JSON report lists every agent in `metrics.distributed.agents` and the lost ones in `metrics.distributed.lost_agents`, and the coordinator prints a warning naming each lost agent. SLOs are evaluated on the merged metrics as usual; the run exits with 2 if one fails and otherwise with 1, because part of the configured load is missing. A failure before the start (an unreachable agent, a rejected token or configuration, a busy agent, a protocol mismatch, or no ready reply within `--agent-timeout`) exits with 1 and nothing runs.
