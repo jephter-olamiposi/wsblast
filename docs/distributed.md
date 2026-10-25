@@ -11,11 +11,12 @@ Contents:
 1. [Running on N machines](#1-running-on-n-machines)
 2. [Flags](#2-flags)
 3. [How the load is split](#3-how-the-load-is-split)
-4. [Architecture and protocol](#4-architecture-and-protocol)
-5. [Security model](#5-security-model)
-6. [Failures and exit codes](#6-failures-and-exit-codes)
-7. [Limitations](#7-limitations)
-8. [Using it from Rust](#8-using-it-from-rust)
+4. [Scenarios, capture, refreshed tokens and live export](#4-scenarios-capture-refreshed-tokens-and-live-export)
+5. [Architecture and protocol](#5-architecture-and-protocol)
+6. [Security model](#6-security-model)
+7. [Failures and exit codes](#7-failures-and-exit-codes)
+8. [Limitations](#8-limitations)
+9. [Using it from Rust](#9-using-it-from-rust)
 
 ## 1. Running on N machines
 
@@ -31,7 +32,7 @@ Contents:
    wsblast agent --listen 0.0.0.0:7700
    ```
 
-   The agent prints `wsblast agent listening on ws://0.0.0.0:7700 (protocol 1, one test at a time)` and then one line per test it runs, naming the coordinator, the target and the connection count. Raise the open-file limit on the agent machines (`ulimit -n 65535`) as you would for a single-machine run.
+   The agent prints `wsblast agent listening on ws://0.0.0.0:7700 (protocol 2, one test at a time)` and then one line per test it runs, naming the coordinator, the target and the connection count. Raise the open-file limit on the agent machines (`ulimit -n 65535`) as you would for a single-machine run.
 
 3. On the coordinator, run the test as usual and add `--agents`:
 
@@ -41,7 +42,7 @@ Contents:
      --max-p99 200ms --format json -o report.json
    ```
 
-   Each agent opens 10,000 of the 30,000 connections. The coordinator prints one progress bar for the whole run (summed from the agents' live counters), then the merged report, and evaluates the SLOs on the merged metrics with the usual exit codes ([section 6](#6-failures-and-exit-codes)).
+   Each agent opens 10,000 of the 30,000 connections. The coordinator prints one progress bar for the whole run (summed from the agents' live counters), then the merged report, and evaluates the SLOs on the merged metrics with the usual exit codes ([section 7](#7-failures-and-exit-codes)).
 
 An agent serves one test after another for as long as it runs; stop it with Ctrl+C or SIGTERM. A test in progress is then stopped and still sends its result.
 
@@ -64,7 +65,7 @@ The coordinator is the normal command plus:
 | `--agent-timeout DURATION` | `30s` | Time the agents get to connect, authenticate, validate the test and become ready (the start barrier), and time each agent gets after the end of the run, or after a stop, to send its result. |
 | `--agent-ca PEM` | off | CA certificates to trust for `wss://` agents, in addition to the platform's roots (which `SSL_CERT_FILE` and `SSL_CERT_DIR` also override). Use it for a private CA or a self-signed agent certificate. |
 
-Every other flag of a normal run keeps its meaning: target, mode, rate, payload, headers, subprotocol, timeouts, pings, `--match`, `--no-reconnect`, GraphQL options, `--auth-*`, SLOs, `--format` and `-o`. These are not supported with `--agents` in this version and are rejected with exit code 1: `--scenario`, `--capture`, `--tui`, `--auth-token-refresh`, `--prometheus-listen` and `--otel-endpoint`.
+Every other flag of a normal run keeps its meaning: target, mode, rate, payload, headers, subprotocol, timeouts, pings, `--match`, `--no-reconnect`, GraphQL options, `--auth-*` including `--auth-token-refresh`, `--scenario` and `--phase`, `--capture` and `--capture-limit`, `--prometheus-listen`, `--otel-*`, SLOs, `--format` and `-o`. [Section 4](#4-scenarios-capture-refreshed-tokens-and-live-export) describes how the scenario, capture, token refresh and export flags work across machines. Only `--tui` is not supported with `--agents` in this version; it is rejected with exit code 1.
 
 ## 3. How the load is split
 
@@ -81,19 +82,69 @@ With N agents, in the order of `--agents`:
 
 When a share would be zero, the run is rejected before anything connects: more agents than connections (or than the highest stage target), than `-n`, or than a non-zero `--ramp-rate`.
 
-## 4. Architecture and protocol
+## 4. Scenarios, capture, refreshed tokens and live export
+
+### 4.1 Scenarios
+
+`--scenario FILE` runs the scenario's phases one after another, as on one machine, and each phase is a distributed run of its own:
+
+- The coordinator compiles the scenario and resolves every phase's target. Each phase is split between the agents exactly like a single run ([section 3](#3-how-the-load-is-split)): its connections, `-n` and ramp rate are divided, a staged phase's profile is shared at every moment, and the phase's actions, think time and payload go to every agent unchanged. A phase that cannot be split (fewer connections, or a lower highest stage target, than agents) is rejected before anything connects, naming the phase.
+- Every phase has its own start barrier: the agents prepare it, report ready, and start together on one `start` message. Phases are 500 ms apart, as on one machine.
+- Each phase's results are merged exactly, histograms included. The phase's own SLOs (`slo:` on the phase) are checked on its merged metrics, and the scenario's SLOs (`slo:` at the top level and the SLO flags) on the metrics merged over every phase, with the usual exit codes. The phases' time series are laid end to end, each counted from the coordinator's start of the phase.
+- Ctrl+C or SIGTERM stops the current phase on every agent, which still send their results, and skips the remaining phases. A stop during a phase's barrier skips that phase too.
+- One control connection carries the whole scenario, so an agent stays busy (and turns other coordinators away) from the first phase to the last.
+- The agents' live counters count from the start of the scenario, across phases, as one machine's do.
+
+An agent lost in a phase takes no part in the later ones, and its shares of them are missing from the report; the other agents keep their own shares, so nothing is counted twice. An agent that fails the barrier of a later phase (it rejects the phase or is not ready within `--agent-timeout`) is lost in the same way and the phase runs on the others. The report lists every agent lost in any phase.
+
+### 4.2 Capture
+
+With `--capture FILE`, every agent records its frames exactly as a single run does ([METHODOLOGY.md, section 11](../METHODOLOGY.md#11-frame-capture)): the same bounded queue of 65,536 records, filled with a non-blocking `try_send`, so a record that cannot be queued is dropped and counted and the workers never wait. Instead of a file, a thread on the agent formats the records and sends them in batches of up to 1,024 to the coordinator over the control channel. When the control channel or the coordinator's disk is slower than the agents produce records, that thread waits, the agent's queue fills and the agent drops records; the load never slows down.
+
+The coordinator writes one file in the same JSON Lines format. The header line also lists the agents, and every record has an `agent` field, the agent's position in `--agents` from 0:
+
+```json
+{"wsblast_capture":1,"target":"ws://10.0.0.20:9001/","started":"2026-10-25T09:30:00.123Z","agents":["10.0.0.11:7700","10.0.0.12:7700"]}
+{"t_us":1532,"agent":0,"worker":0,"dir":"recv","kind":"open","len":0}
+{"t_us":1544,"agent":1,"worker":0,"dir":"recv","kind":"open","len":0}
+```
+
+- `worker` is the connection slot on that agent; each agent numbers its slots from 0.
+- `t_us` counts from the coordinator's start of the run (of the first phase for a scenario): each agent's records are timed on the agent from its own start of the phase and shifted by when the coordinator started that phase. Records of different agents are therefore aligned to within the start skew, like their time series ([METHODOLOGY.md, section 12.3](../METHODOLOGY.md#123-time-across-machines)). Lines are written in the order they arrive, so the file is ordered per agent, not globally.
+- `--capture-limit` applies to the whole run. Every agent may queue up to what is left of the limit when a phase starts, and the coordinator writes records up to the limit in the order they arrive and counts the rest as dropped. So the file holds at most the limit, and each agent sends at most that many records per phase.
+- The report's `Capture: N frames written, M dropped` and `metrics.capture` cover every agent: `frames_written` is what the coordinator wrote, `frames_dropped` adds the records the agents dropped, the ones over the limit and any lost to a write error. The records of an agent lost before its result are not counted as dropped.
+
+The format version stays 1: the `agent` field and the header's `agents` are additions. `wsblast mock --replay` reads such a file and keeps every agent's connections apart ([docs/mock.md, section 5](mock.md#5-recording-and-replaying-a-real-server)).
+
+### 4.3 Refreshed tokens
+
+With `--auth-token-cmd` and `--auth-token-refresh`, the token command runs on the coordinator only, at the start and then on its refresh schedule. Each `prepare` carries the current header value, and every new value is sent to every running agent in a `token` message within about 100 ms of the refresh. An agent keeps the value in a shared live header exactly as one machine does: every handshake from then on, first connection or reconnect, carries the new value, and established connections are not touched. A failed refresh keeps the previous value on the coordinator and therefore on every agent, with the usual warning. Neither side ever prints the value, and it is not part of any error message.
+
+### 4.4 Live export
+
+`--prometheus-listen` and `--otel-endpoint` run on the coordinator and export the cluster's numbers, with the names and meanings of [METHODOLOGY.md, section 6.4](../METHODOLOGY.md#64-live-export):
+
+- The counters and `wsblast_active_connections` are the sums of every agent's latest snapshot. Agents send one every second and once more at the end of each phase, so the exported values trail the agents by up to one second more than on a single machine. The counters of a lost agent stay at its last snapshot and its open connections count as 0.
+- The latency is that of the last completed time-series interval merged from every agent's interval histogram: each snapshot carries the agent's two most recently completed intervals, and the coordinator exports an interval one second after it ended on its own clock, once every agent has had a tick to send it. So the latency lags the run by up to one interval plus one second; when a phase ends, the last interval that ended before it is exported from the agents' results.
+- `wsblast_run_elapsed_seconds` runs on the coordinator's clock from the first phase's start.
+
+The coordinator keeps these cluster totals in a live-metrics registry of its own whether or not an exporter runs, so a display that reads live counters (as the TUI does on one machine) can read them too.
+
+## 5. Architecture and protocol
 
 The coordinator opens one WebSocket control connection to each agent, sending the token as `Authorization: Bearer TOKEN` in the handshake. Every message is a JSON text frame with a `type` field:
 
 | Message | Direction | Content |
 | :--- | :--- | :--- |
-| `hello` | both | `protocol` (the protocol version, currently 1) and `version` (the wsblast version). The coordinator sends first and the agent answers. |
-| `prepare` | coordinator to agent | `config`: the agent's share of the test, and `start_timeout`: how long the agent waits for `start`. |
+| `hello` | both | `protocol` (the protocol version, currently 2) and `version` (the wsblast version). The coordinator sends first and the agent answers. |
+| `prepare` | coordinator to agent | `config`: the agent's share of the test or of one scenario phase, and `start_timeout`: how long the agent waits for `start`. |
 | `ready` | agent to coordinator | `connections`: the agent validated the configuration, resolved the target, built its TLS settings and waits. Nothing has connected to the target yet. |
 | `start` | coordinator to agent | Start the run now. |
-| `snapshot` | agent to coordinator | Every second while the run lasts: `elapsed` and `live`, the agent's live counters. Progress only; they are never merged into the report. |
+| `snapshot` | agent to coordinator | Every second while the run lasts, and once more just before `result`: `elapsed`, `live`, the agent's live counters since the start of the test, and `intervals`, the latency histograms of the phase's two most recently completed time-series intervals. Progress and live export only; they are never merged into the report. |
+| `capture` | agent to coordinator | `records`: a batch of capture records, with `--capture` only ([section 4.2](#42-capture)). |
+| `token` | coordinator to agent | `value`: the new value of the authentication header, with `--auth-token-refresh` only ([section 4.3](#43-refreshed-tokens)). |
 | `stop` | coordinator to agent | End the run early. Before `start` it cancels the test. |
-| `result` | agent to coordinator | The outcome of the run, the last message an agent sends for a test. |
+| `result` | agent to coordinator | The outcome of the run or phase. |
 | `error` | both | `message`: the test cannot go on. The sender closes the connection after it. |
 
 A test goes through these steps:
@@ -103,10 +154,13 @@ A test goes through these steps:
 3. **Prepare.** The coordinator sends each agent its share. The agent rebuilds a configuration from it with the same builder and validation as the command line and answers `ready`, or an `error` explaining what it rejected.
 4. **Barrier.** The coordinator waits until every agent is ready, for at most `--agent-timeout` in total. If any agent is unreachable, rejects the token, is busy, speaks another protocol, rejects the configuration or is not ready in time, the coordinator tells the ready agents to stop, prints which agents failed and why, and exits with code 1. Nothing has run.
 5. **Start.** The coordinator sends `start` to every agent at once, on concurrent writes, and prints a bound on the start skew: the slowest `hello` round trip.
-6. **Run.** Each agent runs its share exactly as a single-machine run would, ends at its duration, its request limit or a `stop`, and sends one `result`.
-7. **Merge.** The coordinator merges every result that arrived and prints the report.
+6. **Run.** Each agent runs its share exactly as a single-machine run would, ends at its duration, its request limit or a `stop`, sends the rest of its capture records and a last `snapshot`, and sends one `result`.
+7. **Next phase.** For a scenario, the coordinator sends the next phase's `prepare` on the same connection, and steps 3 to 6 repeat. An agent waits for it for the phase's duration plus `start_timeout` plus 60 seconds.
+8. **Merge.** The coordinator closes the control connections, merges every result that arrived and prints the report.
 
-The `config` of `prepare` is a dedicated wire structure, not a serialised `LoadTestConfig`: the target, the mode, the connections, ramp rate and request limit of this agent, the duration, the stages and the agent's share of them, the rate, the payload (text as is, binary as base64), the handshake headers (including resolved `--auth-*` credentials), the subprotocol, the timeouts, the ping interval, `--match`, the reconnect setting and the GraphQL settings. SLOs, the report format and file paths stay on the coordinator.
+The `config` of `prepare` is a dedicated wire structure, not a serialised `LoadTestConfig`: the target, the mode, the connections, ramp rate and request limit of this agent, the duration, the stages and the agent's share of them, the rate, the payload (text as is, binary as base64), the handshake headers (including resolved `--auth-*` credentials), the subprotocol, the timeouts, the ping interval, `--match`, the reconnect setting and the GraphQL settings; and, when they apply, `phase` (the scenario phase's name, think time and actions), `capture` (how many records the agent may still queue) and `live_auth` (the refreshed header's name and current value). SLOs, the report format and file paths stay on the coordinator.
+
+Version 2 of the protocol added scenario phases, the `capture` and `token` messages and the snapshot's `intervals`. A wsblast speaking protocol 1 and one speaking protocol 2 reject each other at the hello, with an error naming both versions.
 
 A `result` carries the agent's counters, its error breakdown, its interrupted and not-started slot counts, its handshake, RTT and response-time histograms as `[value, count]` pairs of every non-empty bucket, its time series, and the latency histogram of every time-series interval in the same form. A histogram rebuilt from these pairs has exactly the agent's buckets, so merging rebuilt histograms gives the same percentiles as merging the agents' own.
 
@@ -117,12 +171,12 @@ Example `prepare` and `result` messages, abbreviated:
 {"type":"result","result":{"elapsed":{"secs":300,"nanos":1200000},"started_at_unix_ms":1761400000123,"connections":4,"not_started":0,"totals":{"messages_sent":2400,"rtt":[[812,3],[815,9],"..."],"...":"..."},"time_series":{"...":"..."},"intervals":[{"index":0,"values":[[810,4],"..."]},"..."]}}
 ```
 
-## 5. Security model
+## 6. Security model
 
 An agent opens connections to whatever target an authenticated coordinator names, with whatever headers it sends, so the token is what stands between the agent and anyone who can reach its port.
 
 - **The token is required.** An agent does not start without one, and both sides reject tokens shorter than 16 characters. Use a long random value (`openssl rand -hex 32`) and keep it out of shell history, for example in `WSBLAST_AGENT_TOKEN`. The agent compares tokens in constant time and logs every rejected connection to stderr with the peer address.
-- **The control channel carries secrets.** The token travels in the handshake of every control connection, and the test's handshake headers travel in `prepare`, including credentials from `--auth-token`, `--auth-apikey`, `--auth-token-cmd` or `-H "Authorization: ..."`. Over plain `ws://` anyone on the path can read them. Use one of:
+- **The control channel carries secrets.** The token travels in the handshake of every control connection, and the test's handshake headers travel in `prepare`, including credentials from `--auth-token`, `--auth-apikey`, `--auth-token-cmd` or `-H "Authorization: ..."`, as do refreshed tokens in `token` messages. Capture records carry the frames' payloads. Over plain `ws://` anyone on the path can read them. Use one of:
   - TLS: start the agents with `--tls-cert` and `--tls-key` and list them as `wss://HOST:PORT`; give the coordinator `--agent-ca` when the certificate is not signed by a public CA;
   - a private network (VPC, VPN, WireGuard) that only the coordinator and the agents can reach;
   - an SSH tunnel per agent: `ssh -N -L 7701:127.0.0.1:7700 agent1` on the coordinator, the agent started with `--listen 127.0.0.1:7700`, and `--agents 127.0.0.1:7701`.
@@ -130,7 +184,7 @@ An agent opens connections to whatever target an authenticated coordinator names
 - **One coordinator at a time.** An agent runs one test at a time and turns other coordinators away with `HTTP 409` until it is done, so a second coordinator cannot hijack or disturb a running test.
 - The coordinator does not authenticate agents beyond TLS: with `ws://`, anyone who can redirect traffic to an agent address can receive the token and the test's headers.
 
-## 6. Failures and exit codes
+## 7. Failures and exit codes
 
 | Situation | What happens | Exit code |
 | :--- | :--- | :--- |
@@ -139,19 +193,21 @@ An agent opens connections to whatever target an authenticated coordinator names
 | Ctrl+C or SIGTERM on the coordinator after the start | `stop` is sent to every agent; each stops its run and sends its result, which is merged and reported as for a run that ended at its duration. | by the usual rules |
 | An agent disconnects, sends an `error`, or sends no result within `--agent-timeout` after the end of the run (or after a `stop`) | The run still reports the agents that finished. A warning names each lost agent and the reason, the report shows `Agents: N (lost: ...)`, and the JSON report lists it in `metrics.distributed.lost_agents`. | 1, or 2 if an SLO failed |
 | Every agent is lost | There is nothing to report; the error names every agent and its reason. | 1 |
+| In a scenario, an agent fails the barrier of a later phase, or is lost during a phase | The agent is lost: the phase runs on the others, the agent takes no part in later phases, and it is reported as above with the phase in its reason. If every agent is lost, the remaining phases are skipped and the phases that ran are reported. | 1, or 2 if an SLO failed |
 | A coordinator disconnects from an agent | The agent stops that run at once and is free for the next coordinator. | (agent keeps running) |
 
 A lost agent's work is never re-run on another agent, so nothing is counted twice; its share of connections and messages is simply missing from the report, which is why a run with a lost agent exits with 1. Other exit codes follow [METHODOLOGY.md, section 9](../METHODOLOGY.md#9-slo-evaluation-and-exit-codes).
 
-## 7. Limitations
+## 8. Limitations
 
-- Not supported with `--agents` in this version: scenarios (`--scenario`), `--capture`, the TUI, `--auth-token-refresh`, and live export (`--prometheus-listen`, `--otel-*`). Each is rejected with exit code 1.
+- The TUI (`--tui`) is not supported with `--agents` in this version and is rejected with exit code 1.
+- Live export trails a single machine's by up to one second ([section 4.4](#44-live-export)).
 - Run the same wsblast version everywhere. A different protocol version is rejected; the same protocol from another release works, but the agents then measure with their own release's rules.
-- `--auth-token-cmd` runs once, on the coordinator, and the resulting header is sent to every agent.
+- `--auth-token-cmd` runs on the coordinator only, once at the start and again on every `--auth-token-refresh`, and the resulting header is sent to every agent.
 - Agents start within the control channel's latency of each other, not at the same instant, and their time series are aligned on their own starts ([METHODOLOGY.md, section 12.3](../METHODOLOGY.md#123-time-across-machines)). Keep the coordinator close to the agents when per-second detail matters.
 - The coordinator does not check that the agents are not saturated. Watch their CPU as you would for a single machine.
 - The agents' wall clocks are not used for any measurement; `started_at_unix_ms` in the library's per-agent outcome is informational.
 
-## 8. Using it from Rust
+## 9. Using it from Rust
 
-`wsblast::distributed` has the same agent and coordinator as the command line. `AgentConfig::builder()` and `AgentServer::bind` start an agent in-process (port 0 works); `Coordinator::new(config, agents, token)` takes a `LoadTestConfig`, and `run()` returns a `DistributedOutcome` with the merged `AggregatedMetrics` and, for each agent, its own metrics or the reason it was lost. The crate's `tests/distributed.rs` runs agents and a coordinator against the mock server in one process.
+`wsblast::distributed` has the same agent and coordinator as the command line. `AgentConfig::builder()` and `AgentServer::bind` start an agent in-process (port 0 works); `Coordinator::new(config, agents, token)` takes a `LoadTestConfig`, and `run()` returns a `DistributedOutcome` with the merged `AggregatedMetrics` and, for each agent, its own metrics or the reason it was lost. A configuration built with `.capture(path)` captures across the agents. `Coordinator::scenario(scenario, base_config, phase, target, agents, token)` takes a `ScenarioConfig` like `ScenarioExecutor::new`, and `run_scenario()` returns a `DistributedScenarioOutcome`: the `ScenarioOutcome` a single machine would return (merged metrics, every phase with its merged metrics and SLO result, and the SLO gate of the run), each agent over the whole scenario, and each agent's part of every phase. `Coordinator::live_snapshot()` reads the cluster's live counters while a run is in progress. The crate's `tests/distributed.rs` runs agents and a coordinator against the mock server in one process.

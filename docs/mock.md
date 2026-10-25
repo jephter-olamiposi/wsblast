@@ -114,8 +114,8 @@ Replay turns traffic recorded from a real server into a local, repeatable target
 How replay works:
 
 - The file must start with a `wsblast_capture` version 1 header. Only `recv` records of kind `text` and `binary` are replayed; sent frames, `open` records and Close frames are not. Binary frames are decoded from base64.
-- Records are grouped by their `worker` field. Each recorded worker's frames are one script, with each frame's time taken relative to that worker's first record of any kind (normally its `open` record). Workers that received no data frames are skipped.
-- Connections are assigned scripts round robin in the order their handshakes complete: the first connection gets the lowest recorded worker number, the next one the next worker, and so on, wrapping around. Rejected upgrades do not take a turn.
+- Records are grouped by their `worker` field, and in a capture of a distributed run ([docs/distributed.md](distributed.md#4-scenarios-capture-refreshed-tokens-and-live-export)) by their `agent` and `worker` fields, since every agent numbers its connections from 0. Each recorded worker's frames are one script, with each frame's time taken relative to that worker's first record of any kind (normally its `open` record). Workers that received no data frames are skipped.
+- Connections are assigned scripts round robin in the order their handshakes complete: the first connection gets the lowest recorded worker number (of the lowest agent), the next one the next worker, and so on, wrapping around. Rejected upgrades do not take a turn.
 - Each frame is sent at the connection's start plus its recorded offset, plus `--delay` and a fresh jitter draw if set. A stall holds replayed frames like echo replies, and `--close-after N` closes the connection after N replayed frames.
 - Frames from the client are read, counted and discarded. After the script's last frame the connection stays open until the client closes it or the server stops.
 - A worker that reconnected during the recording has all its sessions in one script, so its replay contains the frames of every session, spaced as they were recorded.
