@@ -56,6 +56,43 @@ pub struct Runner {
     capture: Option<crate::capture::CaptureHandle>,
 }
 
+/// The configuration a scenario phase runs with: `config` with the phase's
+/// sizing, duration, ramp, stages, rate and payload.
+#[cfg(feature = "scenario")]
+pub(crate) fn phase_config(mut config: LoadTestConfig, phase: &ScenarioPhase) -> LoadTestConfig {
+    config.connections = phase.connections;
+    config.duration = phase.duration;
+    config.ramp_rate = phase.ramp_rate;
+    // A staged phase runs exactly like `--stages`; any other phase holds
+    // its connection count, whatever stages the base configuration had.
+    config.stages = phase.stages.clone();
+    config.rate_per_conn = phase.rate_per_conn;
+    if let Some(payload) = phase.payload.clone() {
+        config.payload = payload;
+    }
+    config
+}
+
+/// The latency a run of `config` reports in its time series: response time
+/// for paced echo runs whose workers record it, RTT otherwise. `scripted`
+/// says whether a scenario phase drives the workers with an action script
+/// or a think time.
+pub(crate) fn latency_basis_for(config: &LoadTestConfig, scripted: bool) -> &'static str {
+    let paced_echo = config.mode == crate::cli::TestMode::Echo && config.rate_per_conn > 0;
+    if paced_echo && !scripted {
+        "response_time"
+    } else {
+        "rtt"
+    }
+}
+
+/// Whether a scenario phase drives its workers with actions or a think time
+/// instead of the plain paced loop.
+#[cfg(feature = "scenario")]
+pub(crate) fn phase_is_scripted(phase: &ScenarioPhase) -> bool {
+    !phase.actions.is_empty() || !phase.think_time.is_zero()
+}
+
 impl Runner {
     /// Creates a runner for `config`. Nothing connects until [`Runner::run`].
     pub fn new(config: LoadTestConfig) -> Self {
@@ -80,19 +117,9 @@ impl Runner {
     /// endpoint selection stays with the caller because CLI URLs take
     /// precedence over scenario endpoints.
     #[cfg(feature = "scenario")]
-    pub(crate) fn with_scenario(mut config: LoadTestConfig, phase: ScenarioPhase) -> Self {
-        config.connections = phase.connections;
-        config.duration = phase.duration;
-        config.ramp_rate = phase.ramp_rate;
-        // A staged phase runs exactly like `--stages`; any other phase holds
-        // its connection count, whatever stages the base configuration had.
-        config.stages = phase.stages.clone();
-        config.rate_per_conn = phase.rate_per_conn;
-        if let Some(payload) = phase.payload.clone() {
-            config.payload = payload;
-        }
+    pub(crate) fn with_scenario(config: LoadTestConfig, phase: ScenarioPhase) -> Self {
         Self {
-            config: Arc::new(config),
+            config: Arc::new(phase_config(config, &phase)),
             live_metrics: LiveMetrics::new(),
             cancel_token: CancellationToken::new(),
             handle_signals: true,
@@ -107,15 +134,11 @@ impl Runner {
     /// The latency the time series reports: response time for paced echo
     /// runs whose workers record it, RTT otherwise.
     fn latency_basis(&self) -> &'static str {
-        let paced_echo =
-            self.config.mode == crate::cli::TestMode::Echo && self.config.rate_per_conn > 0;
         #[cfg(feature = "scenario")]
-        let paced_echo = paced_echo
-            && self
-                .scenario
-                .as_ref()
-                .is_none_or(|phase| phase.actions.is_empty() && phase.think_time.is_zero());
-        if paced_echo { "response_time" } else { "rtt" }
+        let scripted = self.scenario.as_deref().is_some_and(phase_is_scripted);
+        #[cfg(not(feature = "scenario"))]
+        let scripted = false;
+        latency_basis_for(&self.config, scripted)
     }
 
     fn create_session(

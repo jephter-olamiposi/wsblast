@@ -1881,7 +1881,7 @@ fn invalid_phase(phase: &str, message: &str) -> ConfigError {
 /// application ranges 3000-4999. RFC 6455 forbids sending 1004-1006 and
 /// 1015, and reserves 1016-2999 for future protocol use.
 #[cfg(feature = "scenario")]
-fn validate_close_code(code: u16) -> Result<u16> {
+pub(crate) fn validate_close_code(code: u16) -> Result<u16> {
     match code {
         1000..=1003 | 1007..=1014 | 3000..=4999 => Ok(code),
         _ => Err(ConfigError::InvalidScenario(format!(

@@ -21,7 +21,10 @@ use std::time::Duration;
 
 /// Version of the control protocol. Raised on any incompatible change to a
 /// message after `hello`.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// Version 2 added scenario phases: several `prepare` to `result` rounds on
+/// one connection.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The shortest agent token accepted.
 pub const MIN_TOKEN_LEN: usize = 16;
@@ -48,7 +51,9 @@ pub(crate) enum Message {
     Ready { connections: usize },
     /// Coordinator to agent: start the run now.
     Start,
-    /// Agent to coordinator, every second while the run lasts.
+    /// Agent to coordinator, every second while the run lasts and once
+    /// more just before `result`. `live` counts from the start of the test,
+    /// across every phase of a scenario.
     Snapshot {
         elapsed: Duration,
         live: WireSnapshot,
@@ -194,6 +199,36 @@ pub(crate) enum WirePayload {
     Binary { base64: String },
 }
 
+/// An action of a scenario phase on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum WireAction {
+    Send {
+        payload: Option<WirePayload>,
+        count: u64,
+    },
+    Wait {
+        duration: Duration,
+    },
+    Ping {
+        interval: Duration,
+    },
+    Close {
+        code: u16,
+        reason: String,
+    },
+}
+
+/// What a scenario phase adds to a run: its name, think time and actions.
+/// Its sizing, duration, rate and payload are already in the
+/// [`WireConfig`] it travels in; its SLOs stay on the coordinator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WirePhase {
+    pub(crate) name: String,
+    pub(crate) think_time: Duration,
+    pub(crate) actions: Vec<WireAction>,
+}
+
 /// GraphQL WS settings on the wire.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WireGraphql {
@@ -235,6 +270,9 @@ pub(crate) struct WireConfig {
     pub(crate) reply_match: String,
     pub(crate) reconnect: bool,
     pub(crate) graphql: Option<WireGraphql>,
+    /// The scenario phase this share runs, if any.
+    #[serde(default)]
+    pub(crate) phase: Option<WirePhase>,
 }
 
 fn unsupported(message: impl Into<String>) -> WsBlastError {
@@ -391,6 +429,7 @@ impl WireConfig {
             reply_match: config.reply_match.flag_value(),
             reconnect: !config.no_reconnect,
             graphql,
+            phase: None,
         })
     }
 
@@ -491,6 +530,124 @@ impl WireConfig {
             return Err(ConfigError::ZeroConcurrency(0).into());
         }
         Ok(config)
+    }
+}
+
+#[cfg(feature = "scenario")]
+fn wire_payload(payload: &PayloadConfig) -> WirePayload {
+    match payload {
+        PayloadConfig::StaticText(text) => WirePayload::Text {
+            text: text.as_str().to_string(),
+        },
+        PayloadConfig::DynamicText(text) => WirePayload::Text { text: text.clone() },
+        PayloadConfig::Binary(bytes) => WirePayload::Binary {
+            base64: crate::base64::encode(bytes),
+        },
+    }
+}
+
+#[cfg(feature = "scenario")]
+fn payload_from_wire(payload: WirePayload) -> Result<PayloadConfig> {
+    match payload {
+        WirePayload::Text { text } => Ok(PayloadConfig::from_text(text)),
+        WirePayload::Binary { base64 } => crate::base64::decode(&base64)
+            .map(|bytes| PayloadConfig::Binary(bytes.into()))
+            .ok_or_else(|| {
+                ConfigError::InvalidOption("a binary payload is not valid base64".to_string())
+                    .into()
+            }),
+    }
+}
+
+#[cfg(feature = "scenario")]
+impl WirePhase {
+    /// The parts of `phase` an agent needs besides its share.
+    pub(crate) fn from_phase(phase: &crate::config::ScenarioPhase) -> Self {
+        use crate::config::ScenarioAction;
+        Self {
+            name: phase.name.clone(),
+            think_time: phase.think_time,
+            actions: phase
+                .actions
+                .iter()
+                .map(|action| match action {
+                    ScenarioAction::Send { payload, count } => WireAction::Send {
+                        payload: payload.as_ref().map(wire_payload),
+                        count: *count,
+                    },
+                    ScenarioAction::Wait(duration) => WireAction::Wait {
+                        duration: *duration,
+                    },
+                    ScenarioAction::Ping(interval) => WireAction::Ping {
+                        interval: *interval,
+                    },
+                    ScenarioAction::Close { code, reason } => WireAction::Close {
+                        code: *code,
+                        reason: reason.clone(),
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    /// Rebuilds the phase an agent runs with `config`, its share: sizing,
+    /// duration, ramp, stages, rate and payload come from `config`, so the
+    /// runner keeps the agent's share. SLOs are checked on the coordinator.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error for an action the command line would
+    /// reject.
+    pub(crate) fn into_phase(
+        self,
+        config: &LoadTestConfig,
+    ) -> Result<crate::config::ScenarioPhase> {
+        use crate::config::ScenarioAction;
+        let invalid = |reason: &str| -> WsBlastError {
+            ConfigError::InvalidScenario(format!("phase '{}': {reason}", self.name)).into()
+        };
+        let actions = self
+            .actions
+            .into_iter()
+            .map(|action| {
+                Ok(match action {
+                    WireAction::Send { payload, count } => {
+                        if count == 0 {
+                            return Err(invalid("send action count must be greater than zero"));
+                        }
+                        ScenarioAction::Send {
+                            payload: payload.map(payload_from_wire).transpose()?,
+                            count,
+                        }
+                    }
+                    WireAction::Wait { duration } if duration.is_zero() => {
+                        return Err(invalid("wait action duration must be greater than zero"));
+                    }
+                    WireAction::Wait { duration } => ScenarioAction::Wait(duration),
+                    WireAction::Ping { interval } if interval.is_zero() => {
+                        return Err(invalid("ping action interval must be greater than zero"));
+                    }
+                    WireAction::Ping { interval } => ScenarioAction::Ping(interval),
+                    WireAction::Close { code, reason } => ScenarioAction::Close {
+                        code: crate::config::validate_close_code(code)?,
+                        reason,
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(crate::config::ScenarioPhase {
+            name: self.name,
+            target: None,
+            duration: config.duration,
+            connections: config.connections,
+            ramp_rate: config.ramp_rate,
+            rate_per_conn: config.rate_per_conn,
+            payload: Some(config.payload.clone()),
+            think_time: self.think_time,
+            actions,
+            slo: crate::config::SloThresholds::default(),
+            stages: config.stages.clone(),
+        })
     }
 }
 
@@ -976,6 +1133,85 @@ mod tests {
         assert!(validate_token("short").is_err());
         assert!(validate_token("0123456789abcde f").is_err());
         assert!(validate_token("0123456789abcdef").is_ok());
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn scenario_phases_travel_with_their_actions_and_the_agents_share() {
+        let scenario = crate::ScenarioConfig::from_yaml(
+            r#"
+version: "1.0"
+target: "ws://127.0.0.1:9/"
+metadata:
+  name: "wire"
+phases:
+  - name: "scripted"
+    connections: 9
+    duration: "2s"
+    rate_per_conn: 4
+    think_time: "15ms"
+    payload: "base"
+    actions:
+      - type: Send
+        payload: "{{seq}}"
+        count: 3
+      - type: Wait
+        duration: "50ms"
+      - type: Ping
+        interval: "1s"
+      - type: Close
+        code: 4001
+        reason: "bye"
+"#,
+        )
+        .unwrap();
+        let phase = scenario.compile(None).unwrap().remove(0);
+        let base = config(LoadTestConfig::builder("ws://127.0.0.1:9/"));
+        let whole = crate::runner::phase_config(base, &phase);
+        let mut shares = plan(&whole, 2).unwrap();
+        let mut share = shares.remove(1);
+        share.phase = Some(WirePhase::from_phase(&phase));
+        let message = Message::Prepare {
+            config: Box::new(share),
+            start_timeout: Duration::from_secs(1),
+        };
+        let Message::Prepare { config: wire, .. } = Message::decode(&message.encode()).unwrap()
+        else {
+            panic!("not a prepare message");
+        };
+        let mut wire = *wire;
+        let wire_phase = wire.phase.take().unwrap();
+        let agent = wire.into_config().unwrap();
+        let rebuilt = wire_phase.into_phase(&agent).unwrap();
+        assert_eq!(rebuilt.name, "scripted");
+        assert_eq!(rebuilt.connections, 4, "the agent's share of 9");
+        assert_eq!(rebuilt.duration, Duration::from_secs(2));
+        assert_eq!(rebuilt.rate_per_conn, 4);
+        assert_eq!(rebuilt.think_time, Duration::from_millis(15));
+        assert_eq!(rebuilt.actions.len(), 4);
+        assert!(matches!(
+            &rebuilt.actions[0],
+            crate::config::ScenarioAction::Send { payload: Some(PayloadConfig::DynamicText(t)), count: 3 } if t == "{{seq}}"
+        ));
+        assert!(matches!(
+            rebuilt.actions[1],
+            crate::config::ScenarioAction::Wait(d) if d == Duration::from_millis(50)
+        ));
+        assert!(matches!(
+            &rebuilt.actions[3],
+            crate::config::ScenarioAction::Close { code: 4001, reason } if reason == "bye"
+        ));
+        assert!(
+            matches!(rebuilt.payload, Some(PayloadConfig::StaticText(ref t)) if t.as_str() == "base")
+        );
+        assert_eq!(rebuilt.slo, crate::config::SloThresholds::default());
+
+        let mut bad = WirePhase::from_phase(&phase);
+        bad.actions = vec![WireAction::Close {
+            code: 1005,
+            reason: String::new(),
+        }];
+        assert!(bad.into_phase(&agent).is_err());
     }
 
     #[test]

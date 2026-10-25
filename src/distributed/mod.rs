@@ -1,6 +1,7 @@
 //! Distributed load generation: `wsblast agent` on every load machine and a
 //! [`Coordinator`] (`wsblast URL --agents ...`) that splits a run between
-//! them, starts them together and merges their results.
+//! them, starts them together and merges their results. A scenario runs
+//! phase by phase, each phase split, started and merged the same way.
 //!
 //! The coordinator and the agents talk over a WebSocket control channel,
 //! authenticated with a shared token sent as `Authorization: Bearer` and
@@ -50,6 +51,8 @@ mod protocol;
 mod tls;
 
 pub use agent::{AgentConfig, AgentConfigBuilder, AgentServer};
+#[cfg(feature = "scenario")]
+pub use coordinator::DistributedScenarioOutcome;
 pub use coordinator::{AgentOutcome, Coordinator, DEFAULT_AGENT_TIMEOUT, DistributedOutcome};
 pub(crate) use protocol::Share;
 pub use protocol::{MIN_TOKEN_LEN, PROTOCOL_VERSION, TOKEN_ENV};

@@ -6,7 +6,7 @@ use super::protocol::{
 };
 use super::{HANDSHAKE_TIMEOUT, SETUP_TIMEOUT, ws_config};
 use crate::error::{ConfigError, Result};
-use crate::metrics::MetricsTotals;
+use crate::metrics::{LiveMetrics, MetricsTotals};
 use crate::runner::Runner;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
@@ -435,8 +435,17 @@ fn unexpected(message: &Message, expected: &str) -> String {
     format!("expected a {expected} message, received {}", message.kind())
 }
 
-/// Runs one test on an authenticated control connection. Returns the
-/// message of an `error` to send when the test cannot go on; a closed
+/// How a phase of a test ended.
+enum PhaseEnd {
+    /// The result was sent; the coordinator may send another phase.
+    Done,
+    /// The coordinator disconnected; the run was stopped.
+    CoordinatorGone,
+}
+
+/// Runs one test on an authenticated control connection: one phase, or
+/// every phase of a scenario, each a `prepare` to `result` round. Returns
+/// the message of an `error` to send when the test cannot go on; a closed
 /// connection ends the test silently.
 async fn run_test<S>(
     sink: &mut Sink<S>,
@@ -457,15 +466,81 @@ where
     }
     send(sink, &Message::hello()).await.map_err(closed)?;
 
-    let (wire, start_timeout) = match recv_within(stream, SETUP_TIMEOUT, cancel).await {
-        Ok(Message::Prepare {
-            config,
+    // The live counters count from the start of the test, across every
+    // phase, as a single-machine scenario's do.
+    let live = LiveMetrics::new();
+    let mut wait = SETUP_TIMEOUT;
+    loop {
+        let (wire, start_timeout) = match recv_within(stream, wait, cancel).await {
+            Ok(Message::Prepare {
+                config,
+                start_timeout,
+            }) => (config, start_timeout),
+            Ok(Message::Stop) | Err(RecvError::Closed(_)) => return Ok(()),
+            Ok(other) => return Err(unexpected(&other, "prepare")),
+            Err(RecvError::Invalid(reason)) => return Err(reason),
+        };
+        // The coordinator sends the next phase once every agent's result is
+        // in, at most the agent timeout after the end of this one.
+        wait = wire.duration + start_timeout + SETUP_TIMEOUT;
+        match run_phase(
+            sink,
+            stream,
+            peer,
+            shared,
+            cancel,
+            *wire,
             start_timeout,
-        }) => (config, start_timeout),
-        Ok(Message::Stop) | Err(RecvError::Closed(_)) => return Ok(()),
-        Ok(other) => return Err(unexpected(&other, "prepare")),
-        Err(RecvError::Invalid(reason)) => return Err(reason),
-    };
+            &live,
+        )
+        .await?
+        {
+            PhaseEnd::Done => {}
+            PhaseEnd::CoordinatorGone => return Ok(()),
+        }
+    }
+}
+
+/// A runner for `config`, running `phase`'s actions when there is one.
+fn phase_runner(
+    config: crate::LoadTestConfig,
+    phase: Option<super::protocol::WirePhase>,
+) -> std::result::Result<Runner, String> {
+    match phase {
+        None => Ok(Runner::new(config)),
+        #[cfg(feature = "scenario")]
+        Some(phase) => {
+            let phase = phase
+                .into_phase(&config)
+                .map_err(|e| format!("invalid configuration: {e}"))?;
+            Ok(Runner::with_scenario(config, phase))
+        }
+        #[cfg(not(feature = "scenario"))]
+        Some(_) => Err(
+            "invalid configuration: scenario phases need the 'scenario' feature, which this agent's build of wsblast does not include"
+                .to_string(),
+        ),
+    }
+}
+
+/// Runs one phase: validate and answer `ready`, wait for `start`, run while
+/// sending snapshots, and send the result.
+#[allow(clippy::too_many_arguments)]
+async fn run_phase<S>(
+    sink: &mut Sink<S>,
+    stream: &mut Stream<S>,
+    peer: SocketAddr,
+    shared: &Shared,
+    cancel: &CancellationToken,
+    mut wire: super::protocol::WireConfig,
+    start_timeout: Duration,
+    live: &Arc<LiveMetrics>,
+) -> std::result::Result<PhaseEnd, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let closed = |_| String::new();
+    let phase = wire.phase.take();
     let config = wire
         .into_config()
         .map_err(|e| format!("invalid configuration: {e}"))?;
@@ -479,12 +554,20 @@ where
             config.duration
         )
     };
+    let phase_label = phase
+        .as_ref()
+        .map(|phase| format!(" phase '{}'", phase.name))
+        .unwrap_or_default();
     println!(
-        "wsblast agent: test from {peer}: {} with {sizing}",
+        "wsblast agent: test from {peer}{phase_label}: {} with {sizing}",
         config.target_url
     );
 
-    let runner = Arc::new(Runner::new(config).with_signal_handling(false));
+    let runner = Arc::new(
+        phase_runner(config, phase)?
+            .with_live_metrics(Arc::clone(live))
+            .with_signal_handling(false),
+    );
     let target = tokio::select! {
         target = runner.prepare_target() => target,
         () = cancel.cancelled() => return Err("the agent is shutting down".to_string()),
@@ -498,7 +581,7 @@ where
 
     match recv_within(stream, start_timeout + START_SLACK, cancel).await {
         Ok(Message::Start) => {}
-        Ok(Message::Stop) | Err(RecvError::Closed(_)) => return Ok(()),
+        Ok(Message::Stop) | Err(RecvError::Closed(_)) => return Ok(PhaseEnd::CoordinatorGone),
         Ok(other) => return Err(unexpected(&other, "start")),
         Err(RecvError::Invalid(reason)) => return Err(reason),
     }
@@ -546,11 +629,22 @@ where
     };
     if coordinator_gone {
         eprintln!("wsblast agent: coordinator {peer} disconnected; its test was stopped");
-        return Ok(());
+        return Ok(PhaseEnd::CoordinatorGone);
     }
     let outcome = outcome
         .map_err(|e| format!("the run failed: {e}"))?
         .map_err(|e| format!("the run failed: {e}"))?;
+
+    // Every worker has stopped: the final counters, then the result.
+    send(
+        sink,
+        &Message::Snapshot {
+            elapsed: outcome.elapsed,
+            live: runner.live_snapshot().into(),
+        },
+    )
+    .await
+    .map_err(closed)?;
 
     let mut totals = MetricsTotals::new().map_err(|e| e.to_string())?;
     for worker in outcome.worker_metrics {
@@ -575,5 +669,5 @@ where
     )
     .await
     .map_err(closed)?;
-    Ok(())
+    Ok(PhaseEnd::Done)
 }

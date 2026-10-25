@@ -487,9 +487,6 @@ fn otel_settings(
 #[cfg(feature = "distributed")]
 fn check_distributed_options(cli: &Cli) -> Result<()> {
     let mut unsupported: Vec<&str> = Vec::new();
-    if cli.scenario.is_some() {
-        unsupported.push("--scenario");
-    }
     #[cfg(feature = "capture")]
     if cli.capture.is_some() {
         unsupported.push("--capture");
@@ -518,9 +515,17 @@ fn check_distributed_options(cli: &Cli) -> Result<()> {
     }
 }
 
-/// `wsblast URL --agents ...`: runs the test on the agents, prints the
-/// merged report and exits with 2 on an SLO breach, else 1 when an agent was
-/// lost.
+/// What a distributed run, single or scenario, reports.
+#[cfg(feature = "distributed")]
+struct DistributedResult {
+    run: RunResult,
+    /// Addresses and reasons of the lost agents.
+    lost: Vec<(String, String)>,
+}
+
+/// `wsblast URL --agents ...`: runs the test, or the scenario, on the
+/// agents, prints the merged report and exits with 2 on an SLO breach, else
+/// 1 when an agent was lost.
 #[cfg(feature = "distributed")]
 async fn run_distributed(cli: &Cli) -> Result<()> {
     use crate::distributed::{Coordinator, TOKEN_ENV};
@@ -543,6 +548,24 @@ async fn run_distributed(cli: &Cli) -> Result<()> {
         )));
     }
 
+    let scenario_mode = cli.is_scenario_mode();
+    #[cfg(feature = "scenario")]
+    let scenario = match (&cli.scenario, scenario_mode) {
+        (Some(path), true) => Some(ScenarioConfig::load(path)?),
+        _ => None,
+    };
+    #[cfg(not(feature = "scenario"))]
+    if scenario_mode {
+        return Err(WsBlastError::Config(ConfigError::InvalidScenario(
+            "Scenario support not compiled in. Build with --features scenario".to_string(),
+        )));
+    }
+    #[cfg(feature = "scenario")]
+    let config = match &scenario {
+        Some(scenario) => LoadTestConfig::from_scenario_config(scenario, cli)?,
+        None => LoadTestConfig::from_cli(cli.clone())?,
+    };
+    #[cfg(not(feature = "scenario"))]
     let config = LoadTestConfig::from_cli(cli.clone())?;
     // Credentials are resolved here, once, and sent to the agents as
     // handshake headers; a refreshed token was rejected above.
@@ -551,39 +574,112 @@ async fn run_distributed(cli: &Cli) -> Result<()> {
     #[cfg(feature = "auth")]
     let _token_refresh = apply_auth(&mut config)?;
 
-    let mut coordinator =
-        Coordinator::new(config.clone(), &cli.agents, token)?.agent_timeout(agent_timeout);
-    if let Some(ca) = &cli.agent_ca {
-        coordinator = coordinator.agent_ca(ca);
+    let live_metrics = LiveMetrics::new();
+    let live_export = LiveExport::start(cli, &config, &live_metrics).await?;
+    let outcome: Result<DistributedResult> = async {
+        #[cfg(feature = "scenario")]
+        if let Some(scenario) = &scenario {
+            let mut coordinator = Coordinator::scenario(
+                scenario,
+                config.clone(),
+                cli.phase.as_deref(),
+                cli.resolve_url(),
+                &cli.agents,
+                token,
+            )?
+            .agent_timeout(agent_timeout)
+            .with_live_metrics(Arc::clone(&live_metrics));
+            if let Some(ca) = &cli.agent_ca {
+                coordinator = coordinator.agent_ca(ca);
+            }
+            let outcome = coordinator.run_scenario().await?;
+            let lost = outcome
+                .lost_agents()
+                .map(|agent| {
+                    (
+                        agent.address.clone(),
+                        agent.error.clone().unwrap_or_default(),
+                    )
+                })
+                .collect();
+            let scenario = outcome.scenario;
+            return Ok(DistributedResult {
+                run: RunResult {
+                    phases: scenario
+                        .phases
+                        .iter()
+                        .map(report::PhaseReport::from)
+                        .collect(),
+                    metrics: scenario.metrics,
+                    phase_targets: scenario.phase_targets,
+                    slo: Some(scenario.slo),
+                },
+                lost,
+            });
+        }
+        let mut coordinator = Coordinator::new(config.clone(), &cli.agents, token)?
+            .agent_timeout(agent_timeout)
+            .with_live_metrics(Arc::clone(&live_metrics));
+        if let Some(ca) = &cli.agent_ca {
+            coordinator = coordinator.agent_ca(ca);
+        }
+        let outcome = coordinator.run().await?;
+        let lost = outcome
+            .lost_agents()
+            .map(|agent| {
+                (
+                    agent.address.clone(),
+                    agent.error.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
+        Ok(DistributedResult {
+            run: RunResult::single(outcome.metrics),
+            lost,
+        })
     }
-    let outcome = coordinator.run().await?;
+    .await;
+    live_export.finish().await;
+    let DistributedResult { run, lost } = outcome?;
+    let RunResult {
+        metrics,
+        phase_targets,
+        phases,
+        slo,
+    } = run;
 
-    for agent in outcome.lost_agents() {
+    for (address, reason) in &lost {
         eprintln!(
-            "\n{} agent {} was lost: {}. Its connections and messages are not in this report.",
+            "\n{} agent {address} was lost: {reason}. Its connections and messages are not in this report.",
             "WARNING:".bold().red(),
-            agent.address,
-            agent.error.as_deref().unwrap_or("no result")
         );
     }
-    let lost = outcome.lost_agents().count();
-    let metrics = outcome.metrics;
-    let slo_result = report::evaluate_slos(&config.slo, &metrics);
-    report::emit_scenario_report(&config, &metrics, &slo_result, &[], &[])
+    let config = if scenario_mode {
+        let mut aggregate_config = config;
+        aggregate_config.connections =
+            usize::try_from(metrics.total_connections_attempted).unwrap_or(usize::MAX);
+        aggregate_config.duration = metrics.elapsed;
+        aggregate_config
+    } else {
+        config
+    };
+    let slo_result = slo.unwrap_or_else(|| report::evaluate_slos(&config.slo, &metrics));
+    report::emit_scenario_report(&config, &metrics, &slo_result, &phase_targets, &phases)
         .map_err(WsBlastError::Io)?;
-    if lost > 0 {
+    if !lost.is_empty() {
         eprintln!(
-            "{} {lost} of {} agents were lost; the report covers the other {}.",
+            "{} {} of {} agents were lost; the report covers the other {}.",
             "WARNING:".bold().red(),
+            lost.len(),
             cli.agents.len(),
-            cli.agents.len() - lost
+            cli.agents.len() - lost.len()
         );
     }
 
     if !slo_result.passed {
         std::process::exit(2);
     }
-    if lost > 0 {
+    if !lost.is_empty() {
         std::process::exit(1);
     }
     exit_if_nothing_connected(&metrics);

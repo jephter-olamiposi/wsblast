@@ -9,7 +9,9 @@ use std::time::{Duration, SystemTime};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_util::sync::CancellationToken;
-use wsblast::distributed::{AgentConfig, AgentServer, Coordinator, DistributedOutcome};
+use wsblast::distributed::{
+    AgentConfig, AgentServer, Coordinator, DistributedOutcome, PROTOCOL_VERSION,
+};
 use wsblast::mock::{MockConfig, MockServer};
 use wsblast::{LoadTestConfig, LoadTestConfigBuilder, Stage};
 
@@ -363,9 +365,9 @@ async fn spawn_scripted_agent(stop: &CancellationToken, script: Script) -> Strin
                         ("hello", Script::WrongProtocol) => {
                             r#"{"type":"hello","protocol":999,"version":"9.9.9"}"#.to_string()
                         }
-                        ("hello", _) => {
-                            r#"{"type":"hello","protocol":1,"version":"test"}"#.to_string()
-                        }
+                        ("hello", _) => format!(
+                            r#"{{"type":"hello","protocol":{PROTOCOL_VERSION},"version":"test"}}"#
+                        ),
                         ("prepare", _) => r#"{"type":"ready","connections":1}"#.to_string(),
                         ("start", Script::DisconnectAfterStart) => {
                             tokio::time::sleep(Duration::from_millis(300)).await;
@@ -664,9 +666,9 @@ async fn an_agent_stops_its_run_when_the_coordinator_disconnects() {
         .insert("authorization", format!("Bearer {TOKEN}").parse().unwrap());
     let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
     let send = |text: String| Message::Text(text.into());
-    ws.send(send(
-        r#"{"type":"hello","protocol":1,"version":"test"}"#.into(),
-    ))
+    ws.send(send(format!(
+        r#"{{"type":"hello","protocol":{PROTOCOL_VERSION},"version":"test"}}"#
+    )))
     .await
     .unwrap();
     assert_eq!(next_type(&mut ws).await, "hello");
@@ -764,4 +766,217 @@ async fn sigint_on_the_coordinator_still_reports_the_agents_results() {
     assert_eq!(report["metrics"]["total_connections_established"], 2);
     assert!(report["metrics"]["total_messages_recv"].as_u64().unwrap() > 0);
     assert!(report["duration_secs"].as_f64().unwrap() < 15.0);
+}
+
+/// A two-phase scenario against `target`: a constant phase, then a staged
+/// one whose own SLO cannot pass.
+fn two_phase_scenario(target: &str, warm: &str, spike_hold: &str) -> wsblast::ScenarioConfig {
+    wsblast::ScenarioConfig::from_yaml(&format!(
+        r#"
+version: "1.0"
+target: "{target}"
+metadata:
+  name: "distributed"
+phases:
+  - name: "warm"
+    connections: 5
+    duration: "{warm}"
+    rate_per_conn: 20
+  - name: "spike"
+    rate_per_conn: 20
+    stages:
+      - duration: "300ms"
+        target: 7
+      - duration: "{spike_hold}"
+        target: 7
+    slo:
+      min_throughput: 1000000000
+"#
+    ))
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_scenario_runs_phase_by_phase_and_merges_every_phase() {
+    let harness = harness(3, None).await;
+    let scenario = two_phase_scenario(&harness.target, "1s", "900ms");
+    let base = LoadTestConfig::builder(&harness.target).build().unwrap();
+    let outcome = Coordinator::scenario(&scenario, base, None, None, &harness.agents, TOKEN)
+        .unwrap()
+        .with_signal_handling(false)
+        .agent_timeout(Duration::from_secs(10))
+        .run_scenario()
+        .await
+        .unwrap();
+
+    let scenario = &outcome.scenario;
+    assert_eq!(scenario.phases.len(), 2);
+    assert_eq!(outcome.phases.len(), 2);
+    assert_eq!(outcome.lost_agents().count(), 0);
+    // The constant phase's SLO-free gate passes, the staged phase's fails,
+    // and so does the run: the CLI exits with 2.
+    assert!(scenario.phases[0].slo.passed);
+    assert!(!scenario.phases[1].slo.passed);
+    assert!(!scenario.passed());
+    assert!(
+        scenario
+            .slo
+            .checks
+            .iter()
+            .any(|check| check.name.starts_with("spike: ") && !check.passed),
+        "{:?}",
+        scenario.slo
+    );
+
+    for (phase, agents) in scenario.phases.iter().zip(&outcome.phases) {
+        let agents: Vec<&wsblast::AggregatedMetrics> = agents
+            .iter()
+            .map(|agent| agent.metrics.as_ref().expect("no agent is lost"))
+            .collect();
+        let sum =
+            |f: fn(&wsblast::AggregatedMetrics) -> u64| agents.iter().map(|m| f(m)).sum::<u64>();
+        let merged = &phase.metrics;
+        assert_eq!(
+            merged.total_connections_attempted,
+            sum(|m| m.total_connections_attempted)
+        );
+        assert_eq!(
+            merged.total_connections_established,
+            sum(|m| m.total_connections_established)
+        );
+        assert_eq!(merged.total_messages_sent, sum(|m| m.total_messages_sent));
+        assert_eq!(merged.total_messages_recv, sum(|m| m.total_messages_recv));
+        assert_eq!(merged.response_time.count, sum(|m| m.response_time.count));
+        assert!(merged.total_messages_recv > 0, "{}: {merged:?}", phase.name);
+    }
+    // Each phase is split as a single run: 5 over 3 agents, then 7 at every
+    // moment of the staged phase.
+    let established = |phase: usize| -> Vec<u64> {
+        outcome.phases[phase]
+            .iter()
+            .map(|agent| {
+                agent
+                    .metrics
+                    .as_ref()
+                    .unwrap()
+                    .total_connections_established
+            })
+            .collect()
+    };
+    assert_eq!(established(0), [2, 2, 1]);
+    assert_eq!(established(1), [3, 2, 2]);
+    assert_eq!(scenario.phases[1].stages.len(), 2);
+
+    // The scenario's metrics add up the phases, and its series lays them
+    // end to end.
+    let merged = &scenario.metrics;
+    let phases = &scenario.phases;
+    assert_eq!(merged.total_connections_attempted, 12);
+    assert_eq!(
+        merged.total_messages_sent,
+        phases
+            .iter()
+            .map(|p| p.metrics.total_messages_sent)
+            .sum::<u64>()
+    );
+    assert_eq!(
+        merged.elapsed,
+        phases[0].metrics.elapsed + phases[1].metrics.elapsed
+    );
+    let series_sent: u64 = merged
+        .time_series
+        .points
+        .iter()
+        .map(|p| p.messages_sent)
+        .sum();
+    assert_eq!(series_sent, merged.total_messages_sent);
+    let second_start = merged.time_series.points.len() - phases[1].metrics.time_series.points.len();
+    assert!(
+        merged.time_series.points[second_start].start_secs
+            >= phases[0].metrics.elapsed.as_secs_f64(),
+        "{:?}",
+        merged.time_series.points
+    );
+    let summary = merged.distributed.as_ref().unwrap();
+    assert_eq!(summary.agents, harness.agents);
+    assert!(summary.lost_agents.is_empty());
+    assert_eq!(scenario.phase_targets.len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_a_scenario_stops_the_phase_and_skips_the_rest() {
+    let harness = harness(2, None).await;
+    let scenario = two_phase_scenario(&harness.target, "60s", "60s");
+    let base = LoadTestConfig::builder(&harness.target).build().unwrap();
+    let coordinator = Coordinator::scenario(&scenario, base, None, None, &harness.agents, TOKEN)
+        .unwrap()
+        .with_signal_handling(false)
+        .agent_timeout(Duration::from_secs(10));
+    let cancel = coordinator.cancel_token();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        cancel.cancel();
+    });
+    let outcome = coordinator.run_scenario().await.unwrap();
+    assert_eq!(outcome.scenario.phases.len(), 1);
+    assert_eq!(outcome.scenario.phases[0].name, "warm");
+    assert!(outcome.scenario.metrics.elapsed < Duration::from_secs(10));
+    assert!(outcome.scenario.metrics.total_messages_recv > 0);
+    assert_eq!(outcome.lost_agents().count(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_scenario_phase_too_small_to_split_is_rejected_up_front() {
+    let harness = harness(3, None).await;
+    let scenario = wsblast::ScenarioConfig::from_yaml(&format!(
+        r#"
+version: "1.0"
+target: "{}"
+metadata:
+  name: "small"
+phases:
+  - name: "big"
+    connections: 6
+    duration: "1s"
+  - name: "tiny"
+    connections: 2
+    duration: "1s"
+"#,
+        harness.target
+    ))
+    .unwrap();
+    let base = LoadTestConfig::builder(&harness.target).build().unwrap();
+    let err = Coordinator::scenario(&scenario, base, None, None, &harness.agents, TOKEN)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("phase 'tiny'"), "{err}");
+    assert!(err.contains("3 agents cannot share 2 connections"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_of_another_protocol_version_gets_a_clear_error() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let harness = harness(1, None).await;
+    let mut request = format!("ws://{}/", harness.agents[0])
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {TOKEN}").parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    // A coordinator of the first protocol version.
+    ws.send(Message::Text(
+        r#"{"type":"hello","protocol":1,"version":"0.2.0"}"#.into(),
+    ))
+    .await
+    .unwrap();
+    let Some(Ok(Message::Text(text))) = ws.next().await else {
+        panic!("no reply");
+    };
+    let reply: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+    assert_eq!(reply["type"], "error");
+    let message = reply["message"].as_str().unwrap();
+    assert!(message.contains("protocol version mismatch"), "{message}");
+    assert!(message.contains("speaking protocol 1"), "{message}");
 }
