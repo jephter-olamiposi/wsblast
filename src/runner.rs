@@ -10,7 +10,7 @@ use crate::connect::ConnectTarget;
 use crate::export::ExportSource;
 use crate::metrics::{AggregatedMetrics, LiveMetrics, LiveSnapshot, WorkerMetrics};
 #[cfg(feature = "scenario")]
-use crate::report::PhaseTarget;
+use crate::report::{PhaseTarget, SloEvaluation};
 use crate::timeseries::{
     CounterSampler, IntervalRecorder, IntervalStore, TimeSeries, interval_for,
 };
@@ -740,6 +740,45 @@ pub struct ScenarioOutcome {
     /// Target of every executed phase, in run order. Phases skipped after a
     /// cancellation are not listed.
     pub phase_targets: Vec<PhaseTarget>,
+    /// Every executed phase with its own metrics and SLO result, in run
+    /// order. Phases skipped after a cancellation are not listed.
+    pub phases: Vec<PhaseResult>,
+    /// The SLO gate of the whole run: the scenario's top-level `slo:`
+    /// thresholds, overridden one by one by those of the base
+    /// configuration, checked on [`metrics`](Self::metrics), followed by
+    /// every phase's own checks with the phase name prefixed to their names
+    /// (`spike: Latency p99`). It passes only when every check passed.
+    pub slo: SloEvaluation,
+}
+
+#[cfg(feature = "scenario")]
+impl ScenarioOutcome {
+    /// Whether every SLO of the run passed: the scenario's, the base
+    /// configuration's and every phase's.
+    pub fn passed(&self) -> bool {
+        self.slo.passed
+    }
+}
+
+/// The result of one executed scenario phase.
+#[cfg(feature = "scenario")]
+#[cfg_attr(docsrs, doc(cfg(feature = "scenario")))]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct PhaseResult {
+    /// Phase name.
+    pub name: String,
+    /// Endpoint the phase connected to.
+    pub target_url: url::Url,
+    /// Configured connection count of the phase.
+    pub connections: usize,
+    /// Metrics merged from this phase's workers only. `elapsed` is the
+    /// phase's run time, and the time series starts at the phase start.
+    pub metrics: AggregatedMetrics,
+    /// The phase's own `slo:` thresholds checked on
+    /// [`metrics`](Self::metrics), with unprefixed check names; it passes
+    /// with no checks when the phase sets none.
+    pub slo: SloEvaluation,
 }
 
 /// Runs the phases of a [`ScenarioConfig`] one after another.
@@ -751,6 +790,8 @@ pub struct ScenarioOutcome {
 #[cfg_attr(docsrs, doc(cfg(feature = "scenario")))]
 pub struct ScenarioExecutor {
     scenario_name: String,
+    /// The top-level `slo:` thresholds of the scenario file.
+    scenario_slo: crate::config::SloThresholds,
     phases: Vec<ScenarioPhase>,
     /// Resolved endpoint of each entry in `phases`.
     targets: Vec<url::Url>,
@@ -778,8 +819,11 @@ impl ScenarioExecutor {
     ///
     /// Returns [`ConfigError::InvalidScenario`](crate::ConfigError::InvalidScenario)
     /// when the scenario fails validation, the requested phase is missing, or a
-    /// phase has no target from any of the three sources, and URL errors for an
-    /// unparsable or non-WebSocket target.
+    /// phase has no target from any of the three sources, URL errors for an
+    /// unparsable or non-WebSocket target, and
+    /// [`ConfigError::UnsupportedOption`](crate::ConfigError::UnsupportedOption)
+    /// for a latency SLO in the file when the base configuration's mode is
+    /// not echo.
     pub fn new(
         scenario: &ScenarioConfig,
         base_config: LoadTestConfig,
@@ -787,8 +831,10 @@ impl ScenarioExecutor {
         target_override: Option<&str>,
     ) -> crate::error::Result<Self> {
         scenario.validate()?;
+        scenario.validate_slo_mode(base_config.mode, phase)?;
         Ok(Self {
             scenario_name: scenario.metadata.name.clone(),
+            scenario_slo: scenario.slo()?,
             targets: scenario.resolve_phase_targets(target_override, phase)?,
             phases: scenario.compile(phase)?,
             base_config,
@@ -838,15 +884,16 @@ impl ScenarioExecutor {
     /// Executes every compiled phase sequentially until the scenario ends or
     /// the run-level token is cancelled.
     ///
-    /// Returns the metrics merged over every phase that ran and the target
-    /// of each of those phases.
+    /// Returns the metrics merged over every phase that ran, each of those
+    /// phases with its own metrics, and the SLO result of the run.
     ///
     /// # Errors
     ///
     /// Returns [`WsBlastError::Metrics`](crate::WsBlastError::Metrics) if a
     /// latency histogram cannot be created or merged.
     pub async fn run(&self) -> crate::error::Result<ScenarioOutcome> {
-        let mut all_worker_metrics = Vec::new();
+        let mut totals = crate::metrics::MetricsTotals::new()?;
+        let mut phase_results = Vec::with_capacity(self.phases.len());
         let mut total_elapsed = Duration::ZERO;
         let mut total_connections = 0u64;
         let mut total_not_started = 0u64;
@@ -906,7 +953,25 @@ impl ScenarioExecutor {
             total_elapsed += outcome.elapsed;
             total_connections += outcome.connections;
             total_not_started += outcome.not_started;
-            all_worker_metrics.extend(outcome.worker_metrics);
+            // Each phase is summarised from its own workers, and its totals
+            // are added to the scenario's, so the merged metrics are those
+            // of every worker together.
+            let mut phase_totals = crate::metrics::MetricsTotals::new()?;
+            for worker in outcome.worker_metrics {
+                phase_totals.add_worker(worker);
+            }
+            totals.add(&phase_totals)?;
+            let phase_metrics = phase_totals
+                .finish(outcome.elapsed, outcome.connections)
+                .with_not_started(outcome.not_started)
+                .with_time_series(outcome.time_series.clone());
+            phase_results.push(PhaseResult {
+                name: phase.name.clone(),
+                target_url: target.clone(),
+                connections: phase.connections,
+                slo: crate::report::evaluate_slos(&phase.slo, &phase_metrics),
+                metrics: phase_metrics,
+            });
             time_series.append(
                 outcome.time_series,
                 outcome.started_at.saturating_duration_since(scenario_start),
@@ -928,14 +993,26 @@ impl ScenarioExecutor {
         #[cfg(not(feature = "capture"))]
         let capture = None;
 
-        let metrics =
-            AggregatedMetrics::merge(all_worker_metrics, total_elapsed, total_connections)?
-                .with_not_started(total_not_started)
-                .with_time_series(time_series)
-                .with_capture(capture);
+        let metrics = totals
+            .finish(total_elapsed, total_connections)
+            .with_not_started(total_not_started)
+            .with_time_series(time_series)
+            .with_capture(capture);
+        let overall = crate::report::evaluate_slos(
+            &self.base_config.slo.or_from(&self.scenario_slo),
+            &metrics,
+        );
+        let slo = crate::report::scenario_slo_evaluation(
+            overall,
+            phase_results
+                .iter()
+                .map(|phase| (phase.name.as_str(), &phase.slo)),
+        );
         Ok(ScenarioOutcome {
             metrics,
             phase_targets,
+            phases: phase_results,
+            slo,
         })
     }
 }

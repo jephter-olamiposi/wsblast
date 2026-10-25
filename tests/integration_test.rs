@@ -894,6 +894,227 @@ async fn test_scenario_executor_runs_every_phase() {
     cancel_server.cancel();
 }
 
+/// Two echo phases: `calm` is paced and gates on response time with
+/// budgets it meets, `strict` is unpaced and gates on an RTT p99 of 1 ns and
+/// a throughput no echo server reaches, so only `strict` breaches.
+#[cfg(feature = "scenario")]
+fn two_phase_slo_scenario(target_url: &Url, top_slo: &str) -> ScenarioConfig {
+    ScenarioConfig::from_yaml(&format!(
+        r#"version: "1.0"
+target: "{target_url}"
+metadata:
+  name: "phase slos"
+{top_slo}phases:
+  - name: "calm"
+    duration: "400ms"
+    connections: 2
+    rate_per_conn: 50
+    slo:
+      max_p99: "10s"
+      max_error_rate: 0.5
+  - name: "strict"
+    duration: "300ms"
+    connections: 3
+    slo:
+      max_p99: "1ns"
+      min_throughput: 1000000000
+"#
+    ))
+    .unwrap()
+}
+
+#[cfg(feature = "scenario")]
+#[tokio::test]
+async fn test_scenario_phase_slos_gate_each_phase_on_its_own_metrics() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    let scenario = two_phase_slo_scenario(&target_url, "");
+    let outcome = ScenarioExecutor::new(
+        &scenario,
+        scenario_base_config(&target_url).build().unwrap(),
+        None,
+        None,
+    )
+    .unwrap()
+    .with_signal_handling(false)
+    .run()
+    .await
+    .unwrap();
+
+    let names: Vec<&str> = outcome.phases.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["calm", "strict"]);
+    let (calm, strict) = (&outcome.phases[0], &outcome.phases[1]);
+    assert_eq!(calm.connections, 2);
+    assert_eq!(strict.connections, 3);
+    assert_eq!(calm.target_url, target_url);
+
+    // The paced phase gates on response time, the unpaced one on RTT.
+    assert!(calm.slo.passed, "{:?}", calm.slo);
+    let calm_checks: Vec<&str> = calm.slo.checks.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(calm_checks, ["Response time p99", "Error Rate"]);
+    assert!(calm.metrics.response_time.count > 0, "{:?}", calm.metrics);
+    assert!(!strict.slo.passed, "{:?}", strict.slo);
+    let strict_checks: Vec<&str> = strict.slo.checks.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(strict_checks, ["Latency p99", "Throughput (msg/s)"]);
+    assert_eq!(strict.metrics.response_time.count, 0);
+
+    // The run fails, with every phase check named after its phase.
+    assert!(!outcome.passed());
+    assert!(!outcome.slo.passed);
+    let combined: Vec<(&str, bool)> = outcome
+        .slo
+        .checks
+        .iter()
+        .map(|c| (c.name.as_str(), c.passed))
+        .collect();
+    assert_eq!(
+        combined,
+        [
+            ("calm: Response time p99", true),
+            ("calm: Error Rate", true),
+            ("strict: Latency p99", false),
+            ("strict: Throughput (msg/s)", false),
+        ]
+    );
+
+    cancel_server.cancel();
+}
+
+#[cfg(feature = "scenario")]
+#[tokio::test]
+async fn test_scenario_phase_metrics_add_up_to_the_merged_totals() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    let scenario = two_phase_slo_scenario(&target_url, "");
+    let outcome = ScenarioExecutor::new(
+        &scenario,
+        scenario_base_config(&target_url).build().unwrap(),
+        None,
+        None,
+    )
+    .unwrap()
+    .with_signal_handling(false)
+    .run()
+    .await
+    .unwrap();
+
+    let total = &outcome.metrics;
+    let sum = |field: fn(&AggregatedMetrics) -> u64| -> u64 {
+        outcome.phases.iter().map(|p| field(&p.metrics)).sum()
+    };
+    assert_eq!(
+        sum(|m| m.total_connections_attempted),
+        total.total_connections_attempted
+    );
+    assert_eq!(sum(|m| m.total_connections_attempted), 5);
+    assert_eq!(
+        sum(|m| m.total_connections_established),
+        total.total_connections_established
+    );
+    assert_eq!(
+        sum(|m| m.total_connections_failed),
+        total.total_connections_failed
+    );
+    assert_eq!(sum(|m| m.total_messages_sent), total.total_messages_sent);
+    assert_eq!(sum(|m| m.total_messages_recv), total.total_messages_recv);
+    assert_eq!(sum(|m| m.total_bytes_sent), total.total_bytes_sent);
+    assert_eq!(sum(|m| m.total_bytes_recv), total.total_bytes_recv);
+    assert_eq!(sum(|m| m.total_reconnects), total.total_reconnects);
+    assert_eq!(sum(|m| m.message_rtt.count), total.message_rtt.count);
+    assert_eq!(sum(|m| m.response_time.count), total.response_time.count);
+    assert_eq!(
+        sum(|m| m.handshake_latency.count),
+        total.handshake_latency.count
+    );
+    let elapsed: Duration = outcome.phases.iter().map(|p| p.metrics.elapsed).sum();
+    assert_eq!(elapsed, total.elapsed);
+    assert!(total.total_messages_sent > 0, "{total:?}");
+    for phase in &outcome.phases {
+        // Each phase's time series covers its own run, from its own start.
+        let first = phase.metrics.time_series.points.first().expect("points");
+        assert!(first.start_secs < 0.05, "{:?}", phase.metrics.time_series);
+        let messages: u64 = phase
+            .metrics
+            .time_series
+            .points
+            .iter()
+            .map(|p| p.messages_sent)
+            .sum();
+        assert_eq!(
+            messages, phase.metrics.total_messages_sent,
+            "{}",
+            phase.name
+        );
+    }
+
+    cancel_server.cancel();
+}
+
+#[cfg(feature = "scenario")]
+#[tokio::test]
+async fn test_scenario_slo_applies_to_the_merged_metrics_and_the_base_config_wins() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    // The scenario asks for an impossible throughput and a lenient error
+    // budget; the base configuration lowers the throughput threshold.
+    let scenario = two_phase_slo_scenario(
+        &target_url,
+        "slo:\n  min_throughput: 1000000000\n  max_error_rate: 0.5\n",
+    );
+    let base = scenario_base_config(&target_url)
+        .slo(SloThresholds::new().with_min_throughput(1.0))
+        .build()
+        .unwrap();
+    let outcome = ScenarioExecutor::new(&scenario, base, Some("calm"), None)
+        .unwrap()
+        .with_signal_handling(false)
+        .run()
+        .await
+        .unwrap();
+
+    let combined: Vec<(&str, &str, bool)> = outcome
+        .slo
+        .checks
+        .iter()
+        .map(|c| (c.name.as_str(), c.target.as_str(), c.passed))
+        .collect();
+    assert_eq!(
+        combined,
+        [
+            ("Error Rate", "<= 50.00%", true),
+            ("Throughput (msg/s)", ">= 1.0", true),
+            ("calm: Response time p99", "<= 10s", true),
+            ("calm: Error Rate", "<= 50.00%", true),
+        ]
+    );
+    assert!(outcome.passed(), "{:?}", outcome.slo);
+
+    // Without the override the scenario's own threshold applies and fails.
+    let outcome = ScenarioExecutor::new(
+        &scenario,
+        scenario_base_config(&target_url).build().unwrap(),
+        Some("calm"),
+        None,
+    )
+    .unwrap()
+    .with_signal_handling(false)
+    .run()
+    .await
+    .unwrap();
+    assert!(!outcome.passed());
+    assert!(outcome.phases[0].slo.passed);
+    let failed: Vec<&str> = outcome
+        .slo
+        .checks
+        .iter()
+        .filter(|c| !c.passed)
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(failed, ["Throughput (msg/s)"]);
+
+    cancel_server.cancel();
+}
+
 #[tokio::test]
 async fn test_echo_ping_interval_does_not_throttle_unpaced_load() {
     let (target_url, cancel_server) = spawn_echo_server().await;

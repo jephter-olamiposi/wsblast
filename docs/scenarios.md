@@ -1,6 +1,6 @@
 # Scenario reference
 
-A scenario is a YAML file that describes one or more load phases. wsblast runs the phases in order and prints one merged report at the end.
+A scenario is a YAML file that describes one or more load phases. wsblast runs the phases in order and prints one merged report at the end. SLOs can gate the whole scenario and each phase on its own.
 
 Scenario support is part of the default build (the `scenario` Cargo feature):
 
@@ -24,10 +24,11 @@ Contents:
 4. [How a phase runs](#4-how-a-phase-runs)
 5. [Target URL precedence](#5-target-url-precedence)
 6. [Command-line flags with scenarios](#6-command-line-flags-with-scenarios)
-7. [The report](#7-the-report)
-8. [Stopping a scenario](#8-stopping-a-scenario)
-9. [Validation](#9-validation)
-10. [Examples](#10-examples)
+7. [SLOs](#7-slos)
+8. [The report](#8-the-report)
+9. [Stopping a scenario](#9-stopping-a-scenario)
+10. [Validation](#10-validation)
+11. [Examples](#11-examples)
 
 ## 1. File shape
 
@@ -38,10 +39,14 @@ metadata:                         # required
   name: "Checkout flow"           # required
   description: "Optional text"    # optional
   tags: ["checkout", "nightly"]   # optional
+slo:                              # optional, checked on the whole scenario
+  max_error_rate: 0.01
 phases:                           # required, at least one
   - name: "warmup"
     duration: "10s"
     connections: 10
+    slo:                          # optional, checked on this phase alone
+      max_p99: "50ms"
 ```
 
 | Field | Type | Required | Default | Rules |
@@ -51,12 +56,13 @@ phases:                           # required, at least one
 | `metadata.name` | string | yes | | Must not be empty or only whitespace. Shown in the phase banner. |
 | `metadata.description` | string | no | none | Not used by the run. |
 | `metadata.tags` | list of strings | no | none | Not used by the run. |
+| `slo` | SLO mapping | no | none | Thresholds checked on the merged metrics of every phase. See [section 7](#7-slos). |
 | `phases` | list of phases | yes | | At least one. Phase names must be unique. |
 
-Unknown keys are rejected at every level: the top level, `metadata`, each phase and each action. A misspelled field fails validation with its name and the list of valid keys, so it cannot silently fall back to a default:
+Unknown keys are rejected at every level: the top level, `metadata`, each phase, each `slo` mapping and each action. A misspelled field fails validation with its name and the list of valid keys, so it cannot silently fall back to a default:
 
 ```text
-Error: Configuration error: Invalid scenario: load.yaml: phases[0]: unknown field `conections`, expected one of `name`, `target`, `duration`, `connections`, `ramp_rate`, `rate_per_conn`, `payload`, `think_time`, `actions` at line 10 column 5
+Error: Configuration error: Invalid scenario: load.yaml: phases[0]: unknown field `conections`, expected one of `name`, `target`, `duration`, `connections`, `ramp_rate`, `rate_per_conn`, `payload`, `think_time`, `actions`, `slo` at line 10 column 5
 ```
 
 ## 2. Phase fields
@@ -72,6 +78,7 @@ Error: Configuration error: Invalid scenario: load.yaml: phases[0]: unknown fiel
 | `payload` | string | no | see below | Text payload for this phase. Supports `{{timestamp}}`, `{{worker_id}}` and `{{seq}}`. |
 | `think_time` | duration | no | `0` | Pause after each `Send` action, or after each message when the phase has no actions. See [section 4](#4-how-a-phase-runs). |
 | `actions` | list of actions | no | `[]` | Script each connection runs. Without actions the phase runs the `--mode` loop. |
+| `slo` | SLO mapping | no | none | Thresholds checked on this phase's own metrics. See [section 7](#7-slos). |
 
 **Durations** are strings with a unit: `ns`, `us` (or `µs`), `ms`, `s`, `m`, `h`. Fractions are allowed (`1.5s`, `0.5ms`). A bare integer is seconds. Negative, infinite and out-of-range values are rejected.
 
@@ -182,11 +189,77 @@ Set a top-level `target` when phases should share an endpoint. With `--phase`, o
 | `-n, --requests` | One cap for the whole scenario. Once reached, the remaining phases are cancelled as soon as they start. |
 | `--binary` | Changes only the default payload (see [section 2](#2-phase-fields)). |
 | `--connect-timeout`, `--message-timeout`, `--ping-interval`, `-H`, `--subprotocol`, `--no-reconnect`, authentication flags | Apply to every phase. |
-| SLO flags, `--format`, `-o`, `--no-progress` | Apply to the merged report. |
+| SLO flags | Checked on the merged metrics of the whole scenario, together with the scenario's `slo` mapping. A flag overrides the scenario's threshold of the same name. See [section 7](#7-slos). |
+| `--format`, `-o`, `--no-progress` | Apply to the merged report. |
 
-## 7. The report
+## 7. SLOs
 
-All phases are merged into one report, and SLOs are evaluated once on the merged metrics. A failing phase therefore cannot be told apart from the others in the report; run it alone with `--phase` to gate it separately.
+An `slo` mapping can be set at the top level of the file and on any phase. It takes the thresholds of the SLO flags, under the flag names with underscores:
+
+| Key | Type | Flag | Passes when |
+| :--- | :--- | :--- | :--- |
+| `max_p50` | duration | `--max-p50` | The gating latency's p50 is at most this value. |
+| `max_p95` | duration | `--max-p95` | The same, at p95. |
+| `max_p99` | duration | `--max-p99` | The same, at p99. |
+| `max_p999` | duration | `--max-p999` | The same, at p99.9. |
+| `max_error_rate` | number, 0 to 1 | `--max-error-rate` | `error_rate` is at most this value. |
+| `min_throughput` | number, messages per second | `--min-throughput` | `throughput_msg_per_sec` is at least this value. |
+
+Every key is optional, and a threshold that is not set is not checked. Values follow the rules of the flags: durations use the syntax of [section 2](#2-phase-fields), `max_error_rate` must be between 0 and 1, and latency thresholds need `--mode echo` (the default), because no other mode measures round trips.
+
+```yaml
+version: "1.0"
+target: "ws://127.0.0.1:9001"
+metadata:
+  name: "Gated rollout"
+slo:                       # the whole scenario
+  max_error_rate: 0.01
+phases:
+  - name: "warmup"         # no SLO of its own
+    duration: "10s"
+    connections: 20
+  - name: "spike"
+    duration: "30s"
+    connections: 200
+    rate_per_conn: 20
+    slo:                   # this phase alone
+      max_p99: "50ms"
+      max_error_rate: 0.001
+      min_throughput: 3500
+```
+
+### 7.1 What each SLO is checked on
+
+- **A phase `slo`** is checked on that phase's own metrics: the workers of that phase only, over that phase's elapsed time. A spike that breaches its budget fails even when the quieter phases around it would bring the merged numbers under it.
+- **The top-level `slo` and the SLO flags** are checked on the merged metrics of every executed phase, the same numbers the report's main tables show.
+- **When the file and the command line set the same threshold, the command line wins.** Each flag replaces only the top-level threshold of the same name, so `--max-p99 20ms` with a file that sets `max_p99: 50ms` and `max_error_rate: 0.01` gates on a p99 of 20 ms and an error rate of 1%. Flags never change a phase's `slo`.
+
+Latency thresholds gate on the latency a single run would gate on: response time when the phase is paced echo (`rate_per_conn` set, no actions, no think time), RTT otherwise. Each phase chooses on its own, so in one scenario a paced phase's check reads `Response time p99` and an unpaced phase's `Latency p99`. The merged metrics gate on response time when any executed phase recorded it. A latency check with no samples fails, as it does on the command line.
+
+### 7.2 Exit code and check names
+
+The run exits with code 2 when any check fails: a phase's, the top-level `slo`'s or a flag's. All checks are listed in one SLO table: first those of the whole scenario, then each phase's in run order, prefixed with the phase name:
+
+```text
+│ Error Rate          ┆ <= 1.00%  ┆ 0.00%   ┆ PASSED │
+│ spike: Latency p99  ┆ <= 50ms   ┆ 61.2ms  ┆ FAILED │
+```
+
+With `--phase`, only the selected phase runs, so only its `slo` is checked, together with the top-level `slo` and the flags on that phase's metrics.
+
+## 8. The report
+
+All phases are merged into one report: the main tables show the metrics of every executed phase together. The JSON report also lists every phase with its own metrics and SLO result under `phases`, and the HTML report shows a Phases section with one row per phase and the SLO checks of every phase that has its own.
+
+The text and Markdown reports add a phase table when at least one phase sets its own `slo`, so the reports of scenarios without phase SLOs look as they always did:
+
+| Column | Value |
+| :--- | :--- |
+| Phase, Target | The phase name and the endpoint it connected to. |
+| Load | The phase's connection count. |
+| Throughput (msg/s), Error Rate | The phase's own values. |
+| Gating p99 | The p99 the phase's latency SLOs gate on, with its basis (`RTT` or `response time`); `-` without samples. |
+| SLO | `PASSED`, `FAILED`, or `-` for a phase without its own `slo`. |
 
 | Report field | Value for a scenario |
 | :--- | :--- |
@@ -194,14 +267,18 @@ All phases are merged into one report, and SLOs are evaluated once on the merged
 | `duration_secs`, `metrics.elapsed` | Sum of each phase's elapsed time. The 500 ms pauses are not included. |
 | `target_url` | Target of the first executed phase. |
 | `phase_targets` | JSON only: one `{"phase", "target_url"}` entry per executed phase, in run order. The text and Markdown reports show the same list in place of the single target. |
+| `phases` | JSON only: one entry per executed phase, in run order, with `name`, `target_url`, `connections`, `metrics` (the phase's own metrics in the format of the top-level `metrics`, with a time series that starts at the phase start) and `slo` (the phase's own checks, without the prefix). |
+| `slo` | Every check of the run, as described in [section 7.2](#72-exit-code-and-check-names). |
 | `metrics.total_connections_attempted` | Same as `connections`. |
 | Latency histograms | One distribution over the samples of every phase. |
 
-## 8. Stopping a scenario
+The counters in `phases` add up to those of `metrics`. `wsblast render` reads `phases` back, so a rendered report shows the phase table and the Phases section too.
 
-Ctrl+C or SIGTERM stops the current phase and skips all remaining phases. wsblast then prints the merged report for what ran and exits with the normal exit code (0, or 2 if an SLO failed). A local run of example B below, interrupted after 2 s, reported `duration_secs` of 2.0, 10 connections (only the first phase) and exit code 0.
+## 9. Stopping a scenario
 
-## 9. Validation
+Ctrl+C or SIGTERM stops the current phase and skips all remaining phases. wsblast then prints the merged report for what ran and exits with the normal exit code (0, or 2 if an SLO failed). Phases that did not run are not listed and their SLOs are not checked. A local run of example B below, interrupted after 2 s, reported `duration_secs` of 2.0, 10 connections (only the first phase) and exit code 0.
+
+## 10. Validation
 
 The whole file is validated before any connection is opened, including phases that `--phase` will not run. All of these fail with exit code 1:
 
@@ -220,12 +297,21 @@ The whole file is validated before any connection is opened, including phases th
 | `count: 0` | `phase 'warmup': send action count must be greater than zero` |
 | Zero `Wait` or `Ping` duration | `phase 'warmup': wait action duration must be greater than zero` |
 | Forbidden or reserved close code | `close code 2000 cannot be sent; use 1000-1003, 1007-1014 or 3000-4999` |
+| Unknown `slo` key | ``load.yaml: phases[0].slo: unknown field `max_p99_ms`, expected one of `max_p50`, `max_p95`, `max_p99`, `max_p999`, `max_error_rate`, `min_throughput` at line 9 column 7`` |
+| Unparsable SLO duration | `phase 'spike': slo: max_p99: Configuration error: Invalid duration 'fast': ...` (`slo: max_p99: ...` at the top level) |
+| `max_error_rate` outside 0 to 1 | `phase 'spike': slo: Configuration error: Invalid threshold specification: max_error_rate must be between 0.0 and 1.0, received 1.5` |
 | `--phase` names a missing phase | `phase 'nope' not found; available phases: soak, spike` |
 | A phase that will run has no target from the command line, the phase or the scenario | ``phase 'spike': no target URL; set `target` on this phase or at the top level of the scenario, or pass a URL on the command line`` |
 
 An invalid URL in any `target` fails with `Invalid target URL` or `Unsupported WebSocket scheme`.
 
-## 10. Examples
+A latency threshold in the top-level `slo`, or in the `slo` of a phase that will run, fails with exit code 1 when `--mode` is not echo:
+
+```text
+Error: Configuration error: Unsupported option combination: phase 'spike': slo: latency SLOs (max_p50/max_p95/max_p99/max_p999) require --mode echo; Stream mode does not measure round-trip time
+```
+
+## 11. Examples
 
 Both examples target the bundled echo server. Start it first:
 
@@ -322,7 +408,7 @@ phases:
 # Both phases
 cargo run --release -- --scenario soak.yaml --no-progress
 
-# Only the spike phase, gated on its own
+# Only the spike phase, gated on the flags
 cargo run --release -- --scenario soak.yaml --phase spike \
   --no-progress --max-p99 50ms --max-error-rate 0.01
 

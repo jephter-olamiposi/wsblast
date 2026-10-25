@@ -49,6 +49,97 @@ pub struct PhaseTarget {
     pub target_url: url::Url,
 }
 
+/// One executed scenario phase as the reports show it: its target, size,
+/// own metrics and own SLO result. The JSON report lists one per phase under
+/// `phases`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PhaseReport {
+    /// Phase name.
+    pub(crate) name: String,
+    /// Endpoint the phase connected to.
+    pub(crate) target_url: url::Url,
+    /// Configured connection count of the phase.
+    pub(crate) connections: usize,
+    /// Metrics merged from this phase's workers only.
+    pub(crate) metrics: AggregatedMetrics,
+    /// The phase's `slo:` thresholds checked on `metrics`.
+    pub(crate) slo: SloEvaluation,
+}
+
+#[cfg(feature = "scenario")]
+impl From<&crate::runner::PhaseResult> for PhaseReport {
+    fn from(phase: &crate::runner::PhaseResult) -> Self {
+        Self {
+            name: phase.name.clone(),
+            target_url: phase.target_url.clone(),
+            connections: phase.connections,
+            metrics: phase.metrics.clone(),
+            slo: phase.slo.clone(),
+        }
+    }
+}
+
+impl PhaseReport {
+    /// What the phase ran: its connection count.
+    pub(crate) fn load_label(&self) -> String {
+        match self.connections {
+            1 => "1 connection".to_string(),
+            n => format!("{n} connections"),
+        }
+    }
+
+    /// The p99 the phase's latency SLOs gate on, with its basis.
+    pub(crate) fn gating_p99_label(&self) -> String {
+        let (stats, basis) = if self.metrics.response_time.count > 0 {
+            (&self.metrics.response_time, "response time")
+        } else {
+            (&self.metrics.message_rtt, "RTT")
+        };
+        if stats.count == 0 {
+            "-".to_string()
+        } else {
+            format!("{} ({basis})", format_us(stats.p99_us))
+        }
+    }
+
+    /// `PASSED`, `FAILED`, or `-` when the phase sets no SLO.
+    pub(crate) fn slo_label(&self) -> &'static str {
+        match (self.slo.checks.is_empty(), self.slo.passed) {
+            (true, _) => "-",
+            (false, true) => "PASSED",
+            (false, false) => "FAILED",
+        }
+    }
+}
+
+/// Whether the text and Markdown reports show the per-phase table: only when
+/// a phase has its own SLO, so the reports of scenarios without one are
+/// unchanged.
+fn shows_phase_table(phases: &[PhaseReport]) -> bool {
+    phases.iter().any(|phase| !phase.slo.checks.is_empty())
+}
+
+/// Combines the evaluation of the whole scenario with each phase's own,
+/// whose check names are prefixed with the phase name (`spike: Latency
+/// p99`). It passes only when every check passed.
+#[cfg(feature = "scenario")]
+pub(crate) fn scenario_slo_evaluation<'a>(
+    overall: SloEvaluation,
+    phases: impl IntoIterator<Item = (&'a str, &'a SloEvaluation)>,
+) -> SloEvaluation {
+    let mut combined = overall;
+    for (name, evaluation) in phases {
+        combined.passed &= evaluation.passed;
+        combined
+            .checks
+            .extend(evaluation.checks.iter().map(|check| SloCheck {
+                name: format!("{name}: {}", check.name),
+                ..check.clone()
+            }));
+    }
+    combined
+}
+
 /// Baseline comparison for regression detection.
 #[cfg(feature = "compare")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -678,6 +769,9 @@ pub(crate) struct ReportView<'a> {
     pub(crate) stages: Option<String>,
     /// Every executed scenario phase; empty outside scenarios.
     pub(crate) phase_targets: &'a [PhaseTarget],
+    /// The metrics and SLO result of every executed scenario phase; empty
+    /// outside scenarios and for reports written before they were recorded.
+    pub(crate) phases: &'a [PhaseReport],
     /// A labelled wall-clock time for the HTML header, such as when the run
     /// finished.
     pub(crate) timestamp: Option<(&'static str, String)>,
@@ -692,6 +786,7 @@ impl<'a> ReportView<'a> {
         metrics: &'a AggregatedMetrics,
         slo: &'a SloEvaluation,
         phase_targets: &'a [PhaseTarget],
+        phases: &'a [PhaseReport],
     ) -> Self {
         Self {
             target_url: config.target_url.as_str(),
@@ -700,6 +795,7 @@ impl<'a> ReportView<'a> {
             rate_per_conn: Some(config.rate_per_conn),
             stages: (!config.stages.is_empty()).then(|| stages_label(config)),
             phase_targets,
+            phases,
             timestamp: Some((
                 "Finished",
                 crate::clock::rfc3339_utc(std::time::SystemTime::now()),
@@ -722,6 +818,8 @@ pub(crate) struct SavedReport {
     phase_targets: Vec<PhaseTarget>,
     metrics: AggregatedMetrics,
     slo: SloEvaluation,
+    #[serde(default)]
+    phases: Vec<PhaseReport>,
 }
 
 impl SavedReport {
@@ -755,6 +853,7 @@ impl SavedReport {
             rate_per_conn: None,
             stages: None,
             phase_targets: &self.phase_targets,
+            phases: &self.phases,
             timestamp,
             metrics: &self.metrics,
             slo: &self.slo,
@@ -776,19 +875,21 @@ pub fn render_report(
     metrics: &AggregatedMetrics,
     slo: &SloEvaluation,
 ) -> String {
-    render_scenario_report(config, metrics, slo, &[])
+    render_scenario_report(config, metrics, slo, &[], &[])
 }
 
-/// Formats a report that also lists the target of every executed scenario
-/// phase. With no phases it is identical to [`render_report`].
+/// Formats a report that also lists the target, and the results, of every
+/// executed scenario phase. With no phases it is identical to
+/// [`render_report`].
 pub(crate) fn render_scenario_report(
     config: &LoadTestConfig,
     metrics: &AggregatedMetrics,
     slo: &SloEvaluation,
     phase_targets: &[PhaseTarget],
+    phases: &[PhaseReport],
 ) -> String {
     render_view(
-        &ReportView::from_config(config, metrics, slo, phase_targets),
+        &ReportView::from_config(config, metrics, slo, phase_targets, phases),
         config.output_format,
     )
 }
@@ -814,8 +915,9 @@ pub(crate) fn emit_scenario_report(
     metrics: &AggregatedMetrics,
     slo: &SloEvaluation,
     phase_targets: &[PhaseTarget],
+    phases: &[PhaseReport],
 ) -> std::io::Result<()> {
-    let output = render_scenario_report(config, metrics, slo, phase_targets);
+    let output = render_scenario_report(config, metrics, slo, phase_targets, phases);
     println!("{output}");
 
     if let Some(path) = &config.output_path {
@@ -1000,6 +1102,30 @@ fn render_text_report(view: &ReportView<'_>) -> String {
         out.push_str("\n\n");
     }
 
+    if shows_phase_table(view.phases) {
+        let mut phase_table = Table::new();
+        phase_table.load_preset(UTF8_FULL);
+        phase_table.set_header(PHASE_COLUMNS.to_vec());
+        for phase in view.phases {
+            let status = match phase.slo_label() {
+                "PASSED" => Cell::new("PASSED").fg(Color::Green),
+                "FAILED" => Cell::new("FAILED").fg(Color::Red),
+                other => Cell::new(other),
+            };
+            phase_table.add_row(Row::from(vec![
+                Cell::new(&phase.name),
+                Cell::new(phase.target_url.as_str()),
+                Cell::new(phase.load_label()),
+                Cell::new(format!("{:.1}", phase.metrics.throughput_msg_per_sec)),
+                Cell::new(format!("{:.2}%", phase.metrics.error_rate * 100.0)),
+                Cell::new(phase.gating_p99_label()),
+                status,
+            ]));
+        }
+        out.push_str(&phase_table.to_string());
+        out.push_str("\n\n");
+    }
+
     if !slo.checks.is_empty() {
         let mut slo_table = Table::new();
         slo_table.load_preset(UTF8_FULL);
@@ -1044,6 +1170,17 @@ fn render_text_report(view: &ReportView<'_>) -> String {
     out
 }
 
+/// The columns of the per-phase table of the text and Markdown reports.
+const PHASE_COLUMNS: [&str; 7] = [
+    "Phase",
+    "Target",
+    "Load",
+    "Throughput (msg/s)",
+    "Error Rate",
+    "Gating p99",
+    "SLO",
+];
+
 #[derive(Debug, serde::Serialize)]
 struct JsonReport<'a> {
     schema_version: &'static str,
@@ -1056,6 +1193,10 @@ struct JsonReport<'a> {
     phase_targets: &'a [PhaseTarget],
     metrics: &'a AggregatedMetrics,
     slo: &'a SloEvaluation,
+    /// Every executed scenario phase with its own metrics and SLO result;
+    /// omitted outside scenarios.
+    #[serde(skip_serializing_if = "<[PhaseReport]>::is_empty")]
+    phases: &'a [PhaseReport],
 }
 
 fn render_json_report(view: &ReportView<'_>) -> String {
@@ -1068,6 +1209,7 @@ fn render_json_report(view: &ReportView<'_>) -> String {
         phase_targets: view.phase_targets,
         metrics: view.metrics,
         slo: view.slo,
+        phases: view.phases,
     };
 
     serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into())
@@ -1183,6 +1325,34 @@ fn render_markdown_report(view: &ReportView<'_>) -> String {
                 w.throughput,
                 w.errors,
                 w.worst_p99.map_or_else(|| "-".to_string(), format_us)
+            ));
+        }
+        md.push('\n');
+    }
+
+    if shows_phase_table(view.phases) {
+        md.push_str("### Phases\n\n|");
+        for column in PHASE_COLUMNS {
+            md.push_str(&format!(" {column} |"));
+        }
+        md.push_str("\n|");
+        md.push_str(&" :--- |".repeat(PHASE_COLUMNS.len()));
+        md.push('\n');
+        for phase in view.phases {
+            let status = match phase.slo_label() {
+                "PASSED" => "✅ PASS",
+                "FAILED" => "❌ FAIL",
+                other => other,
+            };
+            md.push_str(&format!(
+                "| `{}` | `{}` | {} | {:.1} | {:.2}% | {} | **{}** |\n",
+                phase.name,
+                phase.target_url,
+                phase.load_label(),
+                phase.metrics.throughput_msg_per_sec,
+                phase.metrics.error_rate * 100.0,
+                phase.gating_p99_label(),
+                status
             ));
         }
         md.push('\n');
@@ -1796,8 +1966,13 @@ mod tests {
         ];
 
         for format in ["text", "markdown"] {
-            let rendered =
-                render_scenario_report(&report_config(format), &sample_metrics(), &slo, &phases);
+            let rendered = render_scenario_report(
+                &report_config(format),
+                &sample_metrics(),
+                &slo,
+                &phases,
+                &[],
+            );
             for phase in &phases {
                 let line = rendered
                     .lines()
@@ -1807,8 +1982,13 @@ mod tests {
             }
         }
 
-        let rendered =
-            render_scenario_report(&report_config("json"), &sample_metrics(), &slo, &phases);
+        let rendered = render_scenario_report(
+            &report_config("json"),
+            &sample_metrics(),
+            &slo,
+            &phases,
+            &[],
+        );
         let parsed: serde_json::Value = serde_json::from_str(&rendered).expect("json");
         assert_eq!(
             parsed["phase_targets"],
@@ -1850,7 +2030,8 @@ mod tests {
         let dir =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/live_report");
         for (format, extension) in [("text", "txt"), ("json", "json"), ("markdown", "md")] {
-            let rendered = render_scenario_report(&report_config(format), &metrics, &slo, &phases);
+            let rendered =
+                render_scenario_report(&report_config(format), &metrics, &slo, &phases, &[]);
             let rendered: String = strip_ansi(&rendered);
             let path = dir.join(format!("scenario.{extension}"));
             if std::env::var_os("WSBLAST_BLESS").is_some() {
@@ -1862,6 +2043,143 @@ mod tests {
                 .replace("\r\n", "\n");
             assert_eq!(expected, rendered, "{}", path.display());
         }
+    }
+
+    fn phase_report(name: &str, slo: &SloThresholds) -> PhaseReport {
+        let metrics = sample_metrics();
+        PhaseReport {
+            name: name.to_string(),
+            target_url: url::Url::parse("ws://phase.test/ws").expect("url"),
+            connections: 10,
+            slo: evaluate_slos(slo, &metrics),
+            metrics,
+        }
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn phase_checks_are_prefixed_and_gate_the_run() {
+        let metrics = sample_metrics();
+        let overall = evaluate_slos(&SloThresholds::new().with_max_error_rate(0.5), &metrics);
+        let warmup = evaluate_slos(&SloThresholds::new(), &metrics);
+        let spike = evaluate_slos(
+            &SloThresholds::new().with_max_p99(Duration::from_micros(100)),
+            &metrics,
+        );
+        let combined =
+            scenario_slo_evaluation(overall.clone(), [("warmup", &warmup), ("spike", &spike)]);
+        assert!(!combined.passed);
+        let names: Vec<&str> = combined.checks.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["Error Rate", "spike: Latency p99"]);
+        assert!(combined.checks[0].passed && !combined.checks[1].passed);
+
+        let passing = scenario_slo_evaluation(overall, [("warmup", &warmup)]);
+        assert!(passing.passed);
+        assert_eq!(passing.checks.len(), 1);
+    }
+
+    #[test]
+    fn phase_tables_appear_only_when_a_phase_sets_an_slo() {
+        let slo = evaluate_slos(&SloThresholds::default(), &sample_metrics());
+        let targets = [PhaseTarget {
+            phase: "warmup".to_string(),
+            target_url: url::Url::parse("ws://phase.test/ws").expect("url"),
+        }];
+        let plain = [
+            phase_report("warmup", &SloThresholds::new()),
+            phase_report("spike", &SloThresholds::new()),
+        ];
+        for format in ["text", "markdown"] {
+            let with_phases = render_scenario_report(
+                &report_config(format),
+                &sample_metrics(),
+                &slo,
+                &targets,
+                &plain,
+            );
+            let without = render_scenario_report(
+                &report_config(format),
+                &sample_metrics(),
+                &slo,
+                &targets,
+                &[],
+            );
+            assert_eq!(strip_ansi(&with_phases), strip_ansi(&without), "{format}");
+        }
+
+        let gated = [
+            phase_report("warmup", &SloThresholds::new()),
+            phase_report(
+                "spike",
+                &SloThresholds::new().with_max_p99(Duration::from_micros(100)),
+            ),
+        ];
+        let text = strip_ansi(&render_scenario_report(
+            &report_config("text"),
+            &sample_metrics(),
+            &slo,
+            &targets,
+            &gated,
+        ));
+        let row = |name: &str| {
+            text.lines()
+                .find(|line| line.contains(&format!(" {name} ")) && line.contains("phase.test"))
+                .unwrap_or_else(|| panic!("{text}"))
+                .to_string()
+        };
+        assert!(row("warmup").contains("10 connections"), "{text}");
+        assert!(row("warmup").contains(" - "), "{text}");
+        assert!(row("spike").contains("FAILED"), "{text}");
+        assert!(row("spike").contains("250 µs (RTT)"), "{text}");
+        assert!(row("spike").contains("100.0"), "{text}");
+
+        let markdown = render_scenario_report(
+            &report_config("markdown"),
+            &sample_metrics(),
+            &slo,
+            &targets,
+            &gated,
+        );
+        assert!(markdown.contains("### Phases"), "{markdown}");
+        assert!(
+            markdown.contains(
+                "| `spike` | `ws://phase.test/ws` | 10 connections | 100.0 | 0.00% | 250 µs (RTT) | **❌ FAIL** |"
+            ),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("| `warmup` | `ws://phase.test/ws` | 10 connections | 100.0 | 0.00% | 250 µs (RTT) | **-** |"),
+            "{markdown}"
+        );
+    }
+
+    #[test]
+    fn json_reports_carry_every_phase_and_read_back() {
+        let slo = evaluate_slos(&SloThresholds::default(), &sample_metrics());
+        let phases = [
+            phase_report("warmup", &SloThresholds::new()),
+            phase_report("spike", &SloThresholds::new().with_min_throughput(1e6)),
+        ];
+        let json = render_scenario_report(
+            &report_config("json"),
+            &sample_metrics(),
+            &slo,
+            &[],
+            &phases,
+        );
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["phases"][0]["name"], "warmup");
+        assert_eq!(value["phases"][1]["slo"]["passed"], false);
+        assert_eq!(value["phases"][1]["metrics"]["total_messages_sent"], 100);
+        assert_eq!(value["phases"][1]["connections"], 10);
+
+        let saved = SavedReport::parse(&json).unwrap();
+        assert_eq!(saved.phases, phases);
+
+        let single = render_report(&report_config("json"), &sample_metrics(), &slo);
+        let value: serde_json::Value = serde_json::from_str(&single).unwrap();
+        assert!(value.get("phases").is_none(), "{single}");
+        assert!(SavedReport::parse(&single).unwrap().phases.is_empty());
     }
 
     fn strip_ansi(text: &str) -> String {

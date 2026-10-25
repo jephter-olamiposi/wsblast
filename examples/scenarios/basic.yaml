@@ -4,6 +4,10 @@ metadata:
   name: "Basic Echo Test"
   description: "Simple multi-phase echo test with ramp-up and sustain"
   tags: ["echo", "baseline"]
+# Checked on the merged metrics of every phase. SLO flags on the command
+# line override these thresholds one by one.
+slo:
+  max_error_rate: 0.01
 phases:
   - name: "warmup"
     duration: "5s"
@@ -28,6 +32,10 @@ phases:
     rate_per_conn: 500
     payload: '{"type":"spike","seq":{{seq}}}'
     think_time: "1ms"
+    # Checked on this phase's own metrics; a breach exits with code 2.
+    slo:
+      max_p99: "50ms"
+      max_error_rate: 0.01
 
   - name: "cooldown"
     duration: "5s"

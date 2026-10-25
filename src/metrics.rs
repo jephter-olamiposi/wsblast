@@ -638,13 +638,14 @@ impl MetricsTotals {
         }
     }
 
-    /// Adds totals built elsewhere, such as those of another machine.
+    /// Adds totals built elsewhere, such as those of another machine or of
+    /// another scenario phase.
     ///
     /// # Errors
     ///
     /// Returns [`WsBlastError::Metrics`] when a histogram has other bounds
     /// and cannot be added.
-    #[cfg(feature = "distributed")]
+    #[cfg(any(feature = "distributed", feature = "scenario"))]
     pub(crate) fn add(&mut self, other: &Self) -> WsResult<()> {
         let merge_error = |e| WsBlastError::Metrics(format!("cannot merge histograms: {e:?}"));
         self.handshake.add(&other.handshake).map_err(merge_error)?;

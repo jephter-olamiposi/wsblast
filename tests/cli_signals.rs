@@ -381,3 +381,137 @@ async fn scenario_report_lists_every_phase_target() {
     cancel_first.cancel();
     cancel_second.cancel();
 }
+
+/// A scenario whose `calm` phase meets its SLO and whose `strict` phase, when
+/// `breach` is set, gates on an RTT p99 of 1 ns that no server meets.
+#[cfg(feature = "scenario")]
+fn phase_slo_yaml(target_url: &str, breach: bool) -> String {
+    let strict_p99 = if breach { "1ns" } else { "10s" };
+    format!(
+        "version: \"1.0\"\ntarget: \"{target_url}\"\nmetadata:\n  name: \"phase slo\"\nphases:\n\
+         {calm}    slo:\n      max_error_rate: 0.5\n\
+         {strict}    slo:\n      max_p99: \"{strict_p99}\"\n",
+        calm = phase_yaml("calm", None),
+        strict = phase_yaml("strict", None),
+    )
+}
+
+#[cfg(feature = "scenario")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scenario_phase_slo_breach_exits_with_code_2() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    for (breach, expected) in [(true, 2), (false, 0)] {
+        let path = write_scenario(
+            &format!("phase_slo_{breach}"),
+            &phase_slo_yaml(&target_url, breach),
+        );
+        let finished = run_wsblast(&["--scenario", path.to_str().unwrap(), "--no-progress"]).await;
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            finished.code,
+            Some(expected),
+            "breach {breach}\nstdout:\n{}\nstderr:\n{}",
+            finished.stdout,
+            finished.stderr
+        );
+        let check = finished
+            .stdout
+            .lines()
+            .find(|line| line.contains("strict: Latency p99"))
+            .unwrap_or_else(|| panic!("no phase check:\n{}", finished.stdout));
+        assert!(
+            check.contains(if breach { "FAILED" } else { "PASSED" }),
+            "{check}"
+        );
+        assert!(
+            finished.stdout.contains("calm: Error Rate"),
+            "{}",
+            finished.stdout
+        );
+    }
+
+    // A command-line SLO is checked on the merged metrics next to them.
+    let path = write_scenario("phase_slo_cli", &phase_slo_yaml(&target_url, false));
+    let finished = run_wsblast(&[
+        "--scenario",
+        path.to_str().unwrap(),
+        "--no-progress",
+        "--min-throughput",
+        "1000000000",
+    ])
+    .await;
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(finished.code, Some(2), "stdout:\n{}", finished.stdout);
+
+    cancel_server.cancel();
+}
+
+#[cfg(feature = "scenario")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scenario_json_report_renders_its_phases() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+    let path = write_scenario("phase_json", &phase_slo_yaml(&target_url, true));
+    let report = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("cli_phase_json_{}.json", std::process::id()));
+
+    let finished = run_wsblast(&[
+        "--scenario",
+        path.to_str().unwrap(),
+        "--no-progress",
+        "--format",
+        "json",
+        "-o",
+        report.to_str().unwrap(),
+    ])
+    .await;
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(finished.code, Some(2), "stderr:\n{}", finished.stderr);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    let phases = json["phases"].as_array().expect("phases array");
+    assert_eq!(phases.len(), 2, "{json}");
+    assert_eq!(phases[0]["name"], "calm");
+    assert_eq!(phases[0]["slo"]["passed"], true);
+    assert_eq!(phases[1]["name"], "strict");
+    assert_eq!(phases[1]["slo"]["passed"], false);
+    assert_eq!(phases[1]["slo"]["checks"][0]["name"], "Latency p99");
+    assert_eq!(json["slo"]["passed"], false);
+    let sent: u64 = phases
+        .iter()
+        .map(|p| p["metrics"]["total_messages_sent"].as_u64().unwrap())
+        .sum();
+    assert_eq!(
+        sent,
+        json["metrics"]["total_messages_sent"].as_u64().unwrap()
+    );
+
+    let text = run_wsblast(&["render", report.to_str().unwrap(), "--format", "text"]).await;
+    assert_eq!(text.code, Some(0), "stderr:\n{}", text.stderr);
+    for phase in ["calm", "strict"] {
+        let row = text
+            .stdout
+            .lines()
+            .find(|line| line.contains(&format!(" {phase} ")) && line.contains("1 connection"))
+            .unwrap_or_else(|| panic!("no {phase} row:\n{}", text.stdout));
+        assert!(
+            row.contains(if phase == "calm" { "PASSED" } else { "FAILED" }),
+            "{row}"
+        );
+    }
+    assert!(
+        text.stdout.contains("strict: Latency p99"),
+        "{}",
+        text.stdout
+    );
+
+    let html = run_wsblast(&["render", report.to_str().unwrap()]).await;
+    assert_eq!(html.code, Some(0), "stderr:\n{}", html.stderr);
+    assert!(html.stdout.contains("<h2>Phases</h2>"));
+    assert!(html.stdout.contains("Phase strict SLO checks"));
+    let _ = std::fs::remove_file(&report);
+
+    cancel_server.cancel();
+}

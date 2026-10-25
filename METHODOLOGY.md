@@ -315,7 +315,7 @@ These numbers depend on the machine, the OS and its load. Paced echo keeps its s
 
 ## 9. SLO evaluation and exit codes
 
-SLOs are evaluated once, on the final merged metrics.
+SLOs are evaluated once, on the final merged metrics. A scenario adds per-phase SLOs, evaluated on each phase's own metrics ([section 9.1](#91-scenario-phases)).
 
 | Flag | Check | Passes when |
 | :--- | :--- | :--- |
@@ -334,6 +334,12 @@ A paced echo run (`--rate`) records response time, so its latency checks are nam
 | 1 | Invalid command-line arguments (unknown flag, missing value, conflicting flags), configuration or runtime error (invalid URL, scheme or duration, latency SLO outside echo mode, invalid scenario, unreadable file, report write failure), every connection slot failed and no SLO failed, or, in a distributed run, an agent failed before the start or was lost after it and no SLO failed ([section 12.4](#124-lost-agents)). |
 | 2 | At least one SLO failed. Also used by `--compare --fail-on-regression` when a regression is found. Nothing else exits with 2. |
 
+### 9.1 Scenario phases
+
+Each scenario phase runs its own workers, so its metrics are built the way a single run's are: when the phase ends, the histograms and counters of that phase's workers are added up into the phase's totals and summarised with the phase's own elapsed time and configured connection count. Throughput is the phase's messages over the phase's elapsed time, the error rate the phase's failed operations over its attempted operations, and the percentiles those of the phase's histograms. The phase keeps its own time series, counted from the phase start. The phase totals are then added to the scenario totals, and the merged metrics are summarised from those, so they are exactly what merging every worker of every phase at once would give: counters and histogram samples of the phases add up to the merged values, and `elapsed` is the sum of the phases' elapsed times.
+
+A phase's `slo` mapping is checked on the phase's metrics with the same rules as the flags above: its latency thresholds gate on response time when the phase recorded it (paced echo without actions or think time) and on RTT otherwise, and a latency threshold without samples fails. The scenario's top-level `slo` mapping and the SLO flags are checked together on the merged metrics; a flag replaces the top-level threshold of the same name, and flags never change a phase's thresholds. The report lists the checks of the merged metrics first and then each phase's, prefixed with the phase name (`spike: Latency p99`). The run exits with 2 when any of them fails. See [docs/scenarios.md](docs/scenarios.md), section 7.
+
 SLOs are checked before the "all connections failed" condition. A run where every connection fails and an SLO also fails (for example `--max-error-rate 0.5`) exits with 2, not 1. The report is always printed (and written with `-o`) before the process exits with 1 or 2 after a completed run.
 
 ## 10. Known limitations
@@ -346,7 +352,8 @@ SLOs are checked before the "all connections failed" condition. A run where ever
 - **Live export lags by one interval.** The latency that `--prometheus-listen` and `--otel-endpoint` publish is that of the last completed time-series interval, not of the moment of the read, and the final partial interval is not published (see [section 6.4](#64-live-export)).
 - **Payload bytes only.** Byte counts exclude framing, TLS and handshake traffic, so they understate wire bandwidth.
 - **Request cap overshoot.** `--requests` can be exceeded by up to about one message per connection.
-- **Scenario report header.** In a scenario, the JSON report's `target_url` is the first executed phase's target. `phase_targets` lists the target of every executed phase.
+- **Scenario report header.** In a scenario, the JSON report's `target_url` is the first executed phase's target. `phase_targets` lists the target of every executed phase, and `phases` the metrics and SLO result of each.
+- **Phase percentiles do not combine.** The merged percentiles come from one histogram over every phase's samples, so they are not an average of the phases' percentiles, and a short slow phase can pass the merged p99 while failing its own. Gate such a phase with its own `slo`.
 
 ## 11. Frame capture
 

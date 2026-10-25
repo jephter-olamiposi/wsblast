@@ -176,7 +176,7 @@ pub use report::PhaseTarget;
 pub use report::{SloCheck, SloEvaluation, evaluate_slos, render_report};
 pub use runner::Runner;
 #[cfg(feature = "scenario")]
-pub use runner::{ScenarioExecutor, ScenarioOutcome};
+pub use runner::{PhaseResult, ScenarioExecutor, ScenarioOutcome};
 pub use timeseries::{IntervalLatency, TimeSeries, TimeSeriesPoint};
 
 /// Support for the `wsblast` binary and the benchmarks. Not part of the

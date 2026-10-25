@@ -66,6 +66,12 @@
     },
     "slo": {
       "$ref": "#/$defs/slo_evaluation"
+    },
+    "phases": {
+      "description": "Scenario runs only: every executed phase with its own metrics and SLO result, in run order. A phase skipped by Ctrl+C or SIGTERM is not listed. Absent from single-run reports and from reports written before it was added; readers should treat a missing value as an empty list. The counters of the phases add up to those of metrics.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/phase" }
     }
   },
   "$defs": {
@@ -314,14 +320,43 @@
         }
       }
     },
+    "phase": {
+      "type": "object",
+      "required": ["name", "target_url", "connections", "metrics", "slo"],
+      "properties": {
+        "name": {
+          "description": "Phase name from the scenario file.",
+          "type": "string",
+          "minLength": 1
+        },
+        "target_url": {
+          "description": "Target URL the phase connected to, after parsing (same format as target_url).",
+          "type": "string",
+          "pattern": "^wss?://"
+        },
+        "connections": {
+          "description": "The phase's configured connection count.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "metrics": {
+          "description": "Metrics merged from this phase's workers only. elapsed is the phase's own run time and the time series starts at the phase start (time 0).",
+          "$ref": "#/$defs/aggregated_metrics"
+        },
+        "slo": {
+          "description": "The phase's own slo: thresholds checked on its metrics, with check names that are not prefixed. Passes with no checks when the phase sets no SLO. The same checks appear in the top-level slo with the phase name prefixed.",
+          "$ref": "#/$defs/slo_evaluation"
+        }
+      }
+    },
     "slo_check": {
       "type": "object",
       "required": ["name", "target", "actual", "passed"],
       "properties": {
         "name": {
-          "description": "Check name. Current values: \"Latency p50\", \"Latency p95\", \"Latency p99\", \"Latency p99.9\", \"Error Rate\", \"Throughput (msg/s)\".",
+          "description": "Check name. Current values: \"Latency p50\", \"Latency p95\", \"Latency p99\", \"Latency p99.9\" (\"Response time p50\" and so on when the run recorded response time), \"Error Rate\", \"Throughput (msg/s)\". In the top-level slo of a scenario report, a check of a phase's own SLO is prefixed with the phase name and a colon, as in \"spike: Latency p99\".",
           "type": "string",
-          "examples": ["Latency p99", "Error Rate", "Throughput (msg/s)"]
+          "examples": ["Latency p99", "Error Rate", "Throughput (msg/s)", "spike: Response time p99"]
         },
         "target": {
           "description": "Human-readable threshold, for example \"<= 25ms\", \"<= 1.00%\" or \">= 100.0\". Not intended for parsing.",
@@ -341,11 +376,11 @@
       "required": ["passed", "checks"],
       "properties": {
         "passed": {
-          "description": "True when every check passed, including when no SLO flags were given (checks is then empty). When false the process exits with code 2.",
+          "description": "True when every check passed, including when no SLO was set (checks is then empty). In the top-level slo, when false the process exits with code 2.",
           "type": "boolean"
         },
         "checks": {
-          "description": "One entry per configured SLO flag, in the order p50, p95, p99, p99.9, error rate, throughput.",
+          "description": "One entry per configured threshold, in the order p50, p95, p99, p99.9, error rate, throughput. In the top-level slo of a scenario report, the checks of the whole run (the scenario's slo: mapping and the SLO flags) come first, followed by each phase's own checks in run order.",
           "type": "array",
           "items": { "$ref": "#/$defs/slo_check" }
         }

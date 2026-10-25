@@ -467,7 +467,8 @@ async fn run_distributed(cli: &Cli) -> Result<()> {
     let lost = outcome.lost_agents().count();
     let metrics = outcome.metrics;
     let slo_result = report::evaluate_slos(&config.slo, &metrics);
-    report::emit_scenario_report(&config, &metrics, &slo_result, &[]).map_err(WsBlastError::Io)?;
+    report::emit_scenario_report(&config, &metrics, &slo_result, &[], &[])
+        .map_err(WsBlastError::Io)?;
     if lost > 0 {
         eprintln!(
             "{} {lost} of {} agents were lost; the report covers the other {}.",
@@ -502,6 +503,27 @@ fn exit_if_nothing_connected(metrics: &crate::metrics::AggregatedMetrics) {
             );
         }
         std::process::exit(1);
+    }
+}
+
+/// What a completed run, single or scenario, reports.
+struct RunResult {
+    metrics: crate::metrics::AggregatedMetrics,
+    phase_targets: Vec<report::PhaseTarget>,
+    phases: Vec<report::PhaseReport>,
+    /// The SLO result of a scenario, which evaluates its own; `None` for a
+    /// single run, whose flags are checked after it.
+    slo: Option<report::SloEvaluation>,
+}
+
+impl RunResult {
+    fn single(metrics: crate::metrics::AggregatedMetrics) -> Self {
+        Self {
+            metrics,
+            phase_targets: Vec::new(),
+            phases: Vec::new(),
+            slo: None,
+        }
     }
 }
 
@@ -597,7 +619,17 @@ async fn run_app() -> Result<()> {
                 #[cfg(any(feature = "prometheus", feature = "otel"))]
                 let executor = executor.with_export(live_export.source());
                 let outcome = executor.run().await?;
-                Ok((outcome.metrics, outcome.phase_targets))
+                let phases: Vec<report::PhaseReport> = outcome
+                    .phases
+                    .iter()
+                    .map(report::PhaseReport::from)
+                    .collect();
+                Ok(RunResult {
+                    metrics: outcome.metrics,
+                    phase_targets: outcome.phase_targets,
+                    phases,
+                    slo: Some(outcome.slo),
+                })
             }
             #[cfg(not(feature = "scenario"))]
             {
@@ -626,15 +658,20 @@ async fn run_app() -> Result<()> {
                 let metrics = runner_handle
                     .await
                     .map_err(|e| std::io::Error::other(e.to_string()))??;
-                Ok((metrics, Vec::new()))
+                Ok(RunResult::single(metrics))
             } else {
-                Ok((runner.run().await?, Vec::new()))
+                Ok(RunResult::single(runner.run().await?))
             }
         }
     }
     .await;
     live_export.finish().await;
-    let (metrics, phase_targets) = outcome?;
+    let RunResult {
+        metrics,
+        phase_targets,
+        phases,
+        slo,
+    } = outcome?;
 
     // Multi-phase scenarios report aggregate sizing rather than the first phase.
     #[cfg(feature = "scenario")]
@@ -648,10 +685,11 @@ async fn run_app() -> Result<()> {
         config
     };
 
-    // Generate report and evaluate SLOs for both modes
-    let slo_result = report::evaluate_slos(&config.slo, &metrics);
+    // A scenario evaluated its own SLOs, its phases' and the flags'; a
+    // single run checks the flags here.
+    let slo_result = slo.unwrap_or_else(|| report::evaluate_slos(&config.slo, &metrics));
 
-    report::emit_scenario_report(&config, &metrics, &slo_result, &phase_targets)
+    report::emit_scenario_report(&config, &metrics, &slo_result, &phase_targets, &phases)
         .map_err(WsBlastError::Io)?;
 
     if !slo_result.passed {

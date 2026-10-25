@@ -719,6 +719,12 @@ fn validate_max_requests(max_requests: Option<u64>) -> Result<()> {
 /// Rejects an out-of-range error budget and latency budgets in modes that do
 /// not measure round-trip time.
 fn validate_slo(slo: &SloThresholds, mode: TestMode) -> Result<()> {
+    validate_error_rate(slo)?;
+    validate_latency_mode(slo, mode, "", "--max-p50/--max-p95/--max-p99/--max-p999")
+}
+
+/// Rejects an error budget outside 0.0 to 1.0.
+fn validate_error_rate(slo: &SloThresholds) -> Result<()> {
     if let Some(err_rate) = slo.max_error_rate
         && !(0.0..=1.0).contains(&err_rate)
     {
@@ -727,16 +733,23 @@ fn validate_slo(slo: &SloThresholds, mode: TestMode) -> Result<()> {
         ))
         .into());
     }
+    Ok(())
+}
 
+/// Rejects latency budgets outside echo mode. `prefix` names where the
+/// thresholds come from, such as a scenario phase, and `keys` the settings
+/// that set them.
+fn validate_latency_mode(
+    slo: &SloThresholds,
+    mode: TestMode,
+    prefix: &str,
+    keys: &str,
+) -> Result<()> {
     // Only echo mode measures round-trip time; any other mode would leave the
     // RTT histogram empty and a latency budget could never be evaluated.
-    let has_latency_slo = slo.max_p50.is_some()
-        || slo.max_p95.is_some()
-        || slo.max_p99.is_some()
-        || slo.max_p999.is_some();
-    if has_latency_slo && mode != TestMode::Echo {
+    if slo.has_latency() && mode != TestMode::Echo {
         return Err(ConfigError::UnsupportedOption(format!(
-            "latency SLOs (--max-p50/--max-p95/--max-p99/--max-p999) require --mode echo; {mode:?} mode does not measure round-trip time"
+            "{prefix}latency SLOs ({keys}) require --mode echo; {mode:?} mode does not measure round-trip time"
         ))
         .into());
     }
@@ -995,6 +1008,27 @@ impl SloThresholds {
         self.min_throughput = Some(min);
         self
     }
+
+    /// True when a latency threshold is set.
+    pub(crate) fn has_latency(&self) -> bool {
+        self.max_p50.is_some()
+            || self.max_p95.is_some()
+            || self.max_p99.is_some()
+            || self.max_p999.is_some()
+    }
+
+    /// These thresholds, with every unset one taken from `fallback`.
+    #[cfg(feature = "scenario")]
+    pub(crate) fn or_from(&self, fallback: &Self) -> Self {
+        Self {
+            max_p50: self.max_p50.or(fallback.max_p50),
+            max_p95: self.max_p95.or(fallback.max_p95),
+            max_p99: self.max_p99.or(fallback.max_p99),
+            max_p999: self.max_p999.or(fallback.max_p999),
+            max_error_rate: self.max_error_rate.or(fallback.max_error_rate),
+            min_throughput: self.min_throughput.or(fallback.min_throughput),
+        }
+    }
 }
 
 /// Handshake authentication from the `--auth-*` flags.
@@ -1148,6 +1182,9 @@ pub struct ScenarioConfig {
     #[serde(default)]
     pub(crate) target: Option<String>,
     pub(crate) metadata: ScenarioMeta,
+    /// SLOs checked on the metrics of the whole scenario.
+    #[serde(default)]
+    pub(crate) slo: Option<SloConfig>,
     pub(crate) phases: Vec<PhaseConfig>,
 }
 
@@ -1182,7 +1219,72 @@ pub(crate) struct PhaseConfig {
     pub(crate) think_time: Option<String>,
     #[serde(default)]
     pub(crate) actions: Vec<ActionConfig>,
+    /// SLOs checked on this phase's own metrics.
+    #[serde(default)]
+    pub(crate) slo: Option<SloConfig>,
 }
+
+/// The `slo:` mapping of a scenario or a phase, with the thresholds of the
+/// SLO flags of the same names.
+#[cfg(feature = "scenario")]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SloConfig {
+    #[serde(default)]
+    pub(crate) max_p50: Option<String>,
+    #[serde(default)]
+    pub(crate) max_p95: Option<String>,
+    #[serde(default)]
+    pub(crate) max_p99: Option<String>,
+    #[serde(default)]
+    pub(crate) max_p999: Option<String>,
+    #[serde(default)]
+    pub(crate) max_error_rate: Option<f64>,
+    #[serde(default)]
+    pub(crate) min_throughput: Option<f64>,
+}
+
+#[cfg(feature = "scenario")]
+impl SloConfig {
+    /// Parses the thresholds. `context` prefixes every error, such as
+    /// `phase 'spike': slo`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidScenario`] for a duration that does not
+    /// parse or an error rate outside 0.0 to 1.0.
+    fn compile(&self, context: &str) -> Result<SloThresholds> {
+        let invalid = |e: WsBlastError| ConfigError::InvalidScenario(format!("{context}: {e}"));
+        let latency = |key: &str, raw: &Option<String>| {
+            raw.as_deref()
+                .map(|raw| {
+                    parse_human_duration(raw)
+                        .map_err(|e| ConfigError::InvalidScenario(format!("{context}: {key}: {e}")))
+                })
+                .transpose()
+        };
+        let slo = SloThresholds {
+            max_p50: latency("max_p50", &self.max_p50)?,
+            max_p95: latency("max_p95", &self.max_p95)?,
+            max_p99: latency("max_p99", &self.max_p99)?,
+            max_p999: latency("max_p999", &self.max_p999)?,
+            max_error_rate: self.max_error_rate,
+            min_throughput: self.min_throughput,
+        };
+        validate_error_rate(&slo).map_err(invalid)?;
+        Ok(slo)
+    }
+}
+
+/// Parses an optional `slo:` mapping into thresholds, empty when absent.
+#[cfg(feature = "scenario")]
+fn compile_slo(slo: Option<&SloConfig>, context: &str) -> Result<SloThresholds> {
+    slo.map_or_else(|| Ok(SloThresholds::default()), |slo| slo.compile(context))
+}
+
+/// The keys of a scenario `slo:` mapping that set latency thresholds.
+#[cfg(feature = "scenario")]
+const SLO_LATENCY_KEYS: &str = "max_p50/max_p95/max_p99/max_p999";
 
 #[cfg(feature = "scenario")]
 #[derive(Debug, Clone, Deserialize)]
@@ -1219,6 +1321,8 @@ pub(crate) struct ScenarioPhase {
     pub(crate) payload: Option<PayloadConfig>,
     pub(crate) think_time: Duration,
     pub(crate) actions: Vec<ScenarioAction>,
+    /// Thresholds checked on this phase's own metrics.
+    pub(crate) slo: SloThresholds,
 }
 
 /// Execution-ready action with parsed durations and payload templates.
@@ -1330,6 +1434,7 @@ impl ScenarioConfig {
         if let Some(target) = &self.target {
             parse_target_url(target)?;
         }
+        self.slo()?;
         if self.phases.is_empty() {
             return Err(ConfigError::InvalidScenario(
                 "scenario must define at least one phase".to_string(),
@@ -1355,6 +1460,32 @@ impl ScenarioConfig {
             ScenarioPhase::compile(phase)?;
         }
 
+        Ok(())
+    }
+
+    /// The thresholds of the top-level `slo:` mapping, checked on the
+    /// metrics of the whole scenario; empty when the file sets none.
+    pub(crate) fn slo(&self) -> Result<SloThresholds> {
+        compile_slo(self.slo.as_ref(), "slo")
+    }
+
+    /// Rejects latency SLOs, at the top level or on a phase that `selected`
+    /// runs, in a mode that does not measure round-trip time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::UnsupportedOption`] naming the first `slo:`
+    /// mapping with a latency threshold outside echo mode.
+    pub(crate) fn validate_slo_mode(&self, mode: TestMode, selected: Option<&str>) -> Result<()> {
+        validate_latency_mode(&self.slo()?, mode, "slo: ", SLO_LATENCY_KEYS)?;
+        for phase in self.compile(selected)? {
+            validate_latency_mode(
+                &phase.slo,
+                mode,
+                &format!("phase '{}': slo: ", phase.name),
+                SLO_LATENCY_KEYS,
+            )?;
+        }
         Ok(())
     }
 
@@ -1477,6 +1608,7 @@ impl ScenarioPhase {
                 .map(|payload| PayloadConfig::from_text(payload.clone())),
             think_time,
             actions,
+            slo: compile_slo(phase.slo.as_ref(), &format!("phase '{}': slo", phase.name))?,
         })
     }
 }
@@ -1824,6 +1956,7 @@ impl LoadTestConfig {
             .map(String::from);
 
         let mut config = Self::from_cli_with_target(cli.clone(), target)?;
+        scenario.validate_slo_mode(config.mode, cli.phase.as_deref())?;
 
         config.connections = phase.connections;
         config.duration = phase.duration;
@@ -2460,6 +2593,7 @@ mod tests {
             payload: None,
             think_time: None,
             actions: Vec::new(),
+            slo: None,
         }
     }
 
@@ -2473,6 +2607,7 @@ mod tests {
                 description: None,
                 tags: None,
             },
+            slo: None,
             phases,
         }
     }
@@ -2902,5 +3037,200 @@ phases:
         let mut templated = phase("templated");
         templated.payload = Some(r#"{"seq":{{seq}}}"#.to_string());
         assert!(LoadTestConfig::from_scenario_config(&scenario(vec![templated]), &cli).is_ok());
+    }
+
+    /// A scenario with a top-level `slo:` mapping and one phase with its own.
+    #[cfg(feature = "scenario")]
+    fn slo_yaml(top: &str, phase: &str) -> String {
+        format!(
+            "version: \"1.0\"\ntarget: \"ws://127.0.0.1:9001\"\nmetadata:\n  name: \"slo\"\n\
+             {top}phases:\n  - name: \"spike\"\n    duration: \"1s\"\n    connections: 2\n{phase}"
+        )
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn scenario_and_phase_slos_are_parsed() {
+        let yaml = slo_yaml(
+            "slo:\n  max_error_rate: 0.01\n  min_throughput: 50\n",
+            "    slo:\n      max_p50: \"2ms\"\n      max_p95: 5ms\n      max_p99: \"0.5s\"\n      max_p999: 1\n",
+        );
+        let scenario = ScenarioConfig::from_yaml(&yaml).unwrap();
+        assert_eq!(
+            scenario.slo().unwrap(),
+            SloThresholds::new()
+                .with_max_error_rate(0.01)
+                .with_min_throughput(50.0)
+        );
+        let phases = scenario.compile(None).unwrap();
+        assert_eq!(
+            phases[0].slo,
+            SloThresholds::new()
+                .with_max_p50(Duration::from_millis(2))
+                .with_max_p95(Duration::from_millis(5))
+                .with_max_p99(Duration::from_millis(500))
+                .with_max_p999(Duration::from_secs(1))
+        );
+
+        let plain = ScenarioConfig::from_yaml(&slo_yaml("", "")).unwrap();
+        assert_eq!(plain.slo().unwrap(), SloThresholds::default());
+        assert_eq!(
+            plain.compile(None).unwrap()[0].slo,
+            SloThresholds::default()
+        );
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn unknown_slo_keys_are_rejected_by_name() {
+        for yaml in [
+            slo_yaml("slo:\n  max_p99_ms: 5\n", ""),
+            slo_yaml("", "    slo:\n      max_p99_ms: 5\n"),
+        ] {
+            let message = ScenarioConfig::from_yaml(&yaml).unwrap_err().to_string();
+            assert!(message.contains("unknown field `max_p99_ms`"), "{message}");
+            assert!(message.contains("`max_p999`"), "{message}");
+        }
+        let message = ScenarioConfig::from_yaml(&slo_yaml("", "    sl0:\n      max_p99: 5ms\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("unknown field `sl0`"), "{message}");
+        assert!(message.contains("`slo`"), "{message}");
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn invalid_slo_values_are_rejected_with_the_flag_messages() {
+        for (yaml, expected) in [
+            (
+                slo_yaml("", "    slo:\n      max_p99: \"fast\"\n"),
+                "phase 'spike': slo: max_p99: Configuration error: Invalid duration 'fast'",
+            ),
+            (
+                slo_yaml("", "    slo:\n      max_error_rate: 1.5\n"),
+                "phase 'spike': slo: Configuration error: Invalid threshold specification: \
+                 max_error_rate must be between 0.0 and 1.0, received 1.5",
+            ),
+            (
+                slo_yaml("slo:\n  max_error_rate: -0.1\n", ""),
+                "slo: Configuration error: Invalid threshold specification: \
+                 max_error_rate must be between 0.0 and 1.0, received -0.1",
+            ),
+            (
+                slo_yaml("slo:\n  max_p50: \"-1ms\"\n", ""),
+                "slo: max_p50: Configuration error: Invalid duration '-1ms'",
+            ),
+        ] {
+            let error = ScenarioConfig::from_yaml(&yaml).unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    WsBlastError::Config(ConfigError::InvalidScenario(_))
+                ),
+                "{error:?}"
+            );
+            let message = error.to_string();
+            assert!(message.contains(expected), "{message}");
+        }
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn latency_slos_need_echo_mode_in_every_phase_that_runs() {
+        use clap::Parser;
+
+        let phase_latency = ScenarioConfig::from_yaml(&slo_yaml(
+            "",
+            "    slo:\n      max_p99: 5ms\n      max_error_rate: 0.1\n",
+        ))
+        .unwrap();
+        let stream = Cli::parse_from(["wsblast", "--scenario", "s.yaml", "--mode", "stream"]);
+        let error = LoadTestConfig::from_scenario_config(&phase_latency, &stream).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                WsBlastError::Config(ConfigError::UnsupportedOption(_))
+            ),
+            "{error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(
+                "phase 'spike': slo: latency SLOs (max_p50/max_p95/max_p99/max_p999) require \
+                 --mode echo; Stream mode does not measure round-trip time"
+            ),
+            "{message}"
+        );
+        let echo = Cli::parse_from(["wsblast", "--scenario", "s.yaml"]);
+        assert!(LoadTestConfig::from_scenario_config(&phase_latency, &echo).is_ok());
+
+        let top_latency =
+            ScenarioConfig::from_yaml(&slo_yaml("slo:\n  max_p50: 5ms\n", "")).unwrap();
+        let message = LoadTestConfig::from_scenario_config(&top_latency, &stream)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("slo: latency SLOs (max_p50/"), "{message}");
+
+        // The library entry point applies the same rule to its base mode.
+        let base = LoadTestConfig::builder("ws://127.0.0.1:9001")
+            .mode(TestMode::Stream)
+            .build()
+            .unwrap();
+        let message = crate::ScenarioExecutor::new(&phase_latency, base, None, None)
+            .err()
+            .expect("latency SLO in stream mode")
+            .to_string();
+        assert!(
+            message.contains("phase 'spike': slo: latency SLOs"),
+            "{message}"
+        );
+
+        // Error and throughput budgets need no round trips.
+        let budgets = ScenarioConfig::from_yaml(&slo_yaml(
+            "slo:\n  min_throughput: 1\n",
+            "    slo:\n      max_error_rate: 0.1\n",
+        ))
+        .unwrap();
+        assert!(LoadTestConfig::from_scenario_config(&budgets, &stream).is_ok());
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn command_line_slos_override_the_scenario_threshold_by_threshold() {
+        let scenario = SloThresholds::new()
+            .with_max_p99(Duration::from_millis(50))
+            .with_max_error_rate(0.05);
+        let cli = SloThresholds::new()
+            .with_max_p99(Duration::from_millis(10))
+            .with_min_throughput(100.0);
+        assert_eq!(
+            cli.or_from(&scenario),
+            SloThresholds::new()
+                .with_max_p99(Duration::from_millis(10))
+                .with_max_error_rate(0.05)
+                .with_min_throughput(100.0)
+        );
+        assert_eq!(SloThresholds::new().or_from(&scenario), scenario);
+        assert_eq!(cli.or_from(&SloThresholds::new()), cli);
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn example_scenarios_are_valid() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/scenarios");
+        let mut loaded = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path
+                .extension()
+                .is_some_and(|ext| ext == "yaml" || ext == "yml")
+            {
+                let scenario = ScenarioConfig::load(&path)
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                scenario.compile(None).unwrap();
+                loaded += 1;
+            }
+        }
+        assert!(loaded > 0, "no scenarios in {}", dir.display());
     }
 }

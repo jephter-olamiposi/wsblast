@@ -75,6 +75,7 @@ main { max-width: 1000px; margin: 0 auto; padding: 24px 16px 48px; }
 h1 { font-size: 1.5rem; margin: 0 0 4px; }
 h2 { font-size: 1.15rem; margin: 32px 0 12px; }
 h3 { font-size: 1rem; margin: 0 0 8px; }
+h3.phase-checks { margin-top: 20px; }
 .subtitle { color: var(--text-2); margin: 0 0 16px; }
 .meta { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
 .meta dt { color: var(--text-2); }
@@ -138,6 +139,7 @@ pub(crate) fn render_html_report(view: &ReportView<'_>) -> String {
     render_header(&mut html, view);
     render_slo_banner(&mut html, view);
     render_key_numbers(&mut html, view);
+    render_phases(&mut html, view);
     render_latency_table(&mut html, view);
     render_charts(&mut html, view);
     render_errors(&mut html, view);
@@ -272,17 +274,13 @@ fn render_slo_banner(html: &mut String, view: &ReportView<'_>) {
              <th scope=\"col\">Result</th></tr></thead>\n<tbody>\n",
         );
         for check in &slo.checks {
-            let result = if check.passed {
-                "<span class=\"ok\">\u{2713} Pass</span>"
-            } else {
-                "<span class=\"ko\">\u{2717} Fail</span>"
-            };
             let _ = writeln!(
                 html,
-                "<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td><td>{result}</td></tr>",
+                "<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td></tr>",
                 escape(&check.name),
                 escape(&check.target),
-                escape(&check.actual)
+                escape(&check.actual),
+                check_result(check.passed)
             );
         }
         html.push_str("</tbody></table></div>\n");
@@ -339,6 +337,76 @@ fn render_key_numbers(html: &mut String, view: &ReportView<'_>) {
         );
     }
     html.push_str("</section>\n");
+}
+
+/// One row per scenario phase, then the SLO checks of every phase that set
+/// its own.
+fn render_phases(html: &mut String, view: &ReportView<'_>) {
+    if view.phases.is_empty() {
+        return;
+    }
+    html.push_str(
+        "<section>\n<h2>Phases</h2>\n<div class=\"scroll\"><table>\n<thead><tr>\
+         <th scope=\"col\">Phase</th><th scope=\"col\">Target</th><th scope=\"col\">Load</th>\
+         <th scope=\"col\" class=\"num\">Throughput (msg/s)</th>\
+         <th scope=\"col\" class=\"num\">Error rate</th>\
+         <th scope=\"col\" class=\"num\">Gating p99</th><th scope=\"col\">SLO</th>\
+         </tr></thead>\n<tbody>\n",
+    );
+    for phase in view.phases {
+        let status = match phase.slo_label() {
+            "PASSED" => "<span class=\"ok\">\u{2713} Pass</span>",
+            "FAILED" => "<span class=\"ko\">\u{2717} Fail</span>",
+            _ => "No SLO",
+        };
+        let _ = writeln!(
+            html,
+            "<tr><th scope=\"row\">{}</th><td><code>{}</code></td><td>{}</td>\
+             <td class=\"num\">{}</td><td class=\"num\">{:.2}%</td><td class=\"num\">{}</td>\
+             <td>{status}</td></tr>",
+            escape(&phase.name),
+            escape(phase.target_url.as_str()),
+            escape(&phase.load_label()),
+            escape(&format_number(phase.metrics.throughput_msg_per_sec)),
+            phase.metrics.error_rate * 100.0,
+            escape(&phase.gating_p99_label()),
+        );
+    }
+    html.push_str("</tbody></table></div>\n");
+    for phase in view
+        .phases
+        .iter()
+        .filter(|phase| !phase.slo.checks.is_empty())
+    {
+        let _ = write!(
+            html,
+            "<h3 class=\"phase-checks\">Phase {} SLO checks</h3>\n<div class=\"scroll\"><table>\n<thead><tr>\
+             <th scope=\"col\">Objective</th><th scope=\"col\">Target</th>\
+             <th scope=\"col\">Actual</th><th scope=\"col\">Result</th></tr></thead>\n<tbody>\n",
+            escape(&phase.name)
+        );
+        for check in &phase.slo.checks {
+            let _ = writeln!(
+                html,
+                "<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td></tr>",
+                escape(&check.name),
+                escape(&check.target),
+                escape(&check.actual),
+                check_result(check.passed)
+            );
+        }
+        html.push_str("</tbody></table></div>\n");
+    }
+    html.push_str("</section>\n");
+}
+
+/// The result cell of an SLO check.
+fn check_result(passed: bool) -> &'static str {
+    if passed {
+        "<span class=\"ok\">\u{2713} Pass</span>"
+    } else {
+        "<span class=\"ko\">\u{2717} Fail</span>"
+    }
 }
 
 fn render_latency_table(html: &mut String, view: &ReportView<'_>) {
@@ -1123,6 +1191,7 @@ mod tests {
             rate_per_conn: Some(10),
             stages: None,
             phase_targets: phases,
+            phases: &[],
             timestamp: Some(("Finished", "2026-10-25T10:00:00.000Z".into())),
             metrics,
             slo,
@@ -1324,6 +1393,49 @@ mod tests {
                 assert!(html.contains("up &amp; &#39;go&#39;"));
             }
         }
+    }
+
+    #[test]
+    fn phases_are_listed_with_their_own_slo_checks() {
+        let metrics = metrics_with((0..3).map(|i| point(i, 2)).collect());
+        let slo = no_slo();
+        let phase = |name: &str, checks: Vec<SloCheck>| crate::report::PhaseReport {
+            name: name.to_string(),
+            target_url: url::Url::parse("ws://phase.test/").unwrap(),
+            connections: 7,
+            metrics: metrics.clone(),
+            slo: SloEvaluation {
+                passed: checks.iter().all(|check| check.passed),
+                checks,
+            },
+        };
+        let phases = [
+            phase("warm<up>", Vec::new()),
+            phase(
+                "spike",
+                vec![SloCheck {
+                    name: "Latency p99".into(),
+                    target: "<= 1ms".into(),
+                    actual: "3ms".into(),
+                    passed: false,
+                }],
+            ),
+        ];
+        let mut v = view(&metrics, &slo, &[], "ws://h/");
+        assert!(!render_html_report(&v).contains("<h2>Phases</h2>"));
+        v.phases = &phases;
+        let html = render_html_report(&v);
+        assert_well_formed(&html);
+        assert!(html.contains("<h2>Phases</h2>"), "{html}");
+        assert!(
+            html.contains("<th scope=\"row\">warm&lt;up&gt;</th>"),
+            "{html}"
+        );
+        assert!(html.contains("7 connections"), "{html}");
+        assert!(html.contains("No SLO"), "{html}");
+        assert!(html.contains("Phase spike SLO checks"), "{html}");
+        assert!(!html.contains("Phase warm&lt;up&gt; SLO checks"), "{html}");
+        assert!(html.contains("<code>3ms</code>"), "{html}");
     }
 
     #[test]
