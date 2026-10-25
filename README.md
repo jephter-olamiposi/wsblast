@@ -92,8 +92,8 @@ The report is written before wsblast exits, also when the gate fails. [docs/ci.m
 
 | Feature | Default | Adds |
 | :--- | :--- | :--- |
-| `scenario` | on | `--scenario` and `--phase`: multi-phase YAML scenarios with per-phase targets, actions and think time ([docs/scenarios.md](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/scenarios.md)) |
-| `compare` | on | `--compare`, `--compare-threshold` and `--fail-on-regression` for two JSON reports |
+| `scenario` | on | `--scenario` and `--phase`: multi-phase YAML scenarios with per-phase targets, actions, think time, per-phase and scenario-level SLOs, and staged load per phase ([docs/scenarios.md](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/scenarios.md)) |
+| `compare` | on | `--compare`, `--compare-threshold`, `--compare-window` and `--fail-on-regression` for two JSON reports, including time-series stability metrics |
 | `auth` | on | `--auth-type static` (bearer token) and `--auth-type apikey`, with the credential given directly or printed by `--auth-token-cmd` (optionally refreshed with `--auth-token-refresh`) |
 | `graphql-ws` | on | `--mode graphql-ws` for `graphql-transport-ws` and legacy `graphql-ws` subscriptions |
 | `prometheus` | on | `--prometheus-listen`: a live `/metrics` endpoint ([docs/export.md](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/export.md)) |
@@ -127,6 +127,8 @@ The most used options; `wsblast --help` lists them all.
 | `--min-throughput` | | Messages per second threshold |
 | `--format` / `-o, --output` | `text` | `text`, `json`, `markdown` or `html` (a self-contained page with charts), optionally written to a file |
 | `--tui` / `--no-progress` | | Live dashboard, or no progress bar for CI logs |
+| `--compare BASE CURRENT` | | Compare two JSON reports; `--fail-on-regression` exits with 2 on a regression beyond `--compare-threshold` |
+| `--compare-window START..END` | whole run | Compute the `series.*` comparison metrics only over START..END of each run (`10s..50s`, `10s..`, `..50s`) |
 | `--auth-token-cmd` | | Command whose trimmed stdout is the token (`--auth-type static`) or API key (`--auth-type apikey`), run before the run starts |
 | `--auth-token-cmd-timeout` | `30s` | Time allowed for each run of `--auth-token-cmd` |
 | `--auth-token-refresh` | | Re-run `--auth-token-cmd` this often during the run; new handshakes and reconnects use the latest token |
