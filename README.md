@@ -19,6 +19,8 @@ Each connection is a worker on a Tokio runtime. In the default echo mode a worke
 - **HDR percentiles.** Handshake latency and round-trip time are recorded in HDR histograms and reported from p50 to p99.9, merged from every connection rather than averaged.
 - **Coordinated omission corrected.** With `--rate`, requests follow a fixed schedule and wsblast also records response time from when each request was due, so a server stall shows up in every request that waited behind it instead of in one slow sample. Latency SLOs gate on it. See [METHODOLOGY.md](https://github.com/jephter-olamiposi/wsblast/blob/main/METHODOLOGY.md#4-timing).
 - **Time series.** Every report breaks the run down by interval: throughput, errors and p99 per second, so a stall or a slow ramp shows up where it happened instead of disappearing into the run's averages. The JSON report has every point.
+- **Live export.** `--prometheus-listen` serves a `/metrics` endpoint while the run lasts, and `--otel-endpoint` pushes the same metrics to an OpenTelemetry collector, so a load test shows up on the dashboards you already watch.
+- **Built-in mock server.** `wsblast mock` is a local test target that can add delay and jitter, stall, close connections or reject upgrades on purpose, or replay a `--capture` recording, so a CI gate can be tested against known failures.
 - **Single binary.** One executable, pre-built for Linux, macOS and Windows, with no agents, controllers or scripting runtime to deploy next to it.
 
 ## Install
@@ -54,7 +56,7 @@ wsblast ws://127.0.0.1:9001 -c 50 -d 15s --max-p99 25ms --max-error-rate 0.01
 wsblast ws://127.0.0.1:9001 --stages 30s:200,2m:200,30s:0 -r 10
 ```
 
-No server to test yet? `cargo run --release --example echo_server` in a clone of the repository starts an echo server on `127.0.0.1:9001`.
+No server to test yet? `wsblast mock` starts an echo server on `127.0.0.1:9001`; add `--delay 20ms --stall-every 5s --stall-for 300ms` to see how a slow, stalling server shows up in the report ([docs/mock.md](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/mock.md)).
 
 ![wsblast live terminal dashboard](https://raw.githubusercontent.com/jephter-olamiposi/wsblast/main/assets/wsblast-tui-dashboard.png)
 
@@ -90,10 +92,14 @@ The report is written before wsblast exits, also when the gate fails. [docs/ci.m
 | :--- | :--- | :--- |
 | `scenario` | on | `--scenario` and `--phase`: multi-phase YAML scenarios with per-phase targets, actions and think time ([docs/scenarios.md](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/scenarios.md)) |
 | `compare` | on | `--compare`, `--compare-threshold` and `--fail-on-regression` for two JSON reports |
-| `auth` | on | `--auth-type static` (bearer token) and `--auth-type apikey` |
+| `auth` | on | `--auth-type static` (bearer token) and `--auth-type apikey`, with the credential given directly or printed by `--auth-token-cmd` (optionally refreshed with `--auth-token-refresh`) |
 | `graphql-ws` | on | `--mode graphql-ws` for `graphql-transport-ws` and legacy `graphql-ws` subscriptions |
+| `prometheus` | on | `--prometheus-listen`: a live `/metrics` endpoint ([docs/export.md](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/export.md)) |
+| `capture` | on | `--capture` and `--capture-limit`: a JSONL record of every frame and connection event of a run |
+| `mock` | on | `wsblast mock`: a local test server with delay, jitter, stalls, rejected upgrades, server closes and capture replay ([docs/mock.md](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/mock.md)) |
+| `otel` | off | `--otel-endpoint`, `--otel-interval`, `--otel-service-name`: OTLP/HTTP export to an OpenTelemetry collector |
 
-All four are on by default, so `cargo install wsblast` and the release binaries include them; `--features full` is an alias for the same set. Library users can opt out with `default-features = false` and enable only what they need. Without `auth`, credentials can still be sent with `-H "Authorization: Bearer $TOKEN"`.
+Every feature except `otel` is on by default, so `cargo install wsblast` and the release binaries include them; `--features full` is an alias for that set. `otel` pulls in the OpenTelemetry SDK and an HTTP client, so it is opt-in: `cargo install wsblast --features otel`. Library users can opt out with `default-features = false` and enable only what they need. Without `auth`, credentials can still be sent with `-H "Authorization: Bearer $TOKEN"`.
 
 ## Command-line reference
 
@@ -118,6 +124,16 @@ The most used options; `wsblast --help` lists them all.
 | `--min-throughput` | | Messages per second threshold |
 | `--format` / `-o, --output` | `text` | `text`, `json` or `markdown`, optionally written to a file |
 | `--tui` / `--no-progress` | | Live dashboard, or no progress bar for CI logs |
+| `--auth-token-cmd` | | Command whose trimmed stdout is the token (`--auth-type static`) or API key (`--auth-type apikey`), run before the run starts |
+| `--auth-token-cmd-timeout` | `30s` | Time allowed for each run of `--auth-token-cmd` |
+| `--auth-token-refresh` | | Re-run `--auth-token-cmd` this often during the run; new handshakes and reconnects use the latest token |
+| `--capture FILE` | | Record every data frame and connection event to FILE as JSON lines |
+| `--capture-limit N` | `100000` | Most records `--capture` writes; later ones are dropped and counted (`0` = unlimited) |
+| `--prometheus-listen` | | Serve live metrics at `http://ADDR/metrics` for Prometheus while the run lasts, e.g. `127.0.0.1:9464` |
+| `--otel-endpoint` | | Push live metrics over OTLP/HTTP to this collector base URL, e.g. `http://localhost:4318` (`otel` feature) |
+| `--otel-interval` | `10s` | Time between OTLP exports; the final values are also exported when the run ends |
+| `--otel-service-name` | `$OTEL_SERVICE_NAME`, else `wsblast` | `service.name` resource attribute of the OTLP export |
+| `wsblast mock [--listen ADDR]` | `127.0.0.1:9001` | Run the mock test server (`--delay`, `--jitter`, `--close-after`, `--reject-ratio`, `--stall-every`/`--stall-for`, `--replay`) |
 
 ## Exit codes
 
@@ -131,9 +147,9 @@ The most used options; `wsblast --help` lists them all.
 
 The engine is also a library: build a configuration with `LoadTestConfig::builder`, run it with `Runner` and gate with `evaluate_slos`. See the [API documentation](https://docs.rs/wsblast).
 
-## Removed in 0.2.0
+## Features removed in 0.2.0
 
-0.2.0 keeps only features that work end to end. Distributed execution, OpenTelemetry and Prometheus export, frame capture, chaos injection, the mock server, JWT and OAuth2 authentication and the `compression` placeholder were removed. Their last implementation is on the [`archive/v0.1-full-features`](https://github.com/jephter-olamiposi/wsblast/tree/archive/v0.1-full-features) branch, and the [changelog](https://github.com/jephter-olamiposi/wsblast/blob/main/CHANGELOG.md) has migration notes.
+0.2.0 kept only features that worked end to end. 0.3.0 brings back Prometheus and OpenTelemetry export, frame capture (as JSON Lines) and the mock server, rebuilt and tested. Distributed execution, chaos injection, JWT and OAuth2 authentication (use `--auth-token-cmd` with a command that mints the token instead) and the `compression` placeholder are still out. Their last implementation is on the [`archive/v0.1-full-features`](https://github.com/jephter-olamiposi/wsblast/tree/archive/v0.1-full-features) branch, and the [changelog](https://github.com/jephter-olamiposi/wsblast/blob/main/CHANGELOG.md) has migration notes.
 
 ## MSRV policy
 

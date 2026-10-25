@@ -13,4 +13,7 @@ target
 breakdown.md
 explanation.md
 launch_content.md
-docs/
+# Private planning notes; the published guides in docs/ are tracked.
+docs/EXECUTION_PLAN.md
+docs/adr/
+docs/design/
