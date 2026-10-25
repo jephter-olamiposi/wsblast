@@ -216,7 +216,7 @@ Set a top-level `target` when phases should share an endpoint. With `--phase`, o
 | `-c`, `-d`, `-r`, `-p`, `--payload-file` | Not allowed. The argument parser rejects them and exits with code 1. Set them per phase instead. |
 | `--stages` | Not allowed; wsblast exits with code 1. Set `stages` on a phase instead ([section 4.4](#44-staged-phases)). |
 | `--ramp-rate` | Ignored. Each phase's `ramp_rate` is used. |
-| `--tui` | Rejected at startup (exit code 1). Use the progress bar or `--no-progress`. |
+| `--tui` | Shows the phase in progress (name, number and its own SLOs) and the pass or fail of every finished phase. The per-phase header lines on stderr are not printed. |
 | `--mode` | Applies to every phase. |
 | `-n, --requests` | One cap for the whole scenario. Once reached, the remaining phases are cancelled as soon as they start. |
 | `--binary` | Changes only the default payload (see [section 2](#2-phase-fields)). |

@@ -1,21 +1,24 @@
 //! Interactive TUI application lifecycle and terminal event loop.
 
-use crate::config::LoadTestConfig;
-use crate::metrics::LiveMetrics;
+use crate::tui::model::{Dashboard, RunInfo};
+use crate::tui::source::DashboardSource;
 use crate::tui::widgets::render_dashboard;
 use crossterm::cursor::Show;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use futures_util::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use std::collections::VecDeque;
 use std::io::{self, Stdout};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+/// How often the dashboard reads its source and redraws: 5 Hz.
+const REFRESH: Duration = Duration::from_millis(200);
 
 /// Restores the terminal even when the dashboard panics mid-render.
 struct TerminalGuard {
@@ -31,29 +34,30 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Live dashboard drawn while a single-phase run is in progress.
+/// Live dashboard drawn while a run or scenario is in progress.
 pub(crate) struct TuiApp {
-    config: Arc<LoadTestConfig>,
-    live_metrics: Arc<LiveMetrics>,
+    source: Arc<dyn DashboardSource>,
+    dashboard: Dashboard,
+    /// Cancelled by `q` or Ctrl+C to stop the run.
     cancel_token: CancellationToken,
-    history: VecDeque<u64>,
-    last_message_count: u64,
-    last_tick: Instant,
+    /// Cancelled by the caller once the run has returned.
+    done: CancellationToken,
 }
 
 impl TuiApp {
+    /// A dashboard of the run `source` reports on. `cancel_token` stops the
+    /// run; the dashboard closes when it is cancelled or `done` is.
     pub(crate) fn new(
-        config: Arc<LoadTestConfig>,
-        live_metrics: Arc<LiveMetrics>,
+        info: RunInfo,
+        source: Arc<dyn DashboardSource>,
         cancel_token: CancellationToken,
+        done: CancellationToken,
     ) -> Self {
         Self {
-            config,
-            live_metrics,
+            source,
+            dashboard: Dashboard::new(info),
             cancel_token,
-            history: VecDeque::with_capacity(120),
-            last_message_count: 0,
-            last_tick: Instant::now(),
+            done,
         }
     }
 
@@ -80,71 +84,64 @@ impl TuiApp {
         res
     }
 
+    /// Redraws every [`REFRESH`] and handles keys as they arrive. Neither
+    /// blocks a runtime thread: the terminal's events are read as a stream.
     async fn event_loop(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> io::Result<()> {
-        let start_time = Instant::now();
-        let total_duration = self.config.duration.as_secs_f64();
+        let mut events = EventStream::new();
+        let mut refresh = tokio::time::interval(REFRESH);
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut input_open = true;
 
-        while !self.cancel_token.is_cancelled() {
-            let elapsed_secs = start_time.elapsed().as_secs_f64();
-            let progress_ratio = if total_duration > 0.0 {
-                elapsed_secs / total_duration
-            } else {
-                1.0
-            };
-
-            let now = Instant::now();
-            let tick_delta = now.duration_since(self.last_tick).as_secs_f64();
-            let snap = self.live_metrics.snapshot();
-
-            if tick_delta >= 0.5 {
-                let current_messages = snap.messages_sent.max(snap.messages_received);
-                let delta_msgs = current_messages.saturating_sub(self.last_message_count);
-                let instant_rps = (delta_msgs as f64 / tick_delta) as u64;
-
-                if self.history.len() >= 100 {
-                    self.history.pop_front();
+        loop {
+            tokio::select! {
+                _ = self.cancel_token.cancelled() => break,
+                _ = self.done.cancelled() => break,
+                _ = refresh.tick() => {
+                    let view = self.dashboard.update(self.source.as_ref());
+                    terminal.draw(|f| render_dashboard(f, &view))?;
                 }
-                self.history.push_back(instant_rps);
-                self.last_message_count = current_messages;
-                self.last_tick = now;
-            }
-
-            let history_slice: Vec<u64> = self.history.iter().copied().collect();
-
-            terminal.draw(|f| {
-                render_dashboard(
-                    f,
-                    &self.config,
-                    &snap,
-                    progress_ratio,
-                    &history_slice,
-                    elapsed_secs,
-                );
-            })?;
-
-            if event::poll(Duration::from_millis(80))?
-                && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-            {
-                match (key.code, key.modifiers) {
-                    (KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc, _) => {
-                        self.cancel_token.cancel();
-                        break;
+                event = events.next(), if input_open => match event {
+                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                        if is_stop_key(key.code, key.modifiers) {
+                            self.cancel_token.cancel();
+                            break;
+                        }
                     }
-                    (KeyCode::Char('c'), crossterm::event::KeyModifiers::CONTROL) => {
-                        self.cancel_token.cancel();
-                        break;
-                    }
-                    _ => {}
-                }
+                    Some(Ok(_)) => {}
+                    Some(Err(err)) => return Err(err),
+                    // The terminal closed its input; keep drawing until
+                    // the run ends.
+                    None => input_open = false,
+                },
             }
-
-            tokio::task::yield_now().await;
         }
 
         Ok(())
+    }
+}
+
+/// `q`, `Esc` and Ctrl+C stop the run; the report follows either way.
+fn is_stop_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    match code {
+        KeyCode::Char('q' | 'Q') | KeyCode::Esc => true,
+        KeyCode::Char('c') => modifiers.contains(KeyModifiers::CONTROL),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quit_and_abort_keys_stop_the_run() {
+        assert!(is_stop_key(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(is_stop_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(is_stop_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!is_stop_key(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(!is_stop_key(KeyCode::Char('x'), KeyModifiers::NONE));
     }
 }

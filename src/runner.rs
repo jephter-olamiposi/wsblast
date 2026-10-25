@@ -6,13 +6,11 @@ use crate::config::LoadTestConfig;
 #[cfg(feature = "scenario")]
 use crate::config::{ScenarioConfig, ScenarioPhase};
 use crate::connect::ConnectTarget;
-#[cfg(any(feature = "prometheus", feature = "otel"))]
-use crate::export::ExportSource;
 use crate::metrics::{AggregatedMetrics, LiveMetrics, LiveSnapshot, WorkerMetrics};
 #[cfg(feature = "scenario")]
 use crate::report::{PhaseTarget, SloEvaluation};
 use crate::timeseries::{
-    CounterSampler, IntervalRecorder, IntervalStore, TimeSeries, interval_for,
+    CounterSampler, IntervalRecorder, IntervalStore, LiveIntervals, TimeSeries, interval_for,
 };
 use crate::worker::WorkerSession;
 use colored::Colorize;
@@ -47,9 +45,9 @@ pub struct Runner {
     handle_signals: bool,
     #[cfg(feature = "scenario")]
     scenario: Option<Arc<ScenarioPhase>>,
-    /// Where the live exporters read the time series of this run.
-    #[cfg(any(feature = "prometheus", feature = "otel"))]
-    export: Option<Arc<ExportSource>>,
+    /// Where the live readers (exporters, TUI) read the time series of
+    /// this run.
+    live_intervals: Option<Arc<LiveIntervals>>,
     /// A capture owned by the caller (a scenario records every phase into
     /// one file); otherwise the runner opens its own from the config.
     #[cfg(feature = "capture")]
@@ -107,8 +105,7 @@ impl Runner {
             handle_signals: true,
             #[cfg(feature = "scenario")]
             scenario: None,
-            #[cfg(any(feature = "prometheus", feature = "otel"))]
-            export: None,
+            live_intervals: None,
             #[cfg(feature = "capture")]
             capture: None,
             #[cfg(feature = "distributed")]
@@ -130,8 +127,7 @@ impl Runner {
             cancel_token: CancellationToken::new(),
             handle_signals: true,
             scenario: Some(Arc::new(phase)),
-            #[cfg(any(feature = "prometheus", feature = "otel"))]
-            export: None,
+            live_intervals: None,
             #[cfg(feature = "capture")]
             capture: None,
             #[cfg(feature = "distributed")]
@@ -199,11 +195,10 @@ impl Runner {
         self
     }
 
-    /// Publishes this run's time series to the live exporters reading
-    /// `export`.
-    #[cfg(any(feature = "prometheus", feature = "otel"))]
-    pub(crate) fn with_export(mut self, export: Option<Arc<ExportSource>>) -> Self {
-        self.export = export;
+    /// Publishes this run's time series to the live readers (exporters,
+    /// TUI) of `intervals`.
+    pub(crate) fn with_live_intervals(mut self, intervals: Option<Arc<LiveIntervals>>) -> Self {
+        self.live_intervals = intervals;
         self
     }
 
@@ -518,9 +513,8 @@ impl Runner {
             *self.intervals.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some(Arc::clone(&interval_store));
         }
-        #[cfg(any(feature = "prometheus", feature = "otel"))]
-        if let Some(export) = &self.export {
-            export.begin_phase(Arc::clone(&interval_store), self.latency_basis());
+        if let Some(intervals) = &self.live_intervals {
+            intervals.begin_phase(Arc::clone(&interval_store), self.latency_basis());
         }
         let sampler = CounterSampler::spawn(
             Arc::clone(&self.live_metrics),
@@ -599,9 +593,8 @@ impl Runner {
                 worker_metrics.push(metrics);
             }
         }
-        #[cfg(any(feature = "prometheus", feature = "otel"))]
-        if let Some(export) = &self.export {
-            export.end_phase(elapsed);
+        if let Some(intervals) = &self.live_intervals {
+            intervals.end_phase(elapsed);
         }
         let samples = sampler.finish(elapsed).await;
         let time_series = TimeSeries::build(&samples, &interval_store, self.latency_basis());
@@ -855,8 +848,9 @@ pub struct ScenarioExecutor {
     live_metrics: Arc<LiveMetrics>,
     cancel_token: CancellationToken,
     handle_signals: bool,
-    #[cfg(any(feature = "prometheus", feature = "otel"))]
-    export: Option<Arc<ExportSource>>,
+    live_intervals: Option<Arc<LiveIntervals>>,
+    /// Where the TUI follows the phases, if it runs.
+    progress: Option<Arc<crate::tui::RunProgress>>,
 }
 
 #[cfg(feature = "scenario")]
@@ -897,16 +891,22 @@ impl ScenarioExecutor {
             live_metrics: LiveMetrics::new(),
             cancel_token: CancellationToken::new(),
             handle_signals: true,
-            #[cfg(any(feature = "prometheus", feature = "otel"))]
-            export: None,
+            live_intervals: None,
+            progress: None,
         })
     }
 
-    /// Publishes every phase's time series to the live exporters reading
-    /// `export`.
-    #[cfg(any(feature = "prometheus", feature = "otel"))]
-    pub(crate) fn with_export(mut self, export: Option<Arc<ExportSource>>) -> Self {
-        self.export = export;
+    /// Publishes every phase's time series to the live readers (exporters,
+    /// TUI) of `intervals`.
+    pub(crate) fn with_live_intervals(mut self, intervals: Option<Arc<LiveIntervals>>) -> Self {
+        self.live_intervals = intervals;
+        self
+    }
+
+    /// Reports each phase as it starts and ends to the TUI following
+    /// `progress`.
+    pub(crate) fn with_progress(mut self, progress: Option<Arc<crate::tui::RunProgress>>) -> Self {
+        self.progress = progress;
         self
     }
 
@@ -982,14 +982,31 @@ impl ScenarioExecutor {
             } else {
                 format!("stages {}", crate::report::stage_list_label(&phase.stages))
             };
-            eprintln!(
-                "{} Scenario '{}' phase {}/{}: '{}' ({load})",
-                if phase_idx > 0 { "→" } else { "▶" },
-                self.scenario_name,
-                phase_idx + 1,
-                self.phases.len(),
-                phase.name,
-            );
+            // The TUI shows the phase itself; a line on stderr would be
+            // drawn over it.
+            if !self.base_config.tui {
+                eprintln!(
+                    "{} Scenario '{}' phase {}/{}: '{}' ({load})",
+                    if phase_idx > 0 { "→" } else { "▶" },
+                    self.scenario_name,
+                    phase_idx + 1,
+                    self.phases.len(),
+                    phase.name,
+                );
+            }
+            if let Some(progress) = &self.progress {
+                progress.begin_phase(crate::tui::PhasePlan {
+                    name: Some(phase.name.clone()),
+                    index: phase_idx,
+                    total: self.phases.len(),
+                    connections: phase.connections,
+                    ramp_rate: phase.ramp_rate,
+                    duration: phase.duration,
+                    stages: phase.stages.clone(),
+                    slo: phase.slo.clone(),
+                    run_slo: self.base_config.slo.or_from(&self.scenario_slo),
+                });
+            }
 
             let mut config = self.base_config.clone();
             config.target_url = target.clone();
@@ -1002,8 +1019,7 @@ impl ScenarioExecutor {
                 .with_live_metrics(Arc::clone(&self.live_metrics))
                 .with_cancel_token(self.cancel_token.child_token())
                 .with_signal_handling(false);
-            #[cfg(any(feature = "prometheus", feature = "otel"))]
-            let runner = runner.with_export(self.export.clone());
+            let runner = runner.with_live_intervals(self.live_intervals.clone());
             #[cfg(feature = "capture")]
             let runner =
                 runner.with_capture(capture.as_ref().map(crate::capture::RunningCapture::handle));
@@ -1024,12 +1040,16 @@ impl ScenarioExecutor {
                 .finish(outcome.elapsed, outcome.connections)
                 .with_not_started(outcome.not_started)
                 .with_time_series(outcome.time_series.clone());
+            let phase_slo = crate::report::evaluate_slos(&phase.slo, &phase_metrics);
+            if let Some(progress) = &self.progress {
+                progress.end_phase(&phase.name, &phase_slo);
+            }
             phase_results.push(PhaseResult {
                 name: phase.name.clone(),
                 target_url: target.clone(),
                 connections: phase.connections,
                 stages: phase.stages.clone(),
-                slo: crate::report::evaluate_slos(&phase.slo, &phase_metrics),
+                slo: phase_slo,
                 metrics: phase_metrics,
             });
             time_series.append(

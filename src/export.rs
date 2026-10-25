@@ -17,9 +17,9 @@ pub(crate) mod otel;
 pub(crate) mod prometheus;
 
 use crate::metrics::{LiveMetrics, LiveSnapshot};
-use crate::timeseries::IntervalStore;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use crate::timeseries::LiveIntervals;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Name, unit and description of one exported metric.
 #[derive(Debug, Clone, Copy)]
@@ -192,77 +192,41 @@ impl IntervalExport {
     }
 }
 
-/// The time series of the run or scenario phase in progress.
-#[derive(Debug)]
-struct Phase {
-    store: Arc<IntervalStore>,
-    basis: &'static str,
-    /// The phase's `elapsed`, once it has ended.
-    ended: Option<Duration>,
-}
-
-#[derive(Debug, Default)]
-struct State {
-    run_start: Option<Instant>,
-    finished: Option<Duration>,
-    phase: Option<Phase>,
-    /// Set while a distributed coordinator runs a phase: the latency it
-    /// merged from its agents, which replaces the local time series.
-    #[cfg(feature = "distributed")]
-    remote: Option<Option<IntervalExport>>,
-}
-
 /// What a run publishes to its exporters: the shared live counters plus the
-/// time series of the phase in progress, which the runner registers.
+/// time series of the phase in progress, which the runner registers in the
+/// source's [`LiveIntervals`].
 #[derive(Debug)]
 pub(crate) struct ExportSource {
     live: Arc<LiveMetrics>,
-    state: Mutex<State>,
+    intervals: Arc<LiveIntervals>,
 }
 
 impl ExportSource {
-    /// A source over `live`, the registry every phase of the run shares.
+    /// A source over `live`, the registry every phase of the run shares,
+    /// with intervals of its own.
+    #[cfg(test)]
     pub(crate) fn new(live: Arc<LiveMetrics>) -> Arc<Self> {
-        Arc::new(Self {
-            live,
-            state: Mutex::new(State::default()),
-        })
+        Self::with_intervals(live, LiveIntervals::new())
     }
 
-    fn state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    /// A source over `live` and `intervals`, which other live readers of the
+    /// run, such as the TUI, may share.
+    pub(crate) fn with_intervals(
+        live: Arc<LiveMetrics>,
+        intervals: Arc<LiveIntervals>,
+    ) -> Arc<Self> {
+        Arc::new(Self { live, intervals })
     }
 
-    /// Registers the time series of a run or phase whose clock just started.
-    /// The first call also starts the clock of `wsblast_run_elapsed_seconds`.
-    pub(crate) fn begin_phase(&self, store: Arc<IntervalStore>, basis: &'static str) {
-        let mut state = self.state();
-        state.run_start.get_or_insert(store.start());
-        #[cfg(feature = "distributed")]
-        {
-            state.remote = None;
-        }
-        state.phase = Some(Phase {
-            store,
-            basis,
-            ended: None,
-        });
-    }
-
-    /// Marks the current phase as ended after `elapsed`, once every worker
-    /// has handed over its last interval.
-    pub(crate) fn end_phase(&self, elapsed: Duration) {
-        if let Some(phase) = self.state().phase.as_mut() {
-            phase.ended = Some(elapsed);
-        }
+    /// Where the runner registers the time series of each run or phase.
+    #[cfg(test)]
+    pub(crate) fn intervals(&self) -> &Arc<LiveIntervals> {
+        &self.intervals
     }
 
     /// Freezes the elapsed time once the whole run has ended.
     pub(crate) fn finish(&self) {
-        let mut state = self.state();
-        if state.finished.is_none() {
-            state.finished = Some(state.run_start.map_or(Duration::ZERO, |s| s.elapsed()));
-        }
+        self.intervals.finish();
     }
 
     /// The live counters, summed over every shard. Takes no lock.
@@ -273,49 +237,18 @@ impl ExportSource {
     /// Time since the run's clock started, frozen by [`ExportSource::finish`];
     /// zero before the run starts.
     pub(crate) fn elapsed(&self) -> Duration {
-        let state = self.state();
-        state
-            .finished
-            .or_else(|| state.run_start.map(|start| start.elapsed()))
-            .unwrap_or_default()
-    }
-
-    /// Starts a phase that runs on distributed agents at `start`: the first
-    /// call starts the clock of `wsblast_run_elapsed_seconds`, and the
-    /// latency is what [`ExportSource::publish_latency`] last set, nothing
-    /// until then.
-    #[cfg(feature = "distributed")]
-    pub(crate) fn begin_remote_phase(&self, start: Instant) {
-        let mut state = self.state();
-        state.run_start.get_or_insert(start);
-        state.phase = None;
-        state.remote = Some(None);
-    }
-
-    /// Publishes the latency a distributed coordinator merged from its
-    /// agents' interval histograms.
-    #[cfg(feature = "distributed")]
-    pub(crate) fn publish_latency(&self, latency: Option<IntervalExport>) {
-        self.state().remote = Some(latency);
+        self.intervals.elapsed()
     }
 
     /// Latency of the last completed interval of the current run or phase.
     pub(crate) fn latency(&self) -> Option<IntervalExport> {
-        let state = self.state();
-        #[cfg(feature = "distributed")]
-        if let Some(remote) = state.remote {
-            return remote;
-        }
-        let phase = state.phase.as_ref()?;
-        let since_start = phase.ended.unwrap_or_else(|| phase.store.start().elapsed());
-        let bucket = last_completed(since_start, phase.store.interval())?;
-        let latency = phase.store.latency_of(bucket);
+        let completed = self.intervals.last_completed()?;
         Some(IntervalExport {
-            basis: phase.basis,
-            count: latency.count,
-            p50_us: latency.p50_us,
-            p90_us: latency.p90_us,
-            p99_us: latency.p99_us,
+            basis: completed.basis,
+            count: completed.latency.count,
+            p50_us: completed.latency.p50_us,
+            p90_us: completed.latency.p90_us,
+            p99_us: completed.latency.p99_us,
         })
     }
 
@@ -330,28 +263,11 @@ impl ExportSource {
     }
 }
 
-/// Index of the last interval that ended at or before `since_start`.
-pub(crate) fn last_completed(since_start: Duration, interval: Duration) -> Option<u64> {
-    let index = since_start.as_nanos() / interval.as_nanos().max(1);
-    u64::try_from(index).ok()?.checked_sub(1)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::timeseries::interval_histogram;
-
-    #[test]
-    fn the_last_completed_interval_is_the_one_before_the_current_one() {
-        let second = Duration::from_secs(1);
-        assert_eq!(last_completed(Duration::from_millis(999), second), None);
-        assert_eq!(last_completed(Duration::from_secs(1), second), Some(0));
-        assert_eq!(
-            last_completed(Duration::from_millis(2_500), second),
-            Some(1)
-        );
-        assert_eq!(last_completed(Duration::ZERO, Duration::ZERO), None);
-    }
+    use crate::timeseries::{IntervalStore, interval_histogram};
+    use std::time::Instant;
 
     #[test]
     fn snapshot_reads_counters_and_the_latency_of_the_completed_interval() {
@@ -375,7 +291,9 @@ mod tests {
         // Samples of the interval in progress are not exported yet.
         store.absorb(1, &hist);
         store.absorb(1, &hist);
-        source.begin_phase(Arc::clone(&store), "response_time");
+        source
+            .intervals()
+            .begin_phase(Arc::clone(&store), "response_time");
 
         let snap = source.snapshot();
         assert_eq!(snap.counters.messages_sent, 7);
@@ -386,7 +304,7 @@ mod tests {
         assert_eq!(latency.quantiles().len(), 3);
 
         // Once the phase has ended at 2.2 s, interval 1 is complete.
-        source.end_phase(Duration::from_millis(2_200));
+        source.intervals().end_phase(Duration::from_millis(2_200));
         assert_eq!(source.snapshot().latency.unwrap().count, 2);
 
         source.finish();

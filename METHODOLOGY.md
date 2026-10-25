@@ -157,7 +157,9 @@ Because of bucket rounding, a percentile can be up to 0.1 % above the true sampl
 
 Throughput uses the larger direction so that it is meaningful in every mode: listen mode never sends, and stream mode may send without replies. In echo mode sent and received differ by at most the requests in flight at the end of the run.
 
-The progress bar and the TUI show a live "Msg/s" computed as received messages divided by elapsed time. It is a progress indicator and can differ from the final `throughput_msg_per_sec`.
+The progress bar shows a live "Msg/s" computed as received messages divided by elapsed time. It is a progress indicator and can differ from the final `throughput_msg_per_sec`.
+
+The TUI (`--tui`) shows the recent past rather than the run so far. Its p50, p90 and p99 are those of the last completed time-series interval ([section 6.3](#63-time-series)) of the run or scenario phase in progress, read as the live export reads them ([section 6.4](#64-live-export)), with the same lag of up to one interval; the panel is labelled with the basis (response time for paced echo, RTT otherwise), and the p99 sparkline has one point per completed interval. Msg/s, errors and the error rate cover the last interval's length of the counter snapshots the TUI takes at its own refresh rate, 5 times a second. The live error rate is `errors / (messages sent + errors)` over that window: the live counters do not single out errors that end an already-sent message ([section 6.2](#62-reading-the-error-rate)), so it reads lower than `error_rate` when replies time out. Configured SLO thresholds are shown next to the matching live value and colored when it is past the threshold; p95 and p99.9 have no live value, and a minimum throughput is compared with the window, not the whole-run average. This is an indication only: the gate ([section 9](#9-slo-evaluation-and-exit-codes)) is evaluated on the final metrics.
 
 ### 6.3 Time series
 

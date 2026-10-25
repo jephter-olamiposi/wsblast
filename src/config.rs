@@ -2124,14 +2124,6 @@ impl LoadTestConfig {
             )
             .into());
         }
-        if cli.tui {
-            return Err(ConfigError::UnsupportedOption(
-                "the interactive TUI is not supported with --scenario; use the standard progress output"
-                    .to_string(),
-            )
-            .into());
-        }
-
         let phase = ScenarioPhase::compile(scenario.selected_phase(cli.phase.as_deref())?)?;
 
         let target = scenario
@@ -2757,13 +2749,14 @@ mod tests {
 
     #[cfg(feature = "scenario")]
     #[test]
-    fn scenario_rejects_the_interactive_tui() {
+    fn scenario_accepts_the_interactive_tui() {
         use clap::Parser;
 
         let cli = Cli::parse_from(["wsblast", "--scenario", "scenario.yaml", "--tui"]);
-        let error = LoadTestConfig::from_scenario_config(&scenario(vec![phase("phase")]), &cli)
-            .unwrap_err();
-        assert!(error.to_string().contains("TUI"));
+        let config =
+            LoadTestConfig::from_scenario_config(&scenario(vec![phase("phase")]), &cli).unwrap();
+        assert!(config.tui);
+        assert!(!config.progress());
     }
 
     #[cfg(feature = "scenario")]

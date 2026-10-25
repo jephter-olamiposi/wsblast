@@ -55,13 +55,11 @@ impl IntervalStore {
     }
 
     /// When the run's clock started.
-    #[cfg(any(feature = "prometheus", feature = "otel", feature = "distributed"))]
     pub(crate) fn start(&self) -> Instant {
         self.start
     }
 
     /// The length of one interval.
-    #[cfg(any(feature = "prometheus", feature = "otel", feature = "distributed"))]
     pub(crate) fn interval(&self) -> Duration {
         self.interval
     }
@@ -79,7 +77,6 @@ impl IntervalStore {
 
     /// Latency of interval `bucket` from the samples workers have handed
     /// over so far. The lock is held only while the percentiles are read.
-    #[cfg(any(feature = "prometheus", feature = "otel"))]
     pub(crate) fn latency_of(&self, bucket: u64) -> IntervalLatency {
         let buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
         IntervalLatency::from_histogram(buckets.get(&bucket))
@@ -106,6 +103,235 @@ impl IntervalStore {
             }
         }
     }
+}
+
+/// The time series of the run or scenario phase in progress, as the live
+/// readers (the exporters and the TUI) see it while the run lasts.
+///
+/// The runner registers each run or phase's [`IntervalStore`] when its clock
+/// starts and marks it ended when its workers have stopped. Readers take the
+/// lock briefly to find the phase, and the store's lock only while one
+/// interval's percentiles are read, so nothing here touches the measurement
+/// path.
+#[derive(Debug, Default)]
+pub(crate) struct LiveIntervals {
+    state: Mutex<LiveState>,
+}
+
+#[derive(Debug, Default)]
+struct LiveState {
+    run_start: Option<Instant>,
+    finished: Option<Duration>,
+    phase: Option<LivePhase>,
+    /// Phases registered so far.
+    phases_begun: u64,
+    /// Set while a distributed coordinator runs a phase on its agents: the
+    /// latency it merged from their interval histograms replaces the local
+    /// time series, which a coordinator does not have.
+    #[cfg(feature = "distributed")]
+    remote: Option<RemotePhase>,
+}
+
+/// A phase that runs on distributed agents, as the coordinator sees it.
+#[cfg(feature = "distributed")]
+#[derive(Debug)]
+struct RemotePhase {
+    start: Instant,
+    interval: Duration,
+    basis: &'static str,
+    ended: Option<Duration>,
+    seq: u64,
+    /// The last interval the coordinator merged: its index and latency.
+    latest: Option<(u64, IntervalLatency)>,
+}
+
+/// The time series of the run or scenario phase in progress.
+#[derive(Debug)]
+struct LivePhase {
+    store: Arc<IntervalStore>,
+    basis: &'static str,
+    /// The phase's `elapsed`, once it has ended.
+    ended: Option<Duration>,
+    /// 0 for the first phase registered, 1 for the next, and so on.
+    seq: u64,
+}
+
+/// The clock of the run or scenario phase in progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PhaseClock {
+    /// 0 for the first phase of the run, 1 for the next, and so on; a single
+    /// run has one phase.
+    pub(crate) seq: u64,
+    /// Time since the phase's clock started, or its length once it ended.
+    pub(crate) elapsed: Duration,
+    /// Whether the phase has ended.
+    pub(crate) ended: bool,
+    /// Length of one time-series interval.
+    pub(crate) interval: Duration,
+    /// `rtt` or `response_time`, as the time series' `latency_basis`.
+    pub(crate) basis: &'static str,
+}
+
+/// Latency of the most recently completed interval of the phase in progress.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CompletedInterval {
+    /// The [`PhaseClock::seq`] of the phase the interval belongs to.
+    pub(crate) phase: u64,
+    /// Index of the interval within its phase.
+    pub(crate) index: u64,
+    /// `rtt` or `response_time`, as the time series' `latency_basis`.
+    pub(crate) basis: &'static str,
+    /// The interval's percentiles from the samples handed over so far.
+    pub(crate) latency: IntervalLatency,
+}
+
+impl LiveIntervals {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, LiveState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Registers the time series of a run or phase whose clock just started.
+    /// The first call also starts the run's clock.
+    pub(crate) fn begin_phase(&self, store: Arc<IntervalStore>, basis: &'static str) {
+        let mut state = self.state();
+        state.run_start.get_or_insert(store.start());
+        let seq = state.phases_begun;
+        state.phases_begun += 1;
+        #[cfg(feature = "distributed")]
+        {
+            state.remote = None;
+        }
+        state.phase = Some(LivePhase {
+            store,
+            basis,
+            ended: None,
+            seq,
+        });
+    }
+
+    /// Marks the current phase as ended after `elapsed`, once every worker
+    /// has handed over its last interval.
+    pub(crate) fn end_phase(&self, elapsed: Duration) {
+        let mut state = self.state();
+        #[cfg(feature = "distributed")]
+        if let Some(remote) = state.remote.as_mut() {
+            remote.ended = Some(elapsed);
+        }
+        if let Some(phase) = state.phase.as_mut() {
+            phase.ended = Some(elapsed);
+        }
+    }
+
+    /// Registers a phase that a distributed coordinator runs on its agents,
+    /// whose clock started at `start`. Until [`LiveIntervals::publish_remote`]
+    /// is called, the phase has no completed interval.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn begin_remote_phase(
+        &self,
+        start: Instant,
+        interval: Duration,
+        basis: &'static str,
+    ) {
+        let mut state = self.state();
+        state.run_start.get_or_insert(start);
+        let seq = state.phases_begun;
+        state.phases_begun += 1;
+        state.phase = None;
+        state.remote = Some(RemotePhase {
+            start,
+            interval,
+            basis,
+            ended: None,
+            seq,
+            latest: None,
+        });
+    }
+
+    /// Publishes the latency of interval `index` of the remote phase, merged
+    /// from every agent's histogram for that interval.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn publish_remote(&self, index: u64, latency: IntervalLatency) {
+        if let Some(remote) = self.state().remote.as_mut() {
+            remote.latest = Some((index, latency));
+        }
+    }
+
+    /// Freezes the run's elapsed time once the whole run has ended.
+    pub(crate) fn finish(&self) {
+        let mut state = self.state();
+        if state.finished.is_none() {
+            state.finished = Some(state.run_start.map_or(Duration::ZERO, |s| s.elapsed()));
+        }
+    }
+
+    /// Time since the run's clock started, frozen by
+    /// [`LiveIntervals::finish`]; zero before the run starts.
+    pub(crate) fn elapsed(&self) -> Duration {
+        let state = self.state();
+        state
+            .finished
+            .or_else(|| state.run_start.map(|start| start.elapsed()))
+            .unwrap_or_default()
+    }
+
+    /// The clock of the current phase; `None` before the first one starts.
+    pub(crate) fn phase_clock(&self) -> Option<PhaseClock> {
+        let state = self.state();
+        #[cfg(feature = "distributed")]
+        if let Some(remote) = state.remote.as_ref() {
+            return Some(PhaseClock {
+                seq: remote.seq,
+                elapsed: remote.ended.unwrap_or_else(|| remote.start.elapsed()),
+                ended: remote.ended.is_some(),
+                interval: remote.interval,
+                basis: remote.basis,
+            });
+        }
+        let phase = state.phase.as_ref()?;
+        Some(PhaseClock {
+            seq: phase.seq,
+            elapsed: phase.ended.unwrap_or_else(|| phase.store.start().elapsed()),
+            ended: phase.ended.is_some(),
+            interval: phase.store.interval(),
+            basis: phase.basis,
+        })
+    }
+
+    /// Latency of the last interval of the current phase that has ended:
+    /// `None` before the phase's first interval ends. Once the phase has
+    /// ended, the last interval that ended before it did stays current.
+    pub(crate) fn last_completed(&self) -> Option<CompletedInterval> {
+        let state = self.state();
+        #[cfg(feature = "distributed")]
+        if let Some(remote) = state.remote.as_ref() {
+            let (index, latency) = remote.latest.clone()?;
+            return Some(CompletedInterval {
+                phase: remote.seq,
+                index,
+                basis: remote.basis,
+                latency,
+            });
+        }
+        let phase = state.phase.as_ref()?;
+        let since_start = phase.ended.unwrap_or_else(|| phase.store.start().elapsed());
+        let index = last_completed(since_start, phase.store.interval())?;
+        Some(CompletedInterval {
+            phase: phase.seq,
+            index,
+            basis: phase.basis,
+            latency: phase.store.latency_of(index),
+        })
+    }
+}
+
+/// Index of the last interval that ended at or before `since_start`.
+pub(crate) fn last_completed(since_start: Duration, interval: Duration) -> Option<u64> {
+    let index = since_start.as_nanos() / interval.as_nanos().max(1);
+    u64::try_from(index).ok()?.checked_sub(1)
 }
 
 /// A worker's latency samples for the interval it is currently in.
@@ -440,6 +666,49 @@ impl TimeSeries {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_last_completed_interval_is_the_one_before_the_current_one() {
+        let second = Duration::from_secs(1);
+        assert_eq!(last_completed(Duration::from_millis(999), second), None);
+        assert_eq!(last_completed(Duration::from_secs(1), second), Some(0));
+        assert_eq!(
+            last_completed(Duration::from_millis(2_500), second),
+            Some(1)
+        );
+        assert_eq!(last_completed(Duration::ZERO, Duration::ZERO), None);
+    }
+
+    #[test]
+    fn live_intervals_number_phases_and_read_the_completed_interval() {
+        let live = LiveIntervals::new();
+        assert_eq!(live.phase_clock(), None);
+        assert_eq!(live.last_completed(), None);
+        assert_eq!(live.elapsed(), Duration::ZERO);
+
+        let start = Instant::now()
+            .checked_sub(Duration::from_millis(1_500))
+            .unwrap();
+        let store = IntervalStore::new(start, Duration::from_secs(1));
+        let mut hist = interval_histogram().unwrap();
+        hist.record(2_000).unwrap();
+        store.absorb(0, &hist);
+        live.begin_phase(Arc::clone(&store), "rtt");
+        let clock = live.phase_clock().unwrap();
+        assert_eq!((clock.seq, clock.ended, clock.basis), (0, false, "rtt"));
+        assert!(clock.elapsed >= Duration::from_millis(1_500));
+        let completed = live.last_completed().unwrap();
+        assert_eq!((completed.phase, completed.index), (0, 0));
+        assert_eq!(completed.latency.count, 1);
+
+        live.end_phase(Duration::from_millis(1_600));
+        assert!(live.phase_clock().unwrap().ended);
+
+        // The next phase starts again at interval 0 with its own number.
+        live.begin_phase(IntervalStore::new(Instant::now(), store.interval()), "rtt");
+        assert_eq!(live.phase_clock().unwrap().seq, 1);
+        assert_eq!(live.last_completed(), None);
+    }
 
     #[test]
     fn interval_keeps_series_within_the_point_limit() {

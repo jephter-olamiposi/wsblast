@@ -10,10 +10,12 @@ use crate::report;
 use crate::runner::Runner;
 #[cfg(feature = "scenario")]
 use crate::runner::ScenarioExecutor;
-use crate::tui::TuiApp;
+use crate::timeseries::LiveIntervals;
+use crate::tui::{PhasePlan, RunFeed, RunInfo, RunProgress, TuiApp};
 use clap::{CommandFactory, Parser};
 use colored::Colorize;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// Runs the command line and exits the process with its exit code.
 ///
@@ -363,7 +365,14 @@ struct LiveExport {
 }
 
 impl LiveExport {
-    async fn start(cli: &Cli, config: &LoadTestConfig, live: &Arc<LiveMetrics>) -> Result<Self> {
+    /// Starts the exporters `cli` asks for, reading `live` and the time
+    /// series the runner registers in `intervals`.
+    async fn start(
+        cli: &Cli,
+        config: &LoadTestConfig,
+        live: &Arc<LiveMetrics>,
+        intervals: &Arc<LiveIntervals>,
+    ) -> Result<Self> {
         #[cfg_attr(not(any(feature = "prometheus", feature = "otel")), allow(unused_mut))]
         let mut export = Self::default();
 
@@ -376,7 +385,7 @@ impl LiveExport {
             return Err(not_compiled_in("--otel-endpoint", "otel"));
         }
         #[cfg(not(any(feature = "prometheus", feature = "otel")))]
-        let _ = (config, live);
+        let _ = (config, live, intervals);
 
         #[cfg(feature = "otel")]
         let otel = match &cli.otel_endpoint {
@@ -388,9 +397,11 @@ impl LiveExport {
 
         #[cfg(feature = "prometheus")]
         if let Some(addr) = &cli.prometheus_listen {
-            let server =
-                crate::export::prometheus::PrometheusServer::bind(addr, export.source_for(live))
-                    .await?;
+            let server = crate::export::prometheus::PrometheusServer::bind(
+                addr,
+                export.source_for(live, intervals),
+            )
+            .await?;
             eprintln!(
                 "Serving Prometheus metrics at http://{}/metrics",
                 server.local_addr()
@@ -402,7 +413,7 @@ impl LiveExport {
         if let Some(settings) = otel {
             export.otel = Some(crate::export::otel::OtelExporter::start(
                 settings,
-                export.source_for(live),
+                export.source_for(live, intervals),
             )?);
         }
 
@@ -410,17 +421,14 @@ impl LiveExport {
     }
 
     #[cfg(any(feature = "prometheus", feature = "otel"))]
-    fn source_for(&mut self, live: &Arc<LiveMetrics>) -> Arc<crate::export::ExportSource> {
-        Arc::clone(
-            self.source
-                .get_or_insert_with(|| crate::export::ExportSource::new(Arc::clone(live))),
-        )
-    }
-
-    /// The source runners publish their time series to, when any exporter runs.
-    #[cfg(any(feature = "prometheus", feature = "otel"))]
-    fn source(&self) -> Option<Arc<crate::export::ExportSource>> {
-        self.source.clone()
+    fn source_for(
+        &mut self,
+        live: &Arc<LiveMetrics>,
+        intervals: &Arc<LiveIntervals>,
+    ) -> Arc<crate::export::ExportSource> {
+        Arc::clone(self.source.get_or_insert_with(|| {
+            crate::export::ExportSource::with_intervals(Arc::clone(live), Arc::clone(intervals))
+        }))
     }
 
     /// Freezes the exported run time, stops the Prometheus endpoint and sends
@@ -555,7 +563,8 @@ async fn run_distributed(cli: &Cli) -> Result<()> {
     let _token_refresh = apply_auth(&mut config)?;
 
     let live_metrics = LiveMetrics::new();
-    let live_export = LiveExport::start(cli, &config, &live_metrics).await?;
+    let live_intervals = LiveIntervals::new();
+    let live_export = LiveExport::start(cli, &config, &live_metrics, &live_intervals).await?;
     let outcome: Result<DistributedResult> = async {
         #[cfg(feature = "scenario")]
         if let Some(scenario) = &scenario {
@@ -569,10 +578,7 @@ async fn run_distributed(cli: &Cli) -> Result<()> {
             )?
             .agent_timeout(agent_timeout)
             .with_live_metrics(Arc::clone(&live_metrics));
-            #[cfg(any(feature = "prometheus", feature = "otel"))]
-            {
-                coordinator = coordinator.with_export(live_export.source());
-            }
+            coordinator = coordinator.with_live_intervals(Some(Arc::clone(&live_intervals)));
             if let Some(ca) = &cli.agent_ca {
                 coordinator = coordinator.agent_ca(ca);
             }
@@ -604,10 +610,7 @@ async fn run_distributed(cli: &Cli) -> Result<()> {
         let mut coordinator = Coordinator::new(config.clone(), &cli.agents, token)?
             .agent_timeout(agent_timeout)
             .with_live_metrics(Arc::clone(&live_metrics));
-        #[cfg(any(feature = "prometheus", feature = "otel"))]
-        {
-            coordinator = coordinator.with_export(live_export.source());
-        }
+        coordinator = coordinator.with_live_intervals(Some(Arc::clone(&live_intervals)));
         if let Some(ca) = &cli.agent_ca {
             coordinator = coordinator.agent_ca(ca);
         }
@@ -713,6 +716,45 @@ impl RunResult {
     }
 }
 
+/// Runs `run` in its own task while the dashboard draws `feed`, and returns
+/// the run's result once it has returned. `cancel_token` is the run's: `q`
+/// and Ctrl+C cancel it, and the run still reports what it measured.
+///
+/// When the terminal cannot host the dashboard, the error is printed and
+/// the run continues without it.
+async fn run_with_tui<T: Send + 'static>(
+    config: &LoadTestConfig,
+    feed: RunFeed,
+    cancel_token: CancellationToken,
+    run: impl std::future::Future<Output = Result<T>> + Send + 'static,
+) -> Result<T> {
+    use clap::ValueEnum;
+
+    let done = CancellationToken::new();
+    let task = tokio::spawn({
+        let done = done.clone();
+        async move {
+            let result = run.await;
+            done.cancel();
+            result
+        }
+    });
+    let info = RunInfo {
+        target: config.target_url.to_string(),
+        mode: config
+            .mode
+            .to_possible_value()
+            .map(|value| value.get_name().to_string())
+            .unwrap_or_default(),
+    };
+    let mut tui = TuiApp::new(info, Arc::new(feed), cancel_token, done);
+    if let Err(e) = tui.run().await {
+        eprintln!("TUI error: {e}");
+    }
+    task.await
+        .map_err(|e| std::io::Error::other(e.to_string()))?
+}
+
 async fn run_app() -> Result<()> {
     if let Some(command) = AssetCommand::from_args() {
         return command.print();
@@ -781,7 +823,10 @@ async fn run_app() -> Result<()> {
     let _token_refresh = apply_auth(&mut config)?;
 
     let live_metrics = LiveMetrics::new();
-    let live_export = LiveExport::start(&cli, &config, &live_metrics).await?;
+    // The runners register each phase's time series here; the exporters
+    // and the TUI read the last completed interval from it.
+    let live_intervals = LiveIntervals::new();
+    let live_export = LiveExport::start(&cli, &config, &live_metrics, &live_intervals).await?;
 
     // For scenario mode, run the ScenarioExecutor instead of single Runner.
     // The block's result is held until the live exporters have stopped, so
@@ -801,10 +846,27 @@ async fn run_app() -> Result<()> {
                     cli.phase.as_deref(),
                     cli.resolve_url(),
                 )?
-                .with_live_metrics(Arc::clone(&live_metrics));
-                #[cfg(any(feature = "prometheus", feature = "otel"))]
-                let executor = executor.with_export(live_export.source());
-                let outcome = executor.run().await?;
+                .with_live_metrics(Arc::clone(&live_metrics))
+                .with_live_intervals(Some(Arc::clone(&live_intervals)));
+                let outcome = if config.tui {
+                    let progress = RunProgress::new();
+                    let executor = executor.with_progress(Some(Arc::clone(&progress)));
+                    let cancel_token = executor.cancel_token();
+                    let feed = RunFeed::new(
+                        Arc::clone(&live_metrics),
+                        Arc::clone(&live_intervals),
+                        progress,
+                    );
+                    run_with_tui(
+                        &config,
+                        feed,
+                        cancel_token,
+                        async move { executor.run().await },
+                    )
+                    .await?
+                } else {
+                    executor.run().await?
+                };
                 let phases: Vec<report::PhaseReport> = outcome
                     .phases
                     .iter()
@@ -825,25 +887,27 @@ async fn run_app() -> Result<()> {
             }
         } else {
             // Normal single-phase run
-            let runner = Runner::new(config.clone()).with_live_metrics(Arc::clone(&live_metrics));
-            #[cfg(any(feature = "prometheus", feature = "otel"))]
-            let runner = runner.with_export(live_export.source());
+            let runner = Runner::new(config.clone())
+                .with_live_metrics(Arc::clone(&live_metrics))
+                .with_live_intervals(Some(Arc::clone(&live_intervals)));
 
             if config.tui {
-                let config_arc = Arc::new(config.clone());
+                let progress = RunProgress::new();
+                progress.begin_phase(PhasePlan::for_run(&config));
                 let cancel_token = runner.cancel_token();
-
-                let mut tui_app = TuiApp::new(config_arc, Arc::clone(&live_metrics), cancel_token);
-
-                let runner_handle = tokio::spawn(async move { runner.run().await });
-
-                if let Err(e) = tui_app.run().await {
-                    eprintln!("TUI error: {e}");
-                }
-
-                let metrics = runner_handle
-                    .await
-                    .map_err(|e| std::io::Error::other(e.to_string()))??;
+                let feed = RunFeed::new(
+                    Arc::clone(&live_metrics),
+                    Arc::clone(&live_intervals),
+                    progress,
+                );
+                let metrics =
+                    run_with_tui(
+                        &config,
+                        feed,
+                        cancel_token,
+                        async move { runner.run().await },
+                    )
+                    .await?;
                 Ok(RunResult::single(metrics))
             } else {
                 Ok(RunResult::single(runner.run().await?))
@@ -851,6 +915,7 @@ async fn run_app() -> Result<()> {
         }
     }
     .await;
+    live_intervals.finish();
     live_export.finish().await;
     let RunResult {
         metrics,
