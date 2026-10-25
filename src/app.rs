@@ -499,6 +499,12 @@ fn check_distributed_options(cli: &Cli) -> Result<()> {
             "--tui cannot be used with --agents in this version of wsblast; the coordinator prints progress lines instead".to_string(),
         )));
     }
+    if cli.max_generator_lag.is_some() {
+        return Err(WsBlastError::Config(ConfigError::UnsupportedOption(
+            "--max-generator-lag cannot be used with --agents in this version of wsblast"
+                .to_string(),
+        )));
+    }
     #[cfg(feature = "chaos")]
     if cli.chaos_delay.is_some()
         || cli.chaos_drop.is_some()
@@ -685,6 +691,24 @@ async fn run_distributed(cli: &Cli) -> Result<()> {
     }
     exit_if_nothing_connected(&metrics);
     Ok(())
+}
+
+/// Warns, after the report, when the load generator was the bottleneck.
+fn warn_if_generator_saturated(metrics: &crate::metrics::AggregatedMetrics) {
+    let Some(lag) = metrics.generator_lag.as_ref().filter(|lag| lag.saturated) else {
+        return;
+    };
+    eprintln!(
+        "\n{} The load generator itself was saturated: its runtime woke up late by {} at p99 and {} at most (threshold {}; {} of {} intervals over it). \
+         Every latency in this report includes that client-side delay and may be invalid. \
+         Use fewer connections or a lower rate per machine, give wsblast more CPU, or spread the load over several machines with --agents.",
+        "WARNING:".bold().red(),
+        report::format_us(lag.p99_us),
+        report::format_us(lag.max_us),
+        report::format_us(lag.threshold_us),
+        lag.intervals_over_threshold,
+        lag.intervals
+    );
 }
 
 /// Exits with code 1 when no connection completed its handshake.
@@ -952,6 +976,7 @@ async fn run_app() -> Result<()> {
 
     report::emit_scenario_report(&config, &metrics, &slo_result, &phase_targets, &phases)
         .map_err(WsBlastError::Io)?;
+    warn_if_generator_saturated(&metrics);
 
     if !slo_result.passed {
         std::process::exit(2);

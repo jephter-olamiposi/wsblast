@@ -17,6 +17,7 @@ Contents:
 11. [Frame capture](#11-frame-capture)
 12. [Distributed runs](#12-distributed-runs)
 13. [Chaos injection](#13-chaos-injection)
+14. [Load generator saturation](#14-load-generator-saturation)
 
 ## 1. Execution model
 
@@ -356,8 +357,9 @@ SLOs are evaluated once, on the final merged metrics. A scenario adds per-phase 
 | `--max-p999 D` | the same, at p99.9 | `p99.9 <= D` |
 | `--max-error-rate F` | `error_rate` | `error_rate <= F` |
 | `--min-throughput X` | `throughput_msg_per_sec` | `throughput >= X` |
+| `--max-generator-lag D` | `generator_lag.p99_us`, the load generator's own wake-up lag ([section 14](#14-load-generator-saturation)) | `p99 <= D` |
 
-A paced echo run (`--rate`) records response time, so its latency checks are named `Response time p99` and gate on the latency a steady stream of users would see. An unpaced run gates on RTT and its checks are named `Latency p99`. A latency check with no RTT samples (for example every request timed out) fails with the actual value "no RTT samples". It never passes on an empty histogram.
+A paced echo run (`--rate`) records response time, so its latency checks are named `Response time p99` and gate on the latency a steady stream of users would see. An unpaced run gates on RTT and its checks are named `Latency p99`. A latency check with no RTT samples (for example every request timed out) fails with the actual value "no RTT samples". It never passes on an empty histogram. `--max-generator-lag` applies in every mode; its check is named `Generator lag p99`, and a run without lag samples fails it with "no lag samples". A scenario's `slo` mappings accept it as `max_generator_lag`.
 
 | Exit code | Meaning |
 | :--- | :--- |
@@ -378,7 +380,7 @@ SLOs are checked before the "all connections failed" condition. A run where ever
 - **Coordinated omission is corrected only for paced echo.** Response time needs a schedule to measure against, so it is recorded only with `--rate` (or a phase's `rate_per_conn`) in echo mode, in the plain echo loop and in action scripts alike. Unpaced echo (`--rate 0`) is a closed loop with no intended send times: its RTT percentiles still record one slow sample per stall and understate tail latency when the server pauses. A phase without actions that has a think time does not record response time, and in an action script a stall that overlaps a `Wait`, a `Ping` or the think time is partly hidden by the schedule restart at the end of that pause. To measure tail latency under stalls, set a rate.
 - **Memory per connection.** Each connection holds two histograms of about 136 KiB each, so about 270 KB per connection before any socket or TLS buffers; a paced echo connection adds a third for response time, and every connection adds about 20 KB for its time series interval. The run keeps one merged interval histogram per point, at most 600, about 12 MB. 10,000 connections need about 2.7 GB for histograms alone. A local echo run with 1,000 connections at `--rate 1` peaked at about 420 MB resident.
 - **Reply matching.** Echo replies are matched by `--match` (default `first`, see [section 3.1](#31-how-replies-are-matched-echo-mode)). With `first`, unsolicited server frames are taken as replies.
-- **Single generator.** Without `--agents`, all load comes from one process ([section 12](#12-distributed-runs) spreads it over several machines). wsblast does not detect when the generator itself is the bottleneck (CPU saturation, file descriptor limit, ephemeral ports). On Unix it prints a warning when the connection count (`-c`, or the peak of `--stages`) plus 64 exceeds the soft open file limit (`ulimit -n`). Watch the generator's CPU when RTT matters.
+- **Single generator.** Without `--agents`, all load comes from one process ([section 12](#12-distributed-runs) spreads it over several machines). wsblast measures how late its own runtime wakes up and flags a run whose latency includes client-side delay ([section 14](#14-load-generator-saturation)), and it reports and warns when `-c` plus 64 exceeds the open file limit (`ulimit -n`). It does not detect a shortage of ephemeral ports, and the lag probe measures scheduling delay, not delay inside the kernel or the network stack. Distributed runs report neither the lag nor the file limit of their agents.
 - **Timer resolution.** Per-connection rates above about 1000 msg/s are approximate (see [section 8.3](#83-timer-resolution)).
 - **Live export lags by one interval.** The latency that `--prometheus-listen` and `--otel-endpoint` publish is that of the last completed time-series interval, not of the moment of the read, and the final partial interval is not published (see [section 6.4](#64-live-export)).
 - **Payload bytes only.** Byte counts exclude framing, TLS and handshake traffic, so they understate wire bandwidth.
@@ -532,5 +534,38 @@ The JSON report carries `metrics.chaos` with `seed`, `delayed` (sends held back 
 
 ### 13.3 Cost
 
-A run without chaos options creates no generator and no chaos state: each data send checks one empty option and moves on, and the injection code is compiled out without the `chaos` feature. Measured as in [section 11.1](#111-cost-and-drops), unpaced echo throughput with chaos off is within the run-to-run spread of the build before chaos existed.
+A run without chaos options creates no generator and no chaos state: each data send checks one empty option and moves on, and the injection code is compiled out without the `chaos` feature.
+
+Measured with release builds on a 2-core Linux VM that other builds were using at the same time, against `examples/echo_server.rs` on the same machine, unpaced echo with 20 connections for 4 s, 14 runs of each build interleaved in pairs:
+
+| Build | Throughput, lowest to highest | Median | Mean |
+| :--- | :--- | :--- | :--- |
+| Before chaos injection and the lag probe ([section 14](#14-load-generator-saturation)) | 31,171 to 61,567 msg/s | 47,163 msg/s | 48,045 msg/s |
+| With both, chaos off | 34,429 to 58,972 msg/s | 49,279 msg/s | 48,849 msg/s |
+
+The paired runs differed by -13,493 to +13,887 msg/s, with a median of +63 msg/s: the cost of chaos off, and of the probe, is far inside the spread that the machine's other load causes.
+
+## 14. Load generator saturation
+
+A load generator that is short of CPU, or whose runtime is blocked, takes every timestamp late: a reply that arrived on time is read late, so RTT and response time grow with the generator's own delay, not the server's. wsblast measures that delay directly, all through every run.
+
+### 14.1 The probe
+
+When the run's clock starts, a task on the workers' runtime starts a loop: sleep until a deadline 10 ms ahead, note how late it woke up (`lag = wake-up time - deadline`), and set the next deadline 10 ms after the wake-up. Workers wait for the same scheduler, so a task that wakes up late tells how late the workers' own wake-ups were at the same time. The probe costs one timer wake-up every 10 ms, about 100 a second whatever the load; it records into one histogram (2 significant figures) and keeps the samples of the current time-series interval to compute that interval's p99 and maximum when it ends. It is part of the throughput measurement in [section 13.3](#133-cost), which found no measurable cost.
+
+On an idle machine the lag is the timer's own granularity: Tokio timers fire on the millisecond tick after their deadline, so Linux and macOS show up to about 1 ms, and Windows, whose timers wake at its default resolution of about 15.6 ms, shows up to about 16 ms.
+
+### 14.2 What is reported
+
+`metrics.generator_lag` in the JSON report holds `samples`, `p50_us`, `p99_us` and `max_us` of every wake-up of the run, `threshold_us`, `intervals` (time-series intervals with at least one sample), `intervals_over_threshold` (those whose own p99 is above the threshold, with at least two wake-ups later than it) and `saturated`. Each time-series point carries `generator_lag` with the `samples`, `p99_us` and `max_us` of its interval, so a saturated stretch of a run can be found; a point gets the samples whose deadline fell in its interval, and the samples of the short end of a run that is folded into the last point ([section 6.3](#63-time-series)) count for the run but not for that point. The text and Markdown reports print one `Generator:` line and the HTML report a row, with the lag and the open file limit.
+
+The run is flagged as **saturated** when its p99 lag is above the threshold and at least three wake-ups were later than the threshold, or when at least a tenth of its intervals are over the threshold. In a short run the p99 is one of the last few samples, so the minimum keeps a single scheduling hiccup of the machine from flagging it; the share of intervals flags a saturated stretch of a run even when the run's p99 is below the threshold. The threshold is 20 ms, and 36 ms on Windows: 20 ms above the timer granularity of the platform. A flagged run prints, after the report, a warning that its latency numbers include client-side delay and may be invalid. `--max-generator-lag D` turns the p99 lag into an SLO ([section 9](#9-slo-evaluation-and-exit-codes)): a run whose generator lagged more fails with exit code 2, whatever its other results.
+
+A lag well below the threshold does not mean the generator added nothing: a 2 ms lag can still matter against a 1 ms RTT. Compare `generator_lag.p99_us` with the latency percentiles you gate on.
+
+`metrics.open_file_limit` reports the check made before the run ([section 10](#10-known-limitations)): `soft_limit` (`ulimit -n`), `needed` (connections plus 64; for a scenario, those of its largest phase) and `sufficient`. It is absent on Windows, where wsblast does not read the limit.
+
+### 14.3 Scenarios and distributed runs
+
+Each scenario phase runs its own probe, from the phase's start; the phase's metrics carry their own `generator_lag`, and the merged metrics add every phase's samples and intervals together. A distributed coordinator generates no load and does not merge its agents' lag, so a distributed report has no `generator_lag` and `--max-generator-lag` is rejected with `--agents`.
 

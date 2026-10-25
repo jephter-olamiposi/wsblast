@@ -1042,6 +1042,10 @@ pub struct SloThresholds {
     pub max_error_rate: Option<f64>,
     /// Lowest acceptable throughput in messages per second.
     pub min_throughput: Option<f64>,
+    /// Highest acceptable p99 wake-up lag of the load generator
+    /// ([`AggregatedMetrics::generator_lag`](crate::AggregatedMetrics::generator_lag)).
+    /// It applies in every mode; a run without lag samples fails it.
+    pub max_generator_lag: Option<Duration>,
 }
 
 impl SloThresholds {
@@ -1092,6 +1096,13 @@ impl SloThresholds {
         self
     }
 
+    /// Sets the highest acceptable p99 wake-up lag of the load generator.
+    #[must_use]
+    pub fn with_max_generator_lag(mut self, max: Duration) -> Self {
+        self.max_generator_lag = Some(max);
+        self
+    }
+
     /// True when a latency threshold is set.
     pub(crate) fn has_latency(&self) -> bool {
         self.max_p50.is_some()
@@ -1110,6 +1121,7 @@ impl SloThresholds {
             max_p999: self.max_p999.or(fallback.max_p999),
             max_error_rate: self.max_error_rate.or(fallback.max_error_rate),
             min_throughput: self.min_throughput.or(fallback.min_throughput),
+            max_generator_lag: self.max_generator_lag.or(fallback.max_generator_lag),
         }
     }
 }
@@ -1505,6 +1517,8 @@ pub(crate) struct SloConfig {
     pub(crate) max_error_rate: Option<f64>,
     #[serde(default)]
     pub(crate) min_throughput: Option<f64>,
+    #[serde(default)]
+    pub(crate) max_generator_lag: Option<String>,
 }
 
 #[cfg(feature = "scenario")]
@@ -1533,6 +1547,7 @@ impl SloConfig {
             max_p999: latency("max_p999", &self.max_p999)?,
             max_error_rate: self.max_error_rate,
             min_throughput: self.min_throughput,
+            max_generator_lag: latency("max_generator_lag", &self.max_generator_lag)?,
         };
         validate_error_rate(&slo).map_err(invalid)?;
         Ok(slo)
@@ -2210,6 +2225,11 @@ impl LoadTestConfig {
                 .transpose()?,
             max_error_rate: cli.max_error_rate,
             min_throughput: cli.min_throughput,
+            max_generator_lag: cli
+                .max_generator_lag
+                .as_deref()
+                .map(parse_human_duration)
+                .transpose()?,
         };
 
         let stages = cli
@@ -3851,5 +3871,34 @@ phases:
             "{err}"
         );
         assert!(listen.validate_slo_mode(TestMode::Stream, None).is_ok());
+    }
+
+    #[test]
+    fn generator_lag_slo_comes_from_the_flag_and_the_scenario() {
+        let config = match_config(&["--mode", "stream", "--max-generator-lag", "15ms"]).unwrap();
+        assert_eq!(
+            config.slo().max_generator_lag,
+            Some(Duration::from_millis(15))
+        );
+
+        #[cfg(feature = "scenario")]
+        {
+            let scenario = ScenarioConfig::from_yaml(
+                "version: \"1.0\"\ntarget: \"ws://127.0.0.1:9001\"\nmetadata:\n  name: \"g\"\n\
+                 slo:\n  max_generator_lag: \"25ms\"\nphases:\n  - name: \"p\"\n    duration: \"1s\"\n    \
+                 connections: 1\n    slo:\n      max_generator_lag: \"5ms\"\n",
+            )
+            .unwrap();
+            assert_eq!(
+                scenario.slo().unwrap().max_generator_lag,
+                Some(Duration::from_millis(25))
+            );
+            assert_eq!(
+                scenario.compile(None).unwrap()[0].slo.max_generator_lag,
+                Some(Duration::from_millis(5))
+            );
+            // Not a latency SLO: allowed outside echo mode.
+            assert!(scenario.validate_slo_mode(TestMode::Listen, None).is_ok());
+        }
     }
 }

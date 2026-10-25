@@ -3084,3 +3084,84 @@ async fn test_scenario_phase_chaos_replaces_the_base_chaos() {
     assert_no_errors(&outcome.metrics);
     cancel_server.cancel();
 }
+
+#[tokio::test]
+async fn test_generator_lag_is_small_on_an_idle_generator() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+    let metrics = run(echo_test_config(&target_url)
+        .rate_per_connection(20)
+        .duration(Duration::from_millis(800)))
+    .await;
+
+    // Other processes on a shared CI machine may delay a wake-up now and
+    // then; the median stays at the timer's granularity.
+    let lag = metrics.generator_lag.as_ref().expect("generator lag");
+    assert!(lag.samples >= 20, "{lag:?}");
+    assert!(lag.p50_us < 20_000, "{lag:?}");
+    assert!(
+        metrics
+            .time_series
+            .points
+            .iter()
+            .any(|point| point.generator_lag.is_some()),
+        "{metrics:?}"
+    );
+    let gate = evaluate_slos(
+        &SloThresholds::new().with_max_generator_lag(Duration::from_secs(1)),
+        &metrics,
+    );
+    assert!(gate.passed, "{gate:?}");
+    assert_eq!(gate.checks[0].name, "Generator lag p99");
+    #[cfg(unix)]
+    assert!(
+        metrics
+            .open_file_limit
+            .as_ref()
+            .is_some_and(|l| l.needed == 65),
+        "{metrics:?}"
+    );
+    cancel_server.cancel();
+}
+
+#[tokio::test]
+async fn test_generator_lag_flags_a_blocked_runtime() {
+    // `#[tokio::test]` runs on one thread. A task that blocks it, as
+    // CPU-bound work in a task would, delays every worker and the probe.
+    let (target_url, cancel_server) = spawn_echo_server().await;
+    let stop = tokio_util::sync::CancellationToken::new();
+    let blocker = tokio::spawn({
+        let stop = stop.clone();
+        async move {
+            while !stop.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(50));
+                tokio::task::yield_now().await;
+            }
+        }
+    });
+    let metrics = run(echo_test_config(&target_url)
+        .rate_per_connection(20)
+        .duration(Duration::from_millis(1200)))
+    .await;
+    stop.cancel();
+    blocker.await.unwrap();
+
+    let lag = metrics.generator_lag.as_ref().expect("generator lag");
+    assert!(lag.saturated, "{lag:?}");
+    assert!(lag.p99_us >= 30_000, "{lag:?}");
+    assert!(lag.intervals_over_threshold >= 1, "{lag:?}");
+    let gate = evaluate_slos(
+        &SloThresholds::new().with_max_generator_lag(Duration::from_millis(25)),
+        &metrics,
+    );
+    assert!(!gate.passed, "{gate:?}");
+    let rendered = render_report(
+        &echo_test_config(&target_url).build().unwrap(),
+        &metrics,
+        &gate,
+    );
+    assert!(
+        rendered.contains("SATURATED: latency includes client-side delay"),
+        "{rendered}"
+    );
+    cancel_server.cancel();
+}

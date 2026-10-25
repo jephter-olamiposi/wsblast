@@ -47,6 +47,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --max-p999 'SLO threshold: Maximum acceptable p99.9 round-trip latency (e.g., ''250ms'')'
             cand --max-error-rate 'SLO threshold: Maximum acceptable error rate fraction (e.g., ''0.01'' for 1%, ''0.001'' for 0.1%)'
             cand --min-throughput 'SLO threshold: Minimum required message throughput (messages/sec)'
+            cand --max-generator-lag 'SLO threshold: Maximum p99 wake-up lag of the load generator itself (e.g. ''20ms''); a breach means the latency numbers include client-side delay'
             cand --auth-type 'Authentication type (none, static, apikey)'
             cand --auth-token 'Static token for auth (used with --auth-type static)'
             cand --auth-token-cmd 'Command whose trimmed stdout is the token or API key, run through the platform shell before the run (replaces --auth-token or --auth-apikey)'

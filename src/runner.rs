@@ -6,7 +6,8 @@ use crate::config::LoadTestConfig;
 #[cfg(feature = "scenario")]
 use crate::config::{ScenarioConfig, ScenarioPhase};
 use crate::connect::ConnectTarget;
-use crate::metrics::{AggregatedMetrics, LiveMetrics, LiveSnapshot, WorkerMetrics};
+use crate::lag::{LagProbe, LagTotals};
+use crate::metrics::{AggregatedMetrics, LiveMetrics, LiveSnapshot, OpenFileLimit, WorkerMetrics};
 #[cfg(feature = "scenario")]
 use crate::report::{PhaseTarget, SloEvaluation};
 use crate::timeseries::{
@@ -303,7 +304,11 @@ impl Runner {
             AggregatedMetrics::merge(outcome.worker_metrics, outcome.elapsed, outcome.connections)?
                 .with_not_started(outcome.not_started)
                 .with_time_series(outcome.time_series)
-                .with_capture(outcome.capture),
+                .with_capture(outcome.capture)
+                .with_generator(
+                    outcome.lag.summary(),
+                    open_file_limit(self.config.connections),
+                ),
         )
     }
 
@@ -444,6 +449,7 @@ impl Runner {
                     #[cfg(feature = "distributed")]
                     interval_store: IntervalStore::new(started_at, interval_for(self.config.duration)),
                     capture: None,
+                    lag: LagTotals::default(),
                 });
             }
         };
@@ -542,6 +548,7 @@ impl Runner {
             interval,
             self.cancel_token.clone(),
         );
+        let lag_probe = LagProbe::spawn(start_time, interval);
         let duration_token = self.cancel_token.clone();
         let test_duration = self.config.duration;
         tokio::spawn(async move {
@@ -617,7 +624,9 @@ impl Runner {
             intervals.end_phase(elapsed);
         }
         let samples = sampler.finish(elapsed).await;
-        let time_series = TimeSeries::build(&samples, &interval_store, self.latency_basis());
+        let mut time_series = TimeSeries::build(&samples, &interval_store, self.latency_basis());
+        let lag = lag_probe.finish().await;
+        lag.attach(&mut time_series);
 
         // Every worker has stopped, so the capture is complete; it is
         // flushed and closed before the report is rendered.
@@ -642,6 +651,7 @@ impl Runner {
             #[cfg(feature = "distributed")]
             interval_store,
             capture,
+            lag: lag.totals(),
         })
     }
 }
@@ -667,6 +677,8 @@ pub(crate) struct RunOutcome {
     pub(crate) interval_store: Arc<IntervalStore>,
     /// Totals of the capture this runner opened itself, if any.
     pub(crate) capture: Option<crate::metrics::CaptureSummary>,
+    /// What the generator lag probe measured during the run.
+    pub(crate) lag: LagTotals,
 }
 
 /// Stops the signal listener task when the owning run ends.
@@ -761,6 +773,22 @@ fn warn_if_ramp_exceeds_duration(connections: usize, ramp_rate: u64, duration: D
 
 /// Warns if target concurrency approaches or exceeds the process open file descriptor limit.
 fn check_file_descriptor_limit(required_conns: usize) {
+    if let Some(limit) = open_file_limit(required_conns)
+        && !limit.sufficient
+    {
+        eprintln!(
+            "{} Configured connections ({}) approach or exceed system open file limit (ulimit -n = {}). Consider running 'ulimit -n 65535' to avoid EMFILE socket drops.",
+            colored::Colorize::bold("Warning:").yellow(),
+            required_conns,
+            limit.soft_limit
+        );
+    }
+}
+
+/// The open file limit against what `required_conns` connections need:
+/// one descriptor each plus 64 for runtime I/O, event loops and DNS
+/// resolution. `None` where the limit cannot be read.
+fn open_file_limit(required_conns: usize) -> Option<OpenFileLimit> {
     #[cfg(unix)]
     {
         let mut rlim = libc::rlimit {
@@ -773,23 +801,24 @@ fn check_file_descriptor_limit(required_conns: usize) {
         // preconditions.
         #[allow(unsafe_code)]
         let res = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
-        if res == 0 {
-            let soft_limit = rlim.rlim_cur as usize;
-            // 64 descriptors reserved for runtime I/O, event loops, and DNS resolution.
-            if required_conns.saturating_add(64) > soft_limit {
-                eprintln!(
-                    "{} Configured connections ({}) approach or exceed system open file limit (ulimit -n = {}). Consider running 'ulimit -n 65535' to avoid EMFILE socket drops.",
-                    colored::Colorize::bold("Warning:").yellow(),
-                    required_conns,
-                    soft_limit
-                );
-            }
+        if res != 0 {
+            return None;
         }
+        // `rlim_t` is `u64` on Linux and macOS but not on every Unix.
+        #[allow(clippy::unnecessary_cast)]
+        let soft_limit = rlim.rlim_cur as u64;
+        let needed = (required_conns as u64).saturating_add(64);
+        Some(OpenFileLimit {
+            soft_limit,
+            needed,
+            sufficient: needed <= soft_limit,
+        })
     }
 
     #[cfg(not(unix))]
     {
         let _ = required_conns;
+        None
     }
 }
 
@@ -974,6 +1003,8 @@ impl ScenarioExecutor {
         let mut total_connections = 0u64;
         let mut total_not_started = 0u64;
         let mut time_series = TimeSeries::default();
+        let mut lag = LagTotals::default();
+        let mut largest_phase = 0usize;
         let scenario_start = Instant::now();
         let mut phase_targets = Vec::with_capacity(self.phases.len());
 
@@ -1056,10 +1087,13 @@ impl ScenarioExecutor {
                 phase_totals.add_worker(worker);
             }
             totals.add(&phase_totals)?;
+            lag.add(&outcome.lag);
+            largest_phase = largest_phase.max(phase.connections);
             let phase_metrics = phase_totals
                 .finish(outcome.elapsed, outcome.connections)
                 .with_not_started(outcome.not_started)
-                .with_time_series(outcome.time_series.clone());
+                .with_time_series(outcome.time_series.clone())
+                .with_generator(outcome.lag.summary(), open_file_limit(phase.connections));
             let phase_slo = crate::report::evaluate_slos(&phase.slo, &phase_metrics);
             if let Some(progress) = &self.progress {
                 progress.end_phase(&phase.name, &phase_slo);
@@ -1097,7 +1131,8 @@ impl ScenarioExecutor {
             .finish(total_elapsed, total_connections)
             .with_not_started(total_not_started)
             .with_time_series(time_series)
-            .with_capture(capture);
+            .with_capture(capture)
+            .with_generator(lag.summary(), open_file_limit(largest_phase));
         let overall = crate::report::evaluate_slos(
             &self.base_config.slo.or_from(&self.scenario_slo),
             &metrics,

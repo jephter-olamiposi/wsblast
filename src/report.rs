@@ -932,6 +932,25 @@ pub fn evaluate_slos(slo: &SloThresholds, metrics: &AggregatedMetrics) -> SloEva
         });
     }
 
+    if let Some(max_lag) = slo.max_generator_lag {
+        let check = match &metrics.generator_lag {
+            Some(lag) => SloCheck {
+                name: "Generator lag p99".into(),
+                target: format!("<= {max_lag:?}"),
+                actual: format!("{:?}", Duration::from_micros(lag.p99_us)),
+                passed: Duration::from_micros(lag.p99_us) <= max_lag,
+            },
+            None => SloCheck {
+                name: "Generator lag p99".into(),
+                target: format!("<= {max_lag:?}"),
+                actual: "no lag samples".into(),
+                passed: false,
+            },
+        };
+        all_passed &= check.passed;
+        checks.push(check);
+    }
+
     if let Some(min_tput) = slo.min_throughput {
         let passed = metrics.throughput_msg_per_sec >= min_tput;
         if !passed {
@@ -1367,6 +1386,9 @@ fn render_text_report(view: &ReportView<'_>) -> String {
     if let Some(chaos) = &metrics.chaos {
         out.push_str(&format!("Chaos: {}\n\n", chaos_label(chaos)));
     }
+    if let Some(generator) = generator_label(metrics) {
+        out.push_str(&format!("Generator: {generator}\n\n"));
+    }
 
     let columns = latency_columns(metrics);
     let mut lat_table = Table::new();
@@ -1616,6 +1638,9 @@ fn render_markdown_report(view: &ReportView<'_>) -> String {
     if let Some(chaos) = &metrics.chaos {
         md.push_str(&format!("- **Chaos:** {}\n", chaos_label(chaos)));
     }
+    if let Some(generator) = generator_label(metrics) {
+        md.push_str(&format!("- **Generator:** {generator}\n"));
+    }
     md.push('\n');
 
     md.push_str("### Latency Distribution\n\n");
@@ -1731,6 +1756,39 @@ pub(crate) fn chaos_label(chaos: &ChaosSummary) -> String {
     )
 }
 
+/// The health of the load generator, as the text, Markdown and HTML
+/// reports show it: its wake-up lag and its open file limit. `None` when
+/// the run measured neither, as a distributed run does.
+pub(crate) fn generator_label(metrics: &AggregatedMetrics) -> Option<String> {
+    let lag = metrics.generator_lag.as_ref().map(|lag| {
+        let verdict = if lag.saturated {
+            "SATURATED: latency includes client-side delay"
+        } else {
+            "ok"
+        };
+        format!(
+            "lag p99 {}, max {} over {} wake-ups (threshold {}; {verdict})",
+            format_us(lag.p99_us),
+            format_us(lag.max_us),
+            lag.samples,
+            format_us(lag.threshold_us)
+        )
+    });
+    let files = metrics.open_file_limit.as_ref().map(|limit| {
+        format!(
+            "open file limit {} for {} needed{}",
+            limit.soft_limit,
+            limit.needed,
+            if limit.sufficient { "" } else { " (too low)" }
+        )
+    });
+    match (lag, files) {
+        (None, None) => None,
+        (Some(one), None) | (None, Some(one)) => Some(one),
+        (Some(lag), Some(files)) => Some(format!("{lag}; {files}")),
+    }
+}
+
 /// The capture totals line of the text report.
 fn capture_line(capture: &CaptureSummary) -> String {
     format!(
@@ -1799,6 +1857,8 @@ mod tests {
             capture: None,
             distributed: None,
             chaos: None,
+            generator_lag: None,
+            open_file_limit: None,
         }
     }
 
@@ -2123,6 +2183,58 @@ mod tests {
         let parsed: AggregatedMetrics =
             serde_json::from_value(json["metrics"].clone()).expect("report parses");
         assert_eq!(parsed.chaos, metrics.chaos);
+    }
+
+    #[test]
+    fn generator_health_is_reported_and_gated() {
+        let mut metrics = sample_metrics();
+        let slo = SloThresholds::new().with_max_generator_lag(Duration::from_millis(5));
+        let evaluation = evaluate_slos(&slo, &metrics);
+        assert!(!evaluation.passed);
+        assert_eq!(evaluation.checks[0].name, "Generator lag p99");
+        assert_eq!(evaluation.checks[0].actual, "no lag samples");
+        assert!(generator_label(&metrics).is_none());
+
+        metrics.generator_lag = Some(crate::metrics::GeneratorLag {
+            probe_interval_us: 10_000,
+            samples: 500,
+            p50_us: 900,
+            p99_us: 4_000,
+            max_us: 7_500,
+            threshold_us: 20_000,
+            intervals: 5,
+            intervals_over_threshold: 0,
+            saturated: false,
+        });
+        metrics.open_file_limit = Some(crate::metrics::OpenFileLimit {
+            soft_limit: 1024,
+            needed: 2064,
+            sufficient: false,
+        });
+        assert!(evaluate_slos(&slo, &metrics).passed);
+        let line = "lag p99 4.00 ms, max 7.50 ms over 500 wake-ups (threshold 20.00 ms; ok); open file limit 1024 for 2064 needed (too low)";
+        let evaluation = evaluate_slos(&SloThresholds::default(), &metrics);
+        let text = render_report(&report_config("text"), &metrics, &evaluation);
+        assert!(text.contains(&format!("Generator: {line}")), "{text}");
+        let markdown = render_report(&report_config("markdown"), &metrics, &evaluation);
+        assert!(
+            markdown.contains(&format!("- **Generator:** {line}")),
+            "{markdown}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&render_report(
+            &report_config("json"),
+            &metrics,
+            &evaluation,
+        ))
+        .unwrap();
+        assert_eq!(json["metrics"]["generator_lag"]["p99_us"], 4_000);
+        assert_eq!(json["metrics"]["open_file_limit"]["sufficient"], false);
+        let parsed: AggregatedMetrics =
+            serde_json::from_value(json["metrics"].clone()).expect("report parses");
+        assert_eq!(parsed.generator_lag, metrics.generator_lag);
+
+        metrics.generator_lag.as_mut().unwrap().p99_us = 6_000;
+        assert!(!evaluate_slos(&slo, &metrics).passed);
     }
 
     #[test]

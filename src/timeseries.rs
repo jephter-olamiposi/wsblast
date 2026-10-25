@@ -460,6 +460,23 @@ pub struct TimeSeriesPoint {
     /// Latency of the replies received during the interval; empty when none
     /// were.
     pub latency: IntervalLatency,
+    /// How late the generator's runtime woke up during the interval; absent
+    /// when the probe took no sample in it, and from distributed runs and
+    /// reports written before it was added. See METHODOLOGY.md, section 14.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator_lag: Option<IntervalLag>,
+}
+
+/// The load generator's wake-up lag during one interval.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct IntervalLag {
+    /// Number of probe wake-ups in the interval.
+    pub samples: u64,
+    /// 99th percentile lag, exact to the microsecond.
+    pub p99_us: u64,
+    /// Largest lag.
+    pub max_us: u64,
 }
 
 /// Latency percentiles of one interval, at 1% precision.
@@ -534,6 +551,7 @@ impl TimeSeries {
                 latency: IntervalLatency::from_histogram(
                     buckets.get(&((prev_at.as_nanos() / interval_nanos) as u64)),
                 ),
+                generator_lag: None,
             });
             previous = (*at, *snap);
         }

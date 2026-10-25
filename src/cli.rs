@@ -163,6 +163,10 @@ pub(crate) struct Cli {
     #[arg(long = "min-throughput", value_name = "RPS")]
     pub min_throughput: Option<f64>,
 
+    /// SLO threshold: Maximum p99 wake-up lag of the load generator itself (e.g. '20ms'); a breach means the latency numbers include client-side delay
+    #[arg(long = "max-generator-lag", value_name = "DURATION")]
+    pub max_generator_lag: Option<String>,
+
     /// Authentication type (none, static, apikey)
     #[cfg(feature = "auth")]
     #[arg(long = "auth-type", value_name = "TYPE", value_enum, default_value_t = AuthType::None)]

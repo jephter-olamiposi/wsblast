@@ -1,6 +1,6 @@
 # Print an optspec for argparse to handle cmd's options that are independent of any subcommand.
 function __fish_wsblast_global_optspecs
-    string join \n u/url= c/connections= ramp-rate= d/duration= stages= n/requests= r/rate= p/payload= payload-file= binary H/header= subprotocol= mode= connect-timeout= message-timeout= match= ping-interval= max-p50= max-p95= max-p99= max-p999= max-error-rate= min-throughput= auth-type= auth-token= auth-token-cmd= auth-token-cmd-timeout= auth-token-refresh= auth-header= auth-apikey= auth-apikey-header= graphql-ws-operation-name= graphql-ws-operation= graphql-ws-variables= graphql-ws-extensions= format= compare= compare-threshold= compare-window= fail-on-regression capture= capture-limit= chaos-delay= chaos-drop= chaos-corrupt= chaos-close= chaos-close-mode= chaos-seed= o/output= tui no-progress no-reconnect prometheus-listen= otel-endpoint= otel-interval= otel-service-name= scenario= phase= agents= agent-token= agent-timeout= agent-ca= h/help V/version
+    string join \n u/url= c/connections= ramp-rate= d/duration= stages= n/requests= r/rate= p/payload= payload-file= binary H/header= subprotocol= mode= connect-timeout= message-timeout= match= ping-interval= max-p50= max-p95= max-p99= max-p999= max-error-rate= min-throughput= max-generator-lag= auth-type= auth-token= auth-token-cmd= auth-token-cmd-timeout= auth-token-refresh= auth-header= auth-apikey= auth-apikey-header= graphql-ws-operation-name= graphql-ws-operation= graphql-ws-variables= graphql-ws-extensions= format= compare= compare-threshold= compare-window= fail-on-regression capture= capture-limit= chaos-delay= chaos-drop= chaos-corrupt= chaos-close= chaos-close-mode= chaos-seed= o/output= tui no-progress no-reconnect prometheus-listen= otel-endpoint= otel-interval= otel-service-name= scenario= phase= agents= agent-token= agent-timeout= agent-ca= h/help V/version
 end
 
 function __fish_wsblast_needs_command
@@ -49,6 +49,7 @@ complete -c wsblast -n "__fish_wsblast_needs_command" -l max-p99 -d 'SLO thresho
 complete -c wsblast -n "__fish_wsblast_needs_command" -l max-p999 -d 'SLO threshold: Maximum acceptable p99.9 round-trip latency (e.g., \'250ms\')' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l max-error-rate -d 'SLO threshold: Maximum acceptable error rate fraction (e.g., \'0.01\' for 1%, \'0.001\' for 0.1%)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l min-throughput -d 'SLO threshold: Minimum required message throughput (messages/sec)' -r
+complete -c wsblast -n "__fish_wsblast_needs_command" -l max-generator-lag -d 'SLO threshold: Maximum p99 wake-up lag of the load generator itself (e.g. \'20ms\'); a breach means the latency numbers include client-side delay' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-type -d 'Authentication type (none, static, apikey)' -r -f -a "none\t'No authentication'
 static\t'Static bearer token'
 apikey\t'API Key'"

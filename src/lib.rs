@@ -164,6 +164,7 @@ mod error;
 #[cfg(any(feature = "prometheus", feature = "otel"))]
 mod export;
 mod html;
+mod lag;
 mod metrics;
 #[cfg(feature = "mock")]
 #[cfg_attr(docsrs, doc(cfg(feature = "mock")))]
@@ -186,7 +187,8 @@ pub use config::ScenarioConfig;
 pub use config::{LoadTestConfig, LoadTestConfigBuilder, ReplyMatch, SloThresholds, Stage};
 pub use error::{ConfigError, ErrorCategory, Result, WorkerError, WsBlastError};
 pub use metrics::{
-    AggregatedMetrics, CaptureSummary, ChaosSummary, DistributedSummary, LatencyStats, LiveSnapshot,
+    AggregatedMetrics, CaptureSummary, ChaosSummary, DistributedSummary, GeneratorLag,
+    LatencyStats, LiveSnapshot, OpenFileLimit,
 };
 #[cfg(feature = "scenario")]
 pub use report::PhaseTarget;
@@ -194,7 +196,7 @@ pub use report::{SloCheck, SloEvaluation, evaluate_slos, render_report};
 pub use runner::Runner;
 #[cfg(feature = "scenario")]
 pub use runner::{PhaseResult, ScenarioExecutor, ScenarioOutcome};
-pub use timeseries::{IntervalLatency, TimeSeries, TimeSeriesPoint};
+pub use timeseries::{IntervalLag, IntervalLatency, TimeSeries, TimeSeriesPoint};
 
 /// Support for the `wsblast` binary and the benchmarks. Not part of the
 /// public API: anything here may change or disappear in any release.

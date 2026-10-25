@@ -47,6 +47,7 @@ graphql-ws\:"Apollo GraphQL WS protocol (subscriptions)"))' \
 '--max-p999=[SLO threshold\: Maximum acceptable p99.9 round-trip latency (e.g., '\''250ms'\'')]:DURATION:_default' \
 '--max-error-rate=[SLO threshold\: Maximum acceptable error rate fraction (e.g., '\''0.01'\'' for 1%, '\''0.001'\'' for 0.1%)]:FLOAT:_default' \
 '--min-throughput=[SLO threshold\: Minimum required message throughput (messages/sec)]:RPS:_default' \
+'--max-generator-lag=[SLO threshold\: Maximum p99 wake-up lag of the load generator itself (e.g. '\''20ms'\''); a breach means the latency numbers include client-side delay]:DURATION:_default' \
 '--auth-type=[Authentication type (none, static, apikey)]:TYPE:((none\:"No authentication"
 static\:"Static bearer token"
 apikey\:"API Key"))' \

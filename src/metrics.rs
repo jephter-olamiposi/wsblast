@@ -571,6 +571,64 @@ pub struct AggregatedMetrics {
     /// none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chaos: Option<ChaosSummary>,
+    /// How late the load generator's runtime woke up during the run, which
+    /// tells whether the generator itself was the bottleneck. Absent from
+    /// distributed runs and from reports written before it was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator_lag: Option<GeneratorLag>,
+    /// The open file limit the run had against the descriptors it needed;
+    /// absent where wsblast cannot read the limit (Windows) and from
+    /// distributed runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_file_limit: Option<OpenFileLimit>,
+}
+
+/// How late the load generator woke up from a fixed short sleep, measured
+/// all through the run by a probe task on the workers' runtime.
+///
+/// Workers wait for the same scheduler as the probe, so a generator that is
+/// short of CPU, or whose runtime is blocked, delays every timestamp they
+/// take by about as much: RTT and response time then include client-side
+/// delay. See METHODOLOGY.md, section 14.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct GeneratorLag {
+    /// How long the probe sleeps between two measurements.
+    pub probe_interval_us: u64,
+    /// Number of wake-ups measured.
+    pub samples: u64,
+    /// Median lag.
+    pub p50_us: u64,
+    /// 99th percentile lag.
+    pub p99_us: u64,
+    /// Largest lag.
+    pub max_us: u64,
+    /// The p99 lag above which the run is flagged: 20 ms, or 36 ms on
+    /// Windows, whose timers wake about every 15.6 ms.
+    pub threshold_us: u64,
+    /// Time-series intervals in which the probe took a sample.
+    pub intervals: u64,
+    /// Those of them whose p99 lag was above `threshold_us`, with at least
+    /// two wake-ups later than it.
+    pub intervals_over_threshold: u64,
+    /// Whether the latency numbers of the run may include client-side
+    /// delay: the run's p99 lag is above `threshold_us` with at least three
+    /// wake-ups later than it, or at least a tenth of its intervals are
+    /// over it.
+    pub saturated: bool,
+}
+
+/// The process's open file limit against what the run needed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct OpenFileLimit {
+    /// The soft limit (`ulimit -n`) when the run started.
+    pub soft_limit: u64,
+    /// Descriptors the run needs: one per connection plus 64 for the
+    /// runtime and the resolver. In a scenario, those of the largest phase.
+    pub needed: u64,
+    /// Whether `soft_limit` is at least `needed`.
+    pub sufficient: bool,
 }
 
 /// The faults a run injected on the client side (`--chaos-*`).
@@ -821,6 +879,8 @@ impl MetricsTotals {
             capture: None,
             distributed: None,
             chaos: self.chaos,
+            generator_lag: None,
+            open_file_limit: None,
         }
     }
 }
@@ -856,6 +916,18 @@ impl AggregatedMetrics {
     #[must_use]
     pub(crate) fn with_distributed(mut self, summary: DistributedSummary) -> Self {
         self.distributed = Some(summary);
+        self
+    }
+
+    /// Attaches the generator's lag and open file limit.
+    #[must_use]
+    pub(crate) fn with_generator(
+        mut self,
+        lag: Option<GeneratorLag>,
+        open_file_limit: Option<OpenFileLimit>,
+    ) -> Self {
+        self.generator_lag = lag;
+        self.open_file_limit = open_file_limit;
         self
     }
 

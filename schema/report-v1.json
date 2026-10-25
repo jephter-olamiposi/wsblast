@@ -171,7 +171,17 @@
         "bytes_recv": { "$ref": "#/$defs/count" },
         "errors": { "$ref": "#/$defs/count" },
         "throughput_msg_per_sec": { "description": "The larger of messages_sent and messages_recv, per second of the interval.", "type": "number", "minimum": 0 },
-        "latency": { "$ref": "#/$defs/interval_latency" }
+        "latency": { "$ref": "#/$defs/interval_latency" },
+        "generator_lag": {
+          "description": "How late the load generator's runtime woke up from its 10 ms probe sleeps during the interval. Absent when the probe took no sample in it, from distributed runs and from reports written before this field was added. See METHODOLOGY.md section 14.",
+          "type": "object",
+          "required": ["samples", "p99_us", "max_us"],
+          "properties": {
+            "samples": { "description": "Probe wake-ups in the interval.", "$ref": "#/$defs/count" },
+            "p99_us": { "description": "99th percentile lag in microseconds, exact.", "$ref": "#/$defs/count" },
+            "max_us": { "description": "Largest lag in microseconds.", "$ref": "#/$defs/count" }
+          }
+        }
       }
     },
     "time_series": {
@@ -291,6 +301,32 @@
             "limit": { "description": "--capture-limit; 0 means unlimited.", "$ref": "#/$defs/count" }
           }
         },
+        "generator_lag": {
+          "description": "How late the load generator's runtime woke up from a fixed 10 ms sleep, measured all through the run by a probe task on the workers' runtime. A high lag means the generator was short of CPU or its runtime was blocked, so every latency of the run includes client-side delay. Absent from distributed runs and from reports written before this field was added. See METHODOLOGY.md section 14.",
+          "type": "object",
+          "required": ["probe_interval_us", "samples", "p50_us", "p99_us", "max_us", "threshold_us", "intervals", "intervals_over_threshold", "saturated"],
+          "properties": {
+            "probe_interval_us": { "description": "Length of each probe sleep in microseconds (10000).", "$ref": "#/$defs/count" },
+            "samples": { "description": "Wake-ups measured.", "$ref": "#/$defs/count" },
+            "p50_us": { "description": "Median lag, at 1% precision.", "$ref": "#/$defs/count" },
+            "p99_us": { "description": "99th percentile lag, at 1% precision. Checked by --max-generator-lag.", "$ref": "#/$defs/count" },
+            "max_us": { "description": "Largest lag, at 1% precision.", "$ref": "#/$defs/count" },
+            "threshold_us": { "description": "The p99 lag above which the run is flagged: 20000, or 36000 on Windows, whose timers wake about every 15.6 ms.", "$ref": "#/$defs/count" },
+            "intervals": { "description": "Time-series intervals in which the probe took a sample.", "$ref": "#/$defs/count" },
+            "intervals_over_threshold": { "description": "Those of them whose p99 lag was above threshold_us, with at least two wake-ups later than it.", "$ref": "#/$defs/count" },
+            "saturated": { "description": "True when p99_us is above threshold_us with at least three wake-ups later than it, or at least a tenth of the intervals are over it: the latency numbers of the run may be invalid.", "type": "boolean" }
+          }
+        },
+        "open_file_limit": {
+          "description": "The process's open file limit when the run started, against the descriptors it needed. Absent on Windows, from distributed runs and from reports written before this field was added.",
+          "type": "object",
+          "required": ["soft_limit", "needed", "sufficient"],
+          "properties": {
+            "soft_limit": { "description": "The soft limit, as ulimit -n shows it.", "$ref": "#/$defs/count" },
+            "needed": { "description": "One descriptor per connection plus 64 for the runtime and the resolver; for a scenario, those of its largest phase.", "$ref": "#/$defs/count" },
+            "sufficient": { "description": "Whether soft_limit is at least needed. wsblast warns before the run when it is not.", "type": "boolean" }
+          }
+        },
         "chaos": {
           "description": "Faults the run injected on the client side (--chaos-* or a scenario phase's chaos mapping). Present only when the run injected faults; absent from other reports and from reports written before this field was added. None of these events is counted as an error or adds a latency sample by itself; see METHODOLOGY.md section 13.",
           "type": "object",
@@ -379,7 +415,7 @@
       "required": ["name", "target", "actual", "passed"],
       "properties": {
         "name": {
-          "description": "Check name. Current values: \"Latency p50\", \"Latency p95\", \"Latency p99\", \"Latency p99.9\" (\"Response time p50\" and so on when the run recorded response time), \"Error Rate\", \"Throughput (msg/s)\". In the top-level slo of a scenario report, a check of a phase's own SLO is prefixed with the phase name and a colon, as in \"spike: Latency p99\".",
+          "description": "Check name. Current values: \"Latency p50\", \"Latency p95\", \"Latency p99\", \"Latency p99.9\" (\"Response time p50\" and so on when the run recorded response time), \"Error Rate\", \"Generator lag p99\" (--max-generator-lag), \"Throughput (msg/s)\". In the top-level slo of a scenario report, a check of a phase's own SLO is prefixed with the phase name and a colon, as in \"spike: Latency p99\".",
           "type": "string",
           "examples": ["Latency p99", "Error Rate", "Throughput (msg/s)", "spike: Response time p99"]
         },

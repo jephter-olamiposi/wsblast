@@ -270,6 +270,7 @@ An `slo` mapping can be set at the top level of the file and on any phase. It ta
 | `max_p999` | duration | `--max-p999` | The same, at p99.9. |
 | `max_error_rate` | number, 0 to 1 | `--max-error-rate` | `error_rate` is at most this value. |
 | `min_throughput` | number, messages per second | `--min-throughput` | `throughput_msg_per_sec` is at least this value. |
+| `max_generator_lag` | duration | `--max-generator-lag` | The p99 wake-up lag of the load generator itself is at most this value ([METHODOLOGY.md section 14](../METHODOLOGY.md#14-load-generator-saturation)). Allowed in every mode. |
 
 Every key is optional, and a threshold that is not set is not checked. Values follow the rules of the flags: durations use the syntax of [section 2](#2-phase-fields), `max_error_rate` must be between 0 and 1, and latency thresholds need `--mode echo` (the default), because no other mode measures round trips.
 
@@ -369,7 +370,7 @@ The whole file is validated before any connection is opened, including phases th
 | `count: 0` | `phase 'warmup': send action count must be greater than zero` |
 | Zero `Wait` or `Ping` duration | `phase 'warmup': wait action duration must be greater than zero` |
 | Forbidden or reserved close code | `close code 2000 cannot be sent; use 1000-1003, 1007-1014 or 3000-4999` |
-| Unknown `slo` key | ``load.yaml: phases[0].slo: unknown field `max_p99_ms`, expected one of `max_p50`, `max_p95`, `max_p99`, `max_p999`, `max_error_rate`, `min_throughput` at line 9 column 7`` |
+| Unknown `slo` key | ``load.yaml: phases[0].slo: unknown field `max_p99_ms`, expected one of `max_p50`, `max_p95`, `max_p99`, `max_p999`, `max_error_rate`, `min_throughput`, `max_generator_lag` at line 9 column 7`` |
 | Unparsable SLO duration | `phase 'spike': slo: max_p99: Configuration error: Invalid duration 'fast': ...` (`slo: max_p99: ...` at the top level) |
 | `max_error_rate` outside 0 to 1 | `phase 'spike': slo: Configuration error: Invalid threshold specification: max_error_rate must be between 0.0 and 1.0, received 1.5` |
 | `chaos` percentage outside 0 to 100, or `drop` and `corrupt` adding up to more than 100 | `phase 'flaky': chaos: Configuration error: Invalid option: chaos drop percentage must be between 0 and 100, received 150` |

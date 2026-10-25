@@ -50,6 +50,7 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--max-p999', '--max-p999', [CompletionResultType]::ParameterName, 'SLO threshold: Maximum acceptable p99.9 round-trip latency (e.g., ''250ms'')')
             [CompletionResult]::new('--max-error-rate', '--max-error-rate', [CompletionResultType]::ParameterName, 'SLO threshold: Maximum acceptable error rate fraction (e.g., ''0.01'' for 1%, ''0.001'' for 0.1%)')
             [CompletionResult]::new('--min-throughput', '--min-throughput', [CompletionResultType]::ParameterName, 'SLO threshold: Minimum required message throughput (messages/sec)')
+            [CompletionResult]::new('--max-generator-lag', '--max-generator-lag', [CompletionResultType]::ParameterName, 'SLO threshold: Maximum p99 wake-up lag of the load generator itself (e.g. ''20ms''); a breach means the latency numbers include client-side delay')
             [CompletionResult]::new('--auth-type', '--auth-type', [CompletionResultType]::ParameterName, 'Authentication type (none, static, apikey)')
             [CompletionResult]::new('--auth-token', '--auth-token', [CompletionResultType]::ParameterName, 'Static token for auth (used with --auth-type static)')
             [CompletionResult]::new('--auth-token-cmd', '--auth-token-cmd', [CompletionResultType]::ParameterName, 'Command whose trimmed stdout is the token or API key, run through the platform shell before the run (replaces --auth-token or --auth-apikey)')
