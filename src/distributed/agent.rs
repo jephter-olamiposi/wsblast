@@ -2,7 +2,8 @@
 //! coordinator at a time and runs its share of a test.
 
 use super::protocol::{
-    Message, ResultMeta, WireResult, bearer_token, check_protocol, tokens_match, validate_token,
+    Message, ResultMeta, WireInterval, WireResult, bearer_token, check_protocol, to_sparse,
+    tokens_match, validate_token,
 };
 use super::{HANDSHAKE_TIMEOUT, SETUP_TIMEOUT, ws_config};
 use crate::error::{ConfigError, Result};
@@ -547,6 +548,24 @@ fn apply_token(live: Option<&crate::auth::LiveAuthHeader>, value: &str, peer: So
     }
 }
 
+/// The latency histograms of the last two completed intervals of the run in
+/// progress.
+fn recent_intervals(runner: &Runner) -> Vec<WireInterval> {
+    let Some(store) = runner.interval_store() else {
+        return Vec::new();
+    };
+    let completed = store.start().elapsed().as_nanos() / store.interval().as_nanos().max(1);
+    let completed = u64::try_from(completed).unwrap_or(u64::MAX);
+    (completed.saturating_sub(2)..completed)
+        .filter_map(|index| {
+            store.bucket(index).map(|hist| WireInterval {
+                index,
+                values: to_sparse(&hist),
+            })
+        })
+        .collect()
+}
+
 #[cfg(feature = "capture")]
 type CaptureBatches = Option<tokio::sync::mpsc::Receiver<Vec<super::WireRecord>>>;
 #[cfg(not(feature = "capture"))]
@@ -694,6 +713,7 @@ where
                 let snapshot = Message::Snapshot {
                     elapsed: started.elapsed(),
                     live: runner.live_snapshot().into(),
+                    intervals: recent_intervals(&runner),
                 };
                 if send(sink, &snapshot).await.is_err() {
                     coordinator_gone = true;
@@ -759,6 +779,7 @@ where
         &Message::Snapshot {
             elapsed: outcome.elapsed,
             live: runner.live_snapshot().into(),
+            intervals: Vec::new(),
         },
     )
     .await

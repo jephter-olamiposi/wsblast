@@ -486,25 +486,12 @@ fn otel_settings(
 /// Rejects the options a distributed run does not support in this version.
 #[cfg(feature = "distributed")]
 fn check_distributed_options(cli: &Cli) -> Result<()> {
-    let mut unsupported: Vec<&str> = Vec::new();
     if cli.tui {
-        unsupported.push("--tui");
+        return Err(WsBlastError::Config(ConfigError::UnsupportedOption(
+            "--tui cannot be used with --agents in this version of wsblast; the coordinator prints progress lines instead".to_string(),
+        )));
     }
-    if cli.prometheus_listen.is_some() {
-        unsupported.push("--prometheus-listen");
-    }
-    if cli.otel_endpoint.is_some() {
-        unsupported.push("--otel-endpoint");
-    }
-    match unsupported.as_slice() {
-        [] => Ok(()),
-        flags => Err(WsBlastError::Config(ConfigError::UnsupportedOption(
-            format!(
-                "{} cannot be used with --agents in this version of wsblast",
-                flags.join(", ")
-            ),
-        ))),
-    }
+    Ok(())
 }
 
 /// What a distributed run, single or scenario, reports.
@@ -582,6 +569,10 @@ async fn run_distributed(cli: &Cli) -> Result<()> {
             )?
             .agent_timeout(agent_timeout)
             .with_live_metrics(Arc::clone(&live_metrics));
+            #[cfg(any(feature = "prometheus", feature = "otel"))]
+            {
+                coordinator = coordinator.with_export(live_export.source());
+            }
             if let Some(ca) = &cli.agent_ca {
                 coordinator = coordinator.agent_ca(ca);
             }
@@ -613,6 +604,10 @@ async fn run_distributed(cli: &Cli) -> Result<()> {
         let mut coordinator = Coordinator::new(config.clone(), &cli.agents, token)?
             .agent_timeout(agent_timeout)
             .with_live_metrics(Arc::clone(&live_metrics));
+        #[cfg(any(feature = "prometheus", feature = "otel"))]
+        {
+            coordinator = coordinator.with_export(live_export.source());
+        }
         if let Some(ca) = &cli.agent_ca {
             coordinator = coordinator.agent_ca(ca);
         }

@@ -538,7 +538,7 @@ async fn cli_reports_a_lost_agent_and_exits_with_1() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cli_rejects_unsupported_combinations_and_missing_tokens() {
-    for extra in [&["--tui"][..], &["--prometheus-listen", "127.0.0.1:0"]] {
+    for extra in [&["--tui"][..]] {
         let mut args = vec!["ws://127.0.0.1:9/", "--agents", "127.0.0.1:9"];
         args.extend_from_slice(extra);
         let finished = wsblast(&args, Some(TOKEN)).await;
@@ -1194,6 +1194,106 @@ async fn refreshed_tokens_reach_every_agent() {
     let late = &tokens[tokens.len() * 2 / 3..];
     assert!(late.iter().all(|&n| n >= 3), "{tokens:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One sample of a Prometheus scrape, without labels.
+fn sample(body: &str, name: &str) -> Option<f64> {
+    body.lines()
+        .find(|line| line.starts_with(name) && line[name.len()..].starts_with(' '))
+        .and_then(|line| line.rsplit(' ').next())
+        .and_then(|value| value.parse().ok())
+}
+
+async fn scrape(addr: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(format!("GET /metrics HTTP/1.1\r\nHost: {addr}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    response
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_coordinator_exports_cluster_totals_to_prometheus() {
+    use tokio::io::AsyncBufReadExt;
+
+    let harness = harness(2, None).await;
+    let agents = harness.agents.join(",");
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_wsblast"))
+        .args([
+            harness.target.as_str(),
+            "-c",
+            "5",
+            "-d",
+            "4s",
+            "-r",
+            "20",
+            "--no-progress",
+            "--format",
+            "json",
+            "--prometheus-listen",
+            "127.0.0.1:0",
+            "--agents",
+            &agents,
+        ])
+        .env("NO_COLOR", "1")
+        .env("WSBLAST_AGENT_TOKEN", TOKEN)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stderr = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
+    let addr = loop {
+        let line = tokio::time::timeout(Duration::from_secs(10), stderr.next_line())
+            .await
+            .expect("no Prometheus address on stderr")
+            .unwrap()
+            .expect("stderr closed before the Prometheus address");
+        if let Some(rest) = line.strip_prefix("Serving Prometheus metrics at http://") {
+            break rest.trim_end_matches("/metrics").to_string();
+        }
+    };
+    tokio::spawn(async move { while let Ok(Some(_)) = stderr.next_line().await {} });
+
+    // Every connection of both agents is open, and both agents' messages
+    // and the merged interval latency are exported.
+    let deadline = std::time::Instant::now() + Duration::from_millis(3_500);
+    let mut body;
+    loop {
+        body = scrape(&addr).await;
+        let active = sample(&body, "wsblast_active_connections");
+        let samples = body
+            .lines()
+            .find(|line| line.starts_with("wsblast_latency_samples{"))
+            .and_then(|line| line.rsplit(' ').next())
+            .and_then(|value| value.parse::<f64>().ok());
+        if active == Some(5.0) && samples.is_some_and(|n| n > 0.0) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{body}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        sample(&body, "wsblast_connections_established_total"),
+        Some(5.0),
+        "{body}"
+    );
+    let sent = sample(&body, "wsblast_messages_sent_total").unwrap();
+    assert!(sent > 0.0, "{body}");
+    assert!(body.contains("basis=\"response_time\""), "{body}");
+
+    let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+        .await
+        .expect("the coordinator did not exit")
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["metrics"]["total_messages_sent"].as_f64().unwrap() >= sent);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

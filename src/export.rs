@@ -206,6 +206,10 @@ struct State {
     run_start: Option<Instant>,
     finished: Option<Duration>,
     phase: Option<Phase>,
+    /// Set while a distributed coordinator runs a phase: the latency it
+    /// merged from its agents, which replaces the local time series.
+    #[cfg(feature = "distributed")]
+    remote: Option<Option<IntervalExport>>,
 }
 
 /// What a run publishes to its exporters: the shared live counters plus the
@@ -234,6 +238,10 @@ impl ExportSource {
     pub(crate) fn begin_phase(&self, store: Arc<IntervalStore>, basis: &'static str) {
         let mut state = self.state();
         state.run_start.get_or_insert(store.start());
+        #[cfg(feature = "distributed")]
+        {
+            state.remote = None;
+        }
         state.phase = Some(Phase {
             store,
             basis,
@@ -272,9 +280,32 @@ impl ExportSource {
             .unwrap_or_default()
     }
 
+    /// Starts a phase that runs on distributed agents at `start`: the first
+    /// call starts the clock of `wsblast_run_elapsed_seconds`, and the
+    /// latency is what [`ExportSource::publish_latency`] last set, nothing
+    /// until then.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn begin_remote_phase(&self, start: Instant) {
+        let mut state = self.state();
+        state.run_start.get_or_insert(start);
+        state.phase = None;
+        state.remote = Some(None);
+    }
+
+    /// Publishes the latency a distributed coordinator merged from its
+    /// agents' interval histograms.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn publish_latency(&self, latency: Option<IntervalExport>) {
+        self.state().remote = Some(latency);
+    }
+
     /// Latency of the last completed interval of the current run or phase.
     pub(crate) fn latency(&self) -> Option<IntervalExport> {
         let state = self.state();
+        #[cfg(feature = "distributed")]
+        if let Some(remote) = state.remote {
+            return remote;
+        }
         let phase = state.phase.as_ref()?;
         let since_start = phase.ended.unwrap_or_else(|| phase.store.start().elapsed());
         let bucket = last_completed(since_start, phase.store.interval())?;
@@ -300,7 +331,7 @@ impl ExportSource {
 }
 
 /// Index of the last interval that ended at or before `since_start`.
-fn last_completed(since_start: Duration, interval: Duration) -> Option<u64> {
+pub(crate) fn last_completed(since_start: Duration, interval: Duration) -> Option<u64> {
     let index = since_start.as_nanos() / interval.as_nanos().max(1);
     u64::try_from(index).ok()?.checked_sub(1)
 }

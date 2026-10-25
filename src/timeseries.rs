@@ -55,15 +55,26 @@ impl IntervalStore {
     }
 
     /// When the run's clock started.
-    #[cfg(any(feature = "prometheus", feature = "otel"))]
+    #[cfg(any(feature = "prometheus", feature = "otel", feature = "distributed"))]
     pub(crate) fn start(&self) -> Instant {
         self.start
     }
 
     /// The length of one interval.
-    #[cfg(any(feature = "prometheus", feature = "otel"))]
+    #[cfg(any(feature = "prometheus", feature = "otel", feature = "distributed"))]
     pub(crate) fn interval(&self) -> Duration {
         self.interval
+    }
+
+    /// A copy of interval `bucket`'s histogram, if it has samples, for a
+    /// distributed agent's live snapshot.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn bucket(&self, bucket: u64) -> Option<Histogram<u64>> {
+        self.buckets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&bucket)
+            .cloned()
     }
 
     /// Latency of interval `bucket` from the samples workers have handed
@@ -242,7 +253,7 @@ pub struct IntervalLatency {
 }
 
 impl IntervalLatency {
-    fn from_histogram(hist: Option<&Histogram<u64>>) -> Self {
+    pub(crate) fn from_histogram(hist: Option<&Histogram<u64>>) -> Self {
         match hist {
             Some(hist) if !hist.is_empty() => Self {
                 count: hist.len(),

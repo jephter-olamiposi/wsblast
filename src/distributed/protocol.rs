@@ -23,7 +23,8 @@ use std::time::Duration;
 /// message after `hello`.
 ///
 /// Version 2 added scenario phases (several `prepare` to `result` rounds on
-/// one connection), capture records and refreshed authentication tokens.
+/// one connection), capture records, refreshed authentication tokens and
+/// interval latency in snapshots.
 pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The shortest agent token accepted.
@@ -53,10 +54,13 @@ pub(crate) enum Message {
     Start,
     /// Agent to coordinator, every second while the run lasts and once
     /// more just before `result`. `live` counts from the start of the test,
-    /// across every phase of a scenario.
+    /// across every phase of a scenario; `intervals` holds the latency
+    /// histograms of the last two completed intervals of the phase.
     Snapshot {
         elapsed: Duration,
         live: WireSnapshot,
+        #[serde(default)]
+        intervals: Vec<WireInterval>,
     },
     /// Coordinator to agent: the new value of a refreshed authentication
     /// header, for every handshake from now on.
@@ -1357,6 +1361,12 @@ phases:
             Message::decode(&encoded).unwrap(),
             Message::Capture { records } if records == [record]
         ));
+        // A snapshot without intervals still decodes.
+        let snapshot = Message::decode(
+            r#"{"type":"snapshot","elapsed":{"secs":1,"nanos":0},"live":{"active_connections":1,"connections_established":1,"connections_failed":0,"reconnects":0,"messages_sent":0,"messages_received":0,"bytes_sent":0,"bytes_received":0,"total_errors":0,"unsolicited_frames":0}}"#,
+        )
+        .unwrap();
+        assert!(matches!(snapshot, Message::Snapshot { intervals, .. } if intervals.is_empty()));
         let header = WireHeader {
             name: "authorization".to_string(),
             value: "Bearer secret".to_string(),

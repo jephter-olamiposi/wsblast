@@ -54,6 +54,10 @@ pub struct Runner {
     /// one file); otherwise the runner opens its own from the config.
     #[cfg(feature = "capture")]
     capture: Option<crate::capture::CaptureHandle>,
+    /// The latency histograms of the run in progress, for a distributed
+    /// agent's live snapshots.
+    #[cfg(feature = "distributed")]
+    intervals: std::sync::Mutex<Option<Arc<IntervalStore>>>,
 }
 
 /// The configuration a scenario phase runs with: `config` with the phase's
@@ -107,6 +111,8 @@ impl Runner {
             export: None,
             #[cfg(feature = "capture")]
             capture: None,
+            #[cfg(feature = "distributed")]
+            intervals: std::sync::Mutex::new(None),
         }
     }
 
@@ -128,6 +134,8 @@ impl Runner {
             export: None,
             #[cfg(feature = "capture")]
             capture: None,
+            #[cfg(feature = "distributed")]
+            intervals: std::sync::Mutex::new(None),
         }
     }
 
@@ -447,6 +455,16 @@ impl Runner {
         Arc::new(ConnectTarget::prepare(&self.config.target_url, self.config.connect_timeout).await)
     }
 
+    /// The latency histograms of the run in progress, once its clock has
+    /// started.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn interval_store(&self) -> Option<Arc<IntervalStore>> {
+        self.intervals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// Starts the clock and runs against a target from
     /// [`Runner::prepare_target`]. Signals are not handled here; the caller
     /// cancels the run through [`Runner::cancel_token`].
@@ -495,6 +513,11 @@ impl Runner {
         let capture: SessionCapture = ();
         let interval = interval_for(self.config.duration);
         let interval_store = IntervalStore::new(start_time, interval);
+        #[cfg(feature = "distributed")]
+        {
+            *self.intervals.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(Arc::clone(&interval_store));
+        }
         #[cfg(any(feature = "prometheus", feature = "otel"))]
         if let Some(export) = &self.export {
             export.begin_phase(Arc::clone(&interval_store), self.latency_basis());

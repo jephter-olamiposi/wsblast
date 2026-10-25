@@ -4,18 +4,22 @@
 use super::agent::{RecvError, recv, send};
 use super::protocol::{
     AgentResult, Message, PROTOCOL_VERSION, WireConfig, WireResult, WireSnapshot, check_protocol,
-    plan, validate_token,
+    from_sparse, plan, validate_token,
 };
 use super::ws_config;
 use crate::config::LoadTestConfig;
 use crate::error::{ConfigError, Result, WsBlastError};
+#[cfg(any(feature = "prometheus", feature = "otel"))]
+use crate::export::ExportSource;
 use crate::metrics::{
     AggregatedMetrics, CaptureSummary, DistributedSummary, LiveMetrics, LiveSnapshot, MetricsTotals,
 };
-use crate::timeseries::TimeSeries;
+use crate::timeseries::{TimeSeries, interval_for, interval_histogram};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use hdrhistogram::Histogram;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -31,9 +35,15 @@ use url::Url;
 /// Default for [`Coordinator::agent_timeout`].
 pub const DEFAULT_AGENT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How often the coordinator refreshes its live counters and its check for
-/// a refreshed authentication token.
+/// How often the coordinator refreshes its live counters, its exported
+/// latency and its check for a refreshed authentication token.
 const LIVE_TICK: Duration = Duration::from_millis(100);
+
+/// How far the exported latency trails the agents: an interval is exported
+/// once it ended this long ago, so every agent's snapshot of it, sent at the
+/// agent's next one-second tick, has arrived.
+#[cfg(any(feature = "prometheus", feature = "otel"))]
+const EXPORT_LAG: Duration = Duration::from_secs(1);
 
 /// Pause between scenario phases, as on a single machine.
 #[cfg(feature = "scenario")]
@@ -112,6 +122,8 @@ pub struct Coordinator {
     cancel: CancellationToken,
     /// The cluster's live counters, summed from the agents' snapshots.
     live: Arc<LiveMetrics>,
+    #[cfg(any(feature = "prometheus", feature = "otel"))]
+    export: Option<Arc<ExportSource>>,
 }
 
 impl std::fmt::Debug for Coordinator {
@@ -197,6 +209,9 @@ struct Link {
 #[derive(Default)]
 struct AgentLive {
     snapshot: WireSnapshot,
+    /// The latency histograms of the phase's recent intervals, replaced by
+    /// every snapshot that carries them.
+    intervals: BTreeMap<u64, Histogram<u64>>,
 }
 
 /// Where a phase's capture records go.
@@ -227,6 +242,8 @@ struct PhaseSpec {
     wire_phase: Option<super::protocol::WirePhase>,
     /// The phase name in a scenario, prefixed to lost agents' reasons.
     name: Option<String>,
+    /// The time series' latency basis, for the live export.
+    basis: &'static str,
 }
 
 /// One agent's results added up over the phases of a scenario.
@@ -310,6 +327,8 @@ impl Coordinator {
             handle_signals: true,
             cancel: CancellationToken::new(),
             live: LiveMetrics::new(),
+            #[cfg(any(feature = "prometheus", feature = "otel"))]
+            export: None,
         })
     }
 
@@ -373,6 +392,8 @@ impl Coordinator {
             handle_signals: true,
             cancel: CancellationToken::new(),
             live: LiveMetrics::new(),
+            #[cfg(any(feature = "prometheus", feature = "otel"))]
+            export: None,
         })
     }
 
@@ -424,10 +445,18 @@ impl Coordinator {
         self.live.snapshot()
     }
 
-    /// Keeps the cluster's live counters in `live`, for a display that reads
-    /// them while the run goes on.
+    /// Keeps the cluster's live counters in `live`, for the exporters and a
+    /// display that read them while the run goes on.
     pub(crate) fn with_live_metrics(mut self, live: Arc<LiveMetrics>) -> Self {
         self.live = live;
+        self
+    }
+
+    /// Publishes the cluster's live counters and interval latency to the
+    /// exporters reading `export`.
+    #[cfg(any(feature = "prometheus", feature = "otel"))]
+    pub(crate) fn with_export(mut self, export: Option<Arc<ExportSource>>) -> Self {
+        self.export = export;
         self
     }
 
@@ -455,6 +484,7 @@ impl Coordinator {
         let deadline = tokio::time::Instant::now() + self.agent_timeout;
         let mut session = self.open(deadline).await?;
         let spec = PhaseSpec {
+            basis: crate::runner::latency_basis_for(&self.config, false),
             config: self.config.clone(),
             wire_phase: None,
             name: None,
@@ -536,6 +566,10 @@ impl Coordinator {
             let mut config = crate::runner::phase_config(self.config.clone(), phase);
             config.target_url = target.clone();
             let spec = PhaseSpec {
+                basis: crate::runner::latency_basis_for(
+                    &config,
+                    crate::runner::phase_is_scripted(phase),
+                ),
                 config,
                 wire_phase: Some(super::protocol::WirePhase::from_phase(phase)),
                 name: Some(phase.name.clone()),
@@ -838,6 +872,16 @@ impl Coordinator {
                 skew_bound.as_secs_f64() * 1_000.0
             );
         }
+        #[cfg(any(feature = "prometheus", feature = "otel"))]
+        if let Some(export) = &self.export {
+            export.begin_remote_phase(start);
+        }
+        {
+            let mut live = session.live.lock().unwrap_or_else(|e| e.into_inner());
+            for agent in live.iter_mut() {
+                agent.intervals.clear();
+            }
+        }
         #[cfg(feature = "capture")]
         let capture_sink = session.start_capture(start, &self.agent_names())?;
 
@@ -886,6 +930,7 @@ impl Coordinator {
         let mut stop_sent = false;
         #[cfg(feature = "auth")]
         let mut token_warned = false;
+        let interval = interval_for(spec.config.duration);
         let finished = loop {
             tokio::select! {
                 finished = &mut all => break finished,
@@ -899,7 +944,7 @@ impl Coordinator {
                     }
                 }
                 _ = ticker.tick() => {
-                    let sum = self.publish_live(&session.live);
+                    let sum = self.publish_live(&session.live, start, interval, spec.basis);
                     if let Some(bar) = &progress {
                         bar.set_position(start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
                         bar.set_message(format!(
@@ -934,7 +979,7 @@ impl Coordinator {
         if let Some(bar) = progress {
             bar.finish_and_clear();
         }
-        self.publish_live(&session.live);
+        self.publish_live(&session.live, start, interval, spec.basis);
 
         let mut last_result: Option<Instant> = None;
         for (index, joined) in finished.into_iter().enumerate() {
@@ -962,11 +1007,19 @@ impl Coordinator {
                 }
             }
         }
-        Ok(Some(PhaseRun {
+        let run = PhaseRun {
             start,
             parts,
             last_result,
-        }))
+        };
+        #[cfg(any(feature = "prometheus", feature = "otel"))]
+        if let Some(export) = &self.export {
+            let elapsed = run
+                .last_result
+                .map_or(Duration::ZERO, |last| last.saturating_duration_since(start));
+            export.publish_latency(final_latency(&run, elapsed, interval, spec.basis));
+        }
+        Ok(Some(run))
     }
 
     fn phase_reason(&self, spec: &PhaseSpec, reason: &str) -> String {
@@ -977,8 +1030,15 @@ impl Coordinator {
     }
 
     /// Sums the agents' latest snapshots into the coordinator's live
-    /// counters; returns the sum.
-    fn publish_live(&self, live: &Mutex<Vec<AgentLive>>) -> WireSnapshot {
+    /// counters and publishes the latency of the interval that ended
+    /// [`EXPORT_LAG`] ago; returns the sum.
+    fn publish_live(
+        &self,
+        live: &Mutex<Vec<AgentLive>>,
+        start: Instant,
+        interval: Duration,
+        basis: &'static str,
+    ) -> WireSnapshot {
         let agents = live.lock().unwrap_or_else(|e| e.into_inner());
         let mut sum = WireSnapshot::default();
         for agent in agents.iter() {
@@ -999,6 +1059,30 @@ impl Coordinator {
         store(&shard.total_errors, sum.total_errors);
         store(&shard.unsolicited_frames, sum.unsolicited_frames);
 
+        #[cfg(any(feature = "prometheus", feature = "otel"))]
+        if let Some(export) = &self.export {
+            let since = start.elapsed().saturating_sub(EXPORT_LAG);
+            let latency = crate::export::last_completed(since, interval).map(|bucket| {
+                let mut merged: Option<Histogram<u64>> = None;
+                for agent in agents.iter() {
+                    if let Some(hist) = agent.intervals.get(&bucket) {
+                        match merged.as_mut() {
+                            Some(merged) => {
+                                let _ = merged.add(hist);
+                            }
+                            None => merged = Some(hist.clone()),
+                        }
+                    }
+                }
+                interval_export(
+                    crate::timeseries::IntervalLatency::from_histogram(merged.as_ref()),
+                    basis,
+                )
+            });
+            export.publish_latency(latency);
+        }
+        #[cfg(not(any(feature = "prometheus", feature = "otel")))]
+        let _ = (start, interval, basis);
         sum
     }
 
@@ -1272,6 +1356,50 @@ impl Session {
     }
 }
 
+/// The exported form of an interval's latency.
+#[cfg(any(feature = "prometheus", feature = "otel"))]
+fn interval_export(
+    latency: crate::timeseries::IntervalLatency,
+    basis: &'static str,
+) -> crate::export::IntervalExport {
+    crate::export::IntervalExport {
+        basis,
+        count: latency.count,
+        p50_us: latency.p50_us,
+        p90_us: latency.p90_us,
+        p99_us: latency.p99_us,
+    }
+}
+
+/// The latency of the last interval that ended before the phase did, from
+/// the agents' results.
+#[cfg(any(feature = "prometheus", feature = "otel"))]
+fn final_latency(
+    run: &PhaseRun,
+    elapsed: Duration,
+    interval: Duration,
+    basis: &'static str,
+) -> Option<crate::export::IntervalExport> {
+    let bucket = crate::export::last_completed(elapsed, interval)?;
+    let mut merged: Option<Histogram<u64>> = None;
+    for part in &run.parts {
+        if let Part::Finished(result) = part
+            && let Some(hist) = result.series.buckets.get(&bucket)
+        {
+            match merged.as_mut() {
+                Some(merged) => {
+                    let _ = merged.add(hist);
+                }
+                None => merged = Some(hist.clone()),
+            }
+        }
+    }
+    Some(interval_export(
+        crate::timeseries::IntervalLatency::from_histogram(merged.as_ref()),
+        basis,
+    ))
+}
+
 fn parse_agents<I, S>(agents: I) -> Result<Vec<AgentAddress>>
 where
     I: IntoIterator<Item = S>,
@@ -1443,10 +1571,22 @@ async fn follow_agent(
     loop {
         tokio::select! {
             received = recv(&mut link.stream) => match received {
-                Ok(Message::Snapshot { live, .. }) => {
+                Ok(Message::Snapshot { live, intervals, .. }) => {
                     let mut agents = agents_live.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(agent) = agents.get_mut(index) {
                         agent.snapshot = live;
+                        for interval in intervals {
+                            let Some(empty) = interval_histogram() else {
+                                continue;
+                            };
+                            if let Ok(hist) = from_sparse(&interval.values, empty) {
+                                agent.intervals.insert(interval.index, hist);
+                            }
+                        }
+                        // Only the latest few intervals are exported.
+                        while agent.intervals.len() > 4 {
+                            agent.intervals.pop_first();
+                        }
                     }
                 }
                 Ok(Message::Capture { records }) => {
