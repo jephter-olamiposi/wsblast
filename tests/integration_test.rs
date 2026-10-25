@@ -2370,3 +2370,32 @@ mod otel_export {
         );
     }
 }
+
+#[tokio::test]
+async fn test_time_series_counts_messages_sent_while_the_run_is_cancelled() {
+    // Unpaced connections are almost always mid-send when the timer fires,
+    // so a final snapshot taken at the moment of cancellation would miss the
+    // last messages. The series must still add up to the totals.
+    let (target_url, cancel_server) = spawn_echo_server().await;
+    for _ in 0..5 {
+        let metrics = run(echo_test_config(&target_url)
+            .connections(20)
+            .duration(Duration::from_millis(300)))
+        .await;
+        let points = &metrics.time_series.points;
+        let sent: u64 = points.iter().map(|p| p.messages_sent).sum();
+        let recv: u64 = points.iter().map(|p| p.messages_recv).sum();
+        let bytes: u64 = points.iter().map(|p| p.bytes_sent).sum();
+        assert_eq!(sent, metrics.total_messages_sent, "{metrics:?}");
+        assert_eq!(recv, metrics.total_messages_recv, "{metrics:?}");
+        assert_eq!(bytes, metrics.total_bytes_sent, "{metrics:?}");
+        let last = points.last().expect("points");
+        let end = last.start_secs + last.duration_secs;
+        assert!(
+            (end - metrics.elapsed.as_secs_f64()).abs() < 0.001,
+            "the series ends where the run did: {end} vs {:?}",
+            metrics.elapsed
+        );
+    }
+    cancel_server.cancel();
+}

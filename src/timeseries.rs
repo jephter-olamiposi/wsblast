@@ -136,18 +136,21 @@ impl IntervalRecorder {
 /// Counter snapshots taken at each interval boundary of a run.
 pub(crate) struct CounterSampler {
     task: tokio::task::JoinHandle<Vec<(Duration, LiveSnapshot)>>,
+    live: Arc<LiveMetrics>,
 }
 
 impl CounterSampler {
     /// Starts sampling `live` every `interval` from `start` until `cancel`
-    /// fires, then takes one last sample at the end of the run.
+    /// fires. The last sample is added by [`CounterSampler::finish`].
     pub(crate) fn spawn(
         live: Arc<LiveMetrics>,
         start: Instant,
         interval: Duration,
         cancel: CancellationToken,
     ) -> Self {
+        let task_live = Arc::clone(&live);
         let task = tokio::spawn(async move {
+            let live = task_live;
             // The registry may already hold counts from earlier scenario
             // phases, so the first sample is the baseline for the deltas.
             let mut samples = vec![(Duration::ZERO, live.snapshot())];
@@ -164,15 +167,20 @@ impl CounterSampler {
                     }
                 }
             }
-            samples.push((start.elapsed(), live.snapshot()));
             samples
         });
-        Self { task }
+        Self { task, live }
     }
 
-    /// Returns the samples once the run has ended.
-    pub(crate) async fn finish(self) -> Vec<(Duration, LiveSnapshot)> {
-        self.task.await.unwrap_or_default()
+    /// Returns the samples once every worker has stopped. The last sample is
+    /// taken now, so a message a worker finished sending while the run was
+    /// being cancelled is counted, and is stamped `end`, the moment the run
+    /// was cancelled, so the last interval ends where the run did.
+    pub(crate) async fn finish(self, end: Duration) -> Vec<(Duration, LiveSnapshot)> {
+        let mut samples = self.task.await.unwrap_or_default();
+        let end = samples.last().map_or(end, |(last, _)| end.max(*last));
+        samples.push((end, self.live.snapshot()));
+        samples
     }
 }
 

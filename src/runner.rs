@@ -551,7 +551,7 @@ impl Runner {
         if let Some(export) = &self.export {
             export.end_phase(elapsed);
         }
-        let samples = sampler.finish().await;
+        let samples = sampler.finish(elapsed).await;
         let time_series = TimeSeries::build(&samples, &interval_store, self.latency_basis());
 
         // Every worker has stopped, so the capture is complete; it is
