@@ -79,10 +79,10 @@ reqwest = { version = "0.13.5", default-features = false, features = ["blocking"
 [features]
 # Every feature except `otel` is on by default, so `cargo install wsblast` and
 # the release binaries ship the whole CLI. `auth`, `graphql-ws`, `compare`,
-# `prometheus` and `capture` add no dependencies; `scenario` adds the YAML
-# parser. `otel` pulls in the OpenTelemetry SDK and an HTTP client, so it is
-# opt-in. Library users can opt out with `default-features = false`.
-default = ["scenario", "compare", "auth", "graphql-ws", "prometheus", "capture"]
+# `prometheus`, `capture` and `mock` add no dependencies; `scenario` adds the
+# YAML parser. `otel` pulls in the OpenTelemetry SDK and an HTTP client, so it
+# is opt-in. Library users can opt out with `default-features = false`.
+default = ["scenario", "compare", "auth", "graphql-ws", "prometheus", "capture", "mock"]
 scenario = ["dep:serde_norway"]
 auth = []
 graphql-ws = []
@@ -93,8 +93,11 @@ prometheus = ["tokio/io-util"]
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:reqwest"]
 # `--capture`: JSONL recording of every data frame and connection event.
 capture = []
+# `wsblast mock`: a WebSocket test server with delays, stalls, rejections,
+# closes and capture replay, also usable in-process as `wsblast::mock`.
+mock = []
 # Kept so existing `--features full` invocations keep working.
-full = ["scenario", "auth", "graphql-ws", "compare", "prometheus", "capture"]
+full = ["scenario", "auth", "graphql-ws", "compare", "prometheus", "capture", "mock"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

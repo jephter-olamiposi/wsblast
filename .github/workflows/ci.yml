@@ -49,6 +49,7 @@ jobs:
           - prometheus
           - otel
           - capture
+          - mock
           - full
     steps:
       - uses: actions/checkout@v5

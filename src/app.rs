@@ -56,8 +56,12 @@ enum AssetCommand {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
-    /// Print the wsblast(1) man page in roff format to stdout
-    Man,
+    /// Print the wsblast(1) man page, or a subcommand's wsblast-NAME(1)
+    /// page, in roff format to stdout
+    Man {
+        /// Subcommand whose page to print
+        subcommand: Option<String>,
+    },
 }
 
 impl AssetCommand {
@@ -86,7 +90,33 @@ impl AssetCommand {
             Self::Completions { shell } => {
                 clap_complete::generate(shell, &mut Cli::command(), "wsblast", &mut rendered);
             }
-            Self::Man => clap_mangen::Man::new(Cli::command()).render(&mut rendered)?,
+            Self::Man { subcommand } => {
+                let mut command = Cli::command();
+                let page = match subcommand {
+                    None => command,
+                    Some(name) => {
+                        command.build();
+                        // clap names are static strings, so each page's
+                        // name is listed here.
+                        let page_name = match name.as_str() {
+                            "mock" => "wsblast-mock",
+                            _ => "",
+                        };
+                        let sub = command
+                            .find_subcommand(&name)
+                            .filter(|_| !page_name.is_empty())
+                            .ok_or_else(|| {
+                                WsBlastError::Config(ConfigError::InvalidOption(format!(
+                                    "no subcommand named '{name}'"
+                                )))
+                            })?;
+                        sub.clone()
+                            .name(page_name)
+                            .version(env!("CARGO_PKG_VERSION"))
+                    }
+                };
+                clap_mangen::Man::new(page).render(&mut rendered)?;
+            }
         }
         let mut stdout = std::io::stdout().lock();
         match stdout.write_all(&rendered).and_then(|()| stdout.flush()) {
@@ -306,6 +336,11 @@ async fn run_app() -> Result<()> {
     }
 
     let cli = parse_cli();
+
+    #[cfg(feature = "mock")]
+    if let Some(crate::cli::Command::Mock(args)) = &cli.command {
+        return crate::mock::run_command(args).await;
+    }
 
     // Handle compare command first (doesn't run load test)
     #[cfg(feature = "compare")]

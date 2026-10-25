@@ -86,13 +86,45 @@ markdown\:"GitHub Flavored Markdown table for PR comments and job summaries"))' 
 '-V[Print version]' \
 '--version[Print version]' \
 '::url -- Target WebSocket URL (e.g., ws\://127.0.0.1\:9001/ws or wss\://api.example.com/stream):_default' \
+":: :_wsblast_commands" \
+"*::: :->wsblast" \
 && ret=0
+    case $state in
+    (wsblast)
+        words=($line[2] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:wsblast-command-$line[2]:"
+        case $line[2] in
+            (mock)
+_arguments "${_arguments_options[@]}" : \
+'--listen=[Address to listen on (host\:port; port 0 picks a free port)]:ADDR:_default' \
+'--delay=[Hold every reply for this long after its request arrived (e.g. '\''20ms'\'')]:DURATION:_default' \
+'--jitter=[Add a uniformly distributed extra delay between 0 and this to every reply]:DURATION:_default' \
+'--close-after=[Close each connection with code 1000 after it sent N replies]:N:_default' \
+'--reject-ratio=[Answer this fraction (0.0 to 1.0) of upgrade requests with HTTP 503]:RATIO:_default' \
+'--stall-every=[Stop replying on every connection at each multiple of this period (needs --stall-for)]:DURATION:_default' \
+'--stall-for=[How long each stall lasts; shorter than --stall-every]:DURATION:_default' \
+'--replay=[Instead of echoing, send each connection the frames a --capture file recorded as received, with their timing]:FILE:_files' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+        esac
+    ;;
+esac
 }
 
 (( $+functions[_wsblast_commands] )) ||
 _wsblast_commands() {
-    local commands; commands=()
+    local commands; commands=(
+'mock:Run a local WebSocket test server\: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file' \
+    )
     _describe -t commands 'wsblast commands' commands "$@"
+}
+(( $+functions[_wsblast__subcmd__mock_commands] )) ||
+_wsblast__subcmd__mock_commands() {
+    local commands; commands=()
+    _describe -t commands 'wsblast mock commands' commands "$@"
 }
 
 if [ "$funcstack[1]" = "_wsblast" ]; then

@@ -402,4 +402,4 @@ A record is dropped, and counted, when:
 
 The workers never wait, so capture cannot slow the load down by more than the per-frame cost above, but a run that produces frames faster than the disk takes them loses records rather than slowing down. `frames_written + frames_dropped` is every record the run produced. The writer is flushed and the file closed after every worker has stopped and before the report is printed. The report prints `Capture: N frames written, M dropped (FILE)`, and the JSON report carries `metrics.capture` with `path`, `frames_written`, `frames_dropped` and `limit` (absent when the run did not capture).
 
-A capture is meant for debugging, not for high-rate runs: keep the default limit, or expect drops, when a run sends more than a few hundred thousand frames per second.
+`wsblast mock --replay FILE` sends the `recv` frames of a capture back to new connections with their recorded timing; see [docs/mock.md](docs/mock.md). A capture is meant for debugging and replay, not for high-rate runs: keep the default limit, or expect drops, when a run sends more than a few hundred thousand frames per second.

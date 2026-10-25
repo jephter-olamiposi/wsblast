@@ -546,7 +546,7 @@ pub(crate) struct RunOutcome {
 }
 
 /// Stops the signal listener task when the owning run ends.
-struct SignalListener(tokio::task::JoinHandle<()>);
+pub(crate) struct SignalListener(tokio::task::JoinHandle<()>);
 
 impl Drop for SignalListener {
     fn drop(&mut self) {
@@ -560,7 +560,7 @@ impl Drop for SignalListener {
 /// is first polled, so a signal delivered while workers are still ramping is
 /// observed instead of killing the process with the default disposition. The
 /// listener exits once `token` is cancelled or the returned guard is dropped.
-fn spawn_signal_listener(token: CancellationToken) -> Option<SignalListener> {
+pub(crate) fn spawn_signal_listener(token: CancellationToken) -> Option<SignalListener> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};

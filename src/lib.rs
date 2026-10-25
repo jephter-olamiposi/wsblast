@@ -92,6 +92,9 @@
 //!   [`capture`] and [`capture_limit`] builder setters, which record every
 //!   frame of a run to a JSONL file. Their totals are in
 //!   [`AggregatedMetrics::capture`].
+//! - `mock`: the `wsblast mock` test server and the [`mock`] module, to run
+//!   it in-process: echo with delays, jitter, stalls, rejected upgrades and
+//!   server closes, or replay of a capture file.
 //! - `auth` and `compare` add the `--auth-*` and `--compare` command-line
 //!   options and have no library API. Send credentials with
 //!   [`header`](LoadTestConfigBuilder::header).
@@ -106,6 +109,10 @@
 #![cfg_attr(
     not(feature = "graphql-ws"),
     doc = "[`TestMode::GraphQLWS`]: https://docs.rs/wsblast/latest/wsblast/enum.TestMode.html#variant.GraphQLWS"
+)]
+#![cfg_attr(
+    not(feature = "mock"),
+    doc = "[`mock`]: https://docs.rs/wsblast/latest/wsblast/mock/index.html"
 )]
 #![cfg_attr(
     feature = "capture",
@@ -124,7 +131,7 @@
 mod app;
 #[cfg(feature = "auth")]
 mod auth;
-#[cfg(feature = "capture")]
+#[cfg(any(feature = "capture", feature = "mock"))]
 mod base64;
 #[cfg(feature = "capture")]
 mod capture;
@@ -135,6 +142,9 @@ mod error;
 #[cfg(any(feature = "prometheus", feature = "otel"))]
 mod export;
 mod metrics;
+#[cfg(feature = "mock")]
+#[cfg_attr(docsrs, doc(cfg(feature = "mock")))]
+pub mod mock;
 mod report;
 mod runner;
 mod timeseries;

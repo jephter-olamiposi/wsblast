@@ -81,6 +81,19 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --help 'Print help (see more with ''--help'')'
             cand -V 'Print version'
             cand --version 'Print version'
+            cand mock 'Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file'
+        }
+        &'wsblast;mock'= {
+            cand --listen 'Address to listen on (host:port; port 0 picks a free port)'
+            cand --delay 'Hold every reply for this long after its request arrived (e.g. ''20ms'')'
+            cand --jitter 'Add a uniformly distributed extra delay between 0 and this to every reply'
+            cand --close-after 'Close each connection with code 1000 after it sent N replies'
+            cand --reject-ratio 'Answer this fraction (0.0 to 1.0) of upgrade requests with HTTP 503'
+            cand --stall-every 'Stop replying on every connection at each multiple of this period (needs --stall-for)'
+            cand --stall-for 'How long each stall lasts; shorter than --stall-every'
+            cand --replay 'Instead of echoing, send each connection the frames a --capture file recorded as received, with their timing'
+            cand -h 'Print help'
+            cand --help 'Print help'
         }
     ]
     $completions[$command]

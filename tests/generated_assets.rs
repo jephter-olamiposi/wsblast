@@ -10,7 +10,8 @@
     feature = "compare",
     feature = "auth",
     feature = "graphql-ws",
-    feature = "capture"
+    feature = "capture",
+    feature = "mock"
 ))]
 
 use std::path::Path;
@@ -18,6 +19,7 @@ use std::process::Command;
 
 const ASSETS: &[(&[&str], &str)] = &[
     (&["man"], "contrib/man/wsblast.1"),
+    (&["man", "mock"], "contrib/man/wsblast-mock.1"),
     (&["completions", "bash"], "contrib/completions/wsblast.bash"),
     (&["completions", "zsh"], "contrib/completions/_wsblast"),
     (&["completions", "fish"], "contrib/completions/wsblast.fish"),

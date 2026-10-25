@@ -84,6 +84,20 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
             [CompletionResult]::new('-V', '-V ', [CompletionResultType]::ParameterName, 'Print version')
             [CompletionResult]::new('--version', '--version', [CompletionResultType]::ParameterName, 'Print version')
+            [CompletionResult]::new('mock', 'mock', [CompletionResultType]::ParameterValue, 'Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file')
+            break
+        }
+        'wsblast;mock' {
+            [CompletionResult]::new('--listen', '--listen', [CompletionResultType]::ParameterName, 'Address to listen on (host:port; port 0 picks a free port)')
+            [CompletionResult]::new('--delay', '--delay', [CompletionResultType]::ParameterName, 'Hold every reply for this long after its request arrived (e.g. ''20ms'')')
+            [CompletionResult]::new('--jitter', '--jitter', [CompletionResultType]::ParameterName, 'Add a uniformly distributed extra delay between 0 and this to every reply')
+            [CompletionResult]::new('--close-after', '--close-after', [CompletionResultType]::ParameterName, 'Close each connection with code 1000 after it sent N replies')
+            [CompletionResult]::new('--reject-ratio', '--reject-ratio', [CompletionResultType]::ParameterName, 'Answer this fraction (0.0 to 1.0) of upgrade requests with HTTP 503')
+            [CompletionResult]::new('--stall-every', '--stall-every', [CompletionResultType]::ParameterName, 'Stop replying on every connection at each multiple of this period (needs --stall-for)')
+            [CompletionResult]::new('--stall-for', '--stall-for', [CompletionResultType]::ParameterName, 'How long each stall lasts; shorter than --stall-every')
+            [CompletionResult]::new('--replay', '--replay', [CompletionResultType]::ParameterName, 'Instead of echoing, send each connection the frames a --capture file recorded as received, with their timing')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
     })

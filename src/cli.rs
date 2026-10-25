@@ -13,7 +13,9 @@ use std::path::PathBuf;
     version,
     about = "High-performance WebSocket load-testing CLI with percentile latency & CI gating",
     long_about = "wsblast stresses WebSocket targets, computes high-resolution latency percentiles \
-                  (p50/p95/p99/p99.9), maps failure taxonomy, and gates CI pipelines via SLO thresholds."
+                  (p50/p95/p99/p99.9), maps failure taxonomy, and gates CI pipelines via SLO thresholds.",
+    args_conflicts_with_subcommands = true,
+    disable_help_subcommand = true
 )]
 pub(crate) struct Cli {
     /// Target WebSocket endpoint (ws:// or wss://)
@@ -327,6 +329,56 @@ pub(crate) struct Cli {
     /// Run only a specific phase from the scenario by name
     #[arg(long = "phase", value_name = "NAME", requires = "scenario")]
     pub phase: Option<String>,
+
+    /// A subcommand instead of a load test.
+    #[cfg(feature = "mock")]
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// Subcommands. `wsblast <URL>` without one runs a load test.
+#[cfg(feature = "mock")]
+#[derive(Debug, Clone, clap::Subcommand)]
+pub(crate) enum Command {
+    /// Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file
+    Mock(MockArgs),
+}
+
+/// Flags of `wsblast mock`.
+#[cfg(feature = "mock")]
+#[derive(Debug, Clone, clap::Args)]
+pub(crate) struct MockArgs {
+    /// Address to listen on (host:port; port 0 picks a free port)
+    #[arg(long = "listen", value_name = "ADDR", default_value = crate::mock::DEFAULT_LISTEN)]
+    pub listen: String,
+
+    /// Hold every reply for this long after its request arrived (e.g. '20ms')
+    #[arg(long = "delay", value_name = "DURATION", default_value = "0s")]
+    pub delay: String,
+
+    /// Add a uniformly distributed extra delay between 0 and this to every reply
+    #[arg(long = "jitter", value_name = "DURATION", default_value = "0s")]
+    pub jitter: String,
+
+    /// Close each connection with code 1000 after it sent N replies
+    #[arg(long = "close-after", value_name = "N")]
+    pub close_after: Option<u64>,
+
+    /// Answer this fraction (0.0 to 1.0) of upgrade requests with HTTP 503
+    #[arg(long = "reject-ratio", value_name = "RATIO", default_value_t = 0.0)]
+    pub reject_ratio: f64,
+
+    /// Stop replying on every connection at each multiple of this period (needs --stall-for)
+    #[arg(long = "stall-every", value_name = "DURATION", requires = "stall_for")]
+    pub stall_every: Option<String>,
+
+    /// How long each stall lasts; shorter than --stall-every
+    #[arg(long = "stall-for", value_name = "DURATION", requires = "stall_every")]
+    pub stall_for: Option<String>,
+
+    /// Instead of echoing, send each connection the frames a --capture file recorded as received, with their timing
+    #[arg(long = "replay", value_name = "FILE")]
+    pub replay: Option<PathBuf>,
 }
 
 impl Cli {
