@@ -247,7 +247,7 @@ pub(crate) struct Cli {
     #[arg(long = "format", value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
 
-    /// Compare two JSON reports for regression detection
+    /// Compare two JSON reports for regression detection (--format text, json, markdown or html)
     #[cfg(feature = "compare")]
     #[arg(long = "compare", value_name = "FILE", num_args = 2)]
     pub compare: Vec<PathBuf>,
@@ -378,7 +378,7 @@ pub(crate) enum Command {
     /// Run a load agent that generates load for a coordinator (`wsblast URL --agents ...`), one test at a time
     #[cfg(feature = "distributed")]
     Agent(AgentArgs),
-    /// Render a saved JSON report (from --format json) as HTML, Markdown or text without running a test
+    /// Render a saved JSON report (from --format json) or comparison (from --compare --format json) as HTML, Markdown or text without running a test
     Render(RenderArgs),
 }
 
@@ -411,7 +411,7 @@ pub(crate) struct AgentArgs {
 /// Flags of `wsblast render`.
 #[derive(Debug, Clone, clap::Args)]
 pub(crate) struct RenderArgs {
-    /// JSON report written by `wsblast --format json` (schema 1.x)
+    /// JSON report written by `wsblast --format json` (schema 1.x), or comparison written by `wsblast --compare ... --format json` (schema 1.1 or 1.2)
     #[arg(value_name = "REPORT.json")]
     pub report: PathBuf,
 

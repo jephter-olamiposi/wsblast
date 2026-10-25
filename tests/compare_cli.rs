@@ -71,6 +71,36 @@ fn comparison_of_reports_without_a_time_series_is_unchanged() {
     assert_eq!(gated.status.code(), Some(2));
 }
 
+#[test]
+fn html_comparison_of_reports_without_a_time_series_has_no_charts() {
+    let baseline = fixture("baseline.json");
+    let current = fixture("current.json");
+    let output = wsblast(&[
+        "--compare",
+        baseline.to_str().unwrap(),
+        current.to_str().unwrap(),
+        "--compare-threshold",
+        "3",
+        "--format",
+        "html",
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    let html = String::from_utf8(output.stdout).unwrap();
+    assert!(html.starts_with("<!doctype html>"));
+    assert!(!html.contains("<svg"), "{html}");
+    assert!(html.contains("the baseline and the current reports have none"));
+    let comparison: serde_json::Value =
+        serde_json::from_str(&read_fixture("forward.json")).unwrap();
+    let regressions = comparison["regressions"].as_array().unwrap().len();
+    assert_eq!(
+        html.matches("<tr class=\"regressed\">").count(),
+        regressions
+    );
+    assert!(html.contains(&format!(
+        "REGRESSION: {regressions} metrics regressed beyond \u{b1}3.0%"
+    )));
+}
+
 /// A 60-second echo report at 1000 msg/s with a 1-second time series. With
 /// `stall`, the server stops answering during interval 30 and the late
 /// replies arrive in interval 31: the run loses about 1.7% of its messages,
@@ -179,6 +209,16 @@ fn a_stall_hidden_in_the_totals_regresses_the_worst_interval() {
     let text = wsblast(&["--compare", &baseline, &current]);
     let text = String::from_utf8(text.stdout).unwrap();
     assert!(text.contains("series.p99_worst_us"), "{text}");
+
+    let html = wsblast(&["--compare", &baseline, &current, "--format", "html"]);
+    assert_eq!(html.status.code(), Some(0));
+    let html = String::from_utf8(html.stdout).unwrap();
+    assert_eq!(html.matches("<svg class=\"chart\"").count(), 2, "{html}");
+    let worst = html
+        .split("<tr")
+        .find(|row| row.contains("<code>series.p99_worst_us</code>"))
+        .unwrap();
+    assert!(worst.starts_with(" class=\"regressed\""), "{worst}");
 
     let gated = wsblast(&["--compare", &baseline, &current, "--fail-on-regression"]);
     assert_eq!(gated.status.code(), Some(2));

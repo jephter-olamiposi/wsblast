@@ -12,6 +12,7 @@ Contents:
 6. [Plain shell](#6-plain-shell)
 7. [Baseline comparison rules](#7-baseline-comparison-rules)
 8. [HTML report](#8-html-report)
+9. [HTML comparison](#9-html-comparison)
 
 ## 1. Exit codes
 
@@ -430,6 +431,8 @@ Edge cases:
 - The comparison does not check that both runs used the same settings. Counters such as `total_messages_sent` scale with `-c`, `-d` and `-r`, so a shorter run shows up as a regression. Compare runs made with the same command line.
 - Compare runs of the same mode. A stream or listen report has an empty RTT histogram (all percentiles 0), so comparing it with an echo report flags every RTT percentile.
 - The comparison JSON (`--format json`) lists only the regressions and improvements, not the two reports. Archive the reports themselves if you need the raw values later.
+
+`--compare` writes `--format text` (the default), `json`, `markdown` or `html`; [section 9](#9-html-comparison) describes the HTML page.
 - `series.throughput_cv` and the error metrics are 0 or close to it in a healthy run, so a tiny absolute change is a large relative one, and a first error interval is a 100% change. Gate on them with care, or select the metrics a gate fails on with `jq` as in [section 4.3](#43-baseline-comparison-against-the-last-run-on-main).
 - Schema version: the comparison JSON says `"schema_version": "1.2.0"` and includes a `window` object when `--compare-window` is set, and says 1.2.0 when both reports have a time series. A comparison of two reports without a time series and without a window is written as `"1.1.0"`, byte for byte as wsblast 0.2.0 wrote it. Readers of 1.1 keep working: 1.2 only adds metric names and the optional `window` property. See [schema/compare-v1.2.json](../schema/compare-v1.2.json).
 
@@ -454,7 +457,7 @@ wsblast render report.json --format text                # terminal tables on std
 
 `wsblast render` reads any schema 1.x report, including reports written by wsblast 0.2.0. Parts an older report lacks are left out of the page; a report without a time series has no charts. The JSON report does not record `--rate`, `--stages` or the run's date, so the rendered page shows the rate as not recorded and the date as the time the JSON file was last modified. Without `-o` the rendered report is printed to stdout; with `-o` it is written to the file only.
 
-Exit codes of `wsblast render`: 0 when the report was rendered, whatever its SLO result; 1 when the file is missing or unreadable, is not JSON, is not a wsblast report, or has a schema version other than 1.x, or when the output file cannot be written. Gate on the run's own exit code, not on `render`.
+Exit codes of `wsblast render`: 0 when the report was rendered, whatever its SLO result; 1 when the file is missing or unreadable, is not JSON, is neither a wsblast report nor a comparison JSON, or has a schema version other than 1.x, or when the output file cannot be written. Gate on the run's own exit code, not on `render`.
 
 In GitHub Actions, render the HTML in an `always()` step and upload it next to the JSON report:
 
@@ -481,3 +484,47 @@ In GitHub Actions, render the HTML in an `always()` step and upload it next to t
 ```
 
 Download the artifact from the run's summary page and open `report.html` in a browser. A stored JSON report, for example a baseline from an earlier run, can be rendered the same way at any time later. In GitLab CI, add `report.html` to `artifacts: paths`.
+
+## 9. HTML comparison
+
+`wsblast --compare BASELINE CURRENT --format html` writes the comparison as one self-contained page in the style of the run report: inline CSS and SVG, no script, nothing loaded from the network, light and dark mode, and every string from the reports (file names, metric names) HTML-escaped. It shows:
+
+- the two report files, the threshold and the `--compare-window`, if set;
+- a verdict banner: the number of regressions and improvements beyond the threshold, and the exit code `--fail-on-regression` gives;
+- a table of every compared metric, with the baseline and current values in their units, the signed change, the direction that is better and the result. Regressions are highlighted and listed first, then improvements, then the metrics within the threshold. Metrics that are 0 in both reports are left out, as in the comparison itself ([section 7](#7-baseline-comparison-rules));
+- when both reports have a time series, two charts that overlay the baseline (dashed) and current (solid) runs: throughput and p99 latency per interval, each against the time since its run started. Runs with different lengths or interval lengths share one time axis, and the comparison window is shaded. Each chart has a text description and a table of both runs' points. Reports from wsblast 0.2.0 and earlier have no time series, so their comparison page has no charts.
+
+The flags, the exit code and `-o` work as for the other formats: the page is printed to stdout and also written to the `-o` file.
+
+```bash
+wsblast --compare perf/baseline.json current.json \
+  --compare-threshold 15 --compare-window 10s..50s \
+  --format html -o compare.html > /dev/null
+```
+
+`wsblast render` also reads a comparison JSON (schema 1.1 or 1.2, as written by `--compare --format json`) and renders it as HTML (the default), Markdown or text. The Markdown and text are what `--compare` printed in those formats. A comparison JSON holds only the metrics that changed beyond the threshold and no time series, so its HTML page lists those metrics and has no charts; render from the two reports for the full table and the overlay. The exit code of `render` does not reflect regressions.
+
+```bash
+wsblast --compare perf/baseline.json current.json --format json -o compare.json > /dev/null
+wsblast render compare.json -o compare.html
+```
+
+In GitHub Actions, write the page in an `always()` step after the gate and upload it with the reports:
+
+```yaml
+      - name: Render HTML comparison
+        if: always() && hashFiles('current.json') != ''
+        run: |
+          wsblast --compare perf/baseline.json current.json \
+            --compare-threshold 15 --format html -o compare.html > /dev/null
+
+      - name: Upload comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: websocket-comparison
+          path: |
+            current.json
+            compare.html
+```
+

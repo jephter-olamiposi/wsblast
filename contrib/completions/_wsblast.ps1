@@ -63,7 +63,7 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--graphql-ws-variables', '--graphql-ws-variables', [CompletionResultType]::ParameterName, 'GraphQL WS variables (JSON)')
             [CompletionResult]::new('--graphql-ws-extensions', '--graphql-ws-extensions', [CompletionResultType]::ParameterName, 'GraphQL WS extensions (JSON)')
             [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output report format')
-            [CompletionResult]::new('--compare', '--compare', [CompletionResultType]::ParameterName, 'Compare two JSON reports for regression detection')
+            [CompletionResult]::new('--compare', '--compare', [CompletionResultType]::ParameterName, 'Compare two JSON reports for regression detection (--format text, json, markdown or html)')
             [CompletionResult]::new('--compare-threshold', '--compare-threshold', [CompletionResultType]::ParameterName, 'Regression threshold percentage (default: 10%)')
             [CompletionResult]::new('--compare-window', '--compare-window', [CompletionResultType]::ParameterName, 'Restrict the time-series metrics of --compare to START..END of each run (e.g., ''10s..50s'', ''10s..'', ''..50s'')')
             [CompletionResult]::new('--capture', '--capture', [CompletionResultType]::ParameterName, 'Record every data frame and connection event to FILE as JSON lines (see METHODOLOGY.md)')
@@ -91,7 +91,7 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--version', '--version', [CompletionResultType]::ParameterName, 'Print version')
             [CompletionResult]::new('mock', 'mock', [CompletionResultType]::ParameterValue, 'Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file')
             [CompletionResult]::new('agent', 'agent', [CompletionResultType]::ParameterValue, 'Run a load agent that generates load for a coordinator (`wsblast URL --agents ...`), one test at a time')
-            [CompletionResult]::new('render', 'render', [CompletionResultType]::ParameterValue, 'Render a saved JSON report (from --format json) as HTML, Markdown or text without running a test')
+            [CompletionResult]::new('render', 'render', [CompletionResultType]::ParameterValue, 'Render a saved JSON report (from --format json) or comparison (from --compare --format json) as HTML, Markdown or text without running a test')
             break
         }
         'wsblast;mock' {

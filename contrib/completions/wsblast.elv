@@ -60,7 +60,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --graphql-ws-variables 'GraphQL WS variables (JSON)'
             cand --graphql-ws-extensions 'GraphQL WS extensions (JSON)'
             cand --format 'Output report format'
-            cand --compare 'Compare two JSON reports for regression detection'
+            cand --compare 'Compare two JSON reports for regression detection (--format text, json, markdown or html)'
             cand --compare-threshold 'Regression threshold percentage (default: 10%)'
             cand --compare-window 'Restrict the time-series metrics of --compare to START..END of each run (e.g., ''10s..50s'', ''10s..'', ''..50s'')'
             cand --capture 'Record every data frame and connection event to FILE as JSON lines (see METHODOLOGY.md)'
@@ -88,7 +88,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --version 'Print version'
             cand mock 'Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file'
             cand agent 'Run a load agent that generates load for a coordinator (`wsblast URL --agents ...`), one test at a time'
-            cand render 'Render a saved JSON report (from --format json) as HTML, Markdown or text without running a test'
+            cand render 'Render a saved JSON report (from --format json) or comparison (from --compare --format json) as HTML, Markdown or text without running a test'
         }
         &'wsblast;mock'= {
             cand --listen 'Address to listen on (host:port; port 0 picks a free port)'

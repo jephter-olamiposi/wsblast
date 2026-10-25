@@ -2,11 +2,11 @@
 .el .ds Aq '
 .TH wsblast-render 1  "wsblast-render 0.2.0" 
 .SH NAME
-wsblast\-render \- Render a saved JSON report (from \-\-format json) as HTML, Markdown or text without running a test
+wsblast\-render \- Render a saved JSON report (from \-\-format json) or comparison (from \-\-compare \-\-format json) as HTML, Markdown or text without running a test
 .SH SYNOPSIS
 \fBwsblast render\fR [\fB\-\-format\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIREPORT.json\fR> 
 .SH DESCRIPTION
-Render a saved JSON report (from \-\-format json) as HTML, Markdown or text without running a test
+Render a saved JSON report (from \-\-format json) or comparison (from \-\-compare \-\-format json) as HTML, Markdown or text without running a test
 .SH OPTIONS
 .TP
 \fB\-\-format\fR \fI<FORMAT>\fR [default: html]
@@ -31,6 +31,6 @@ Write the rendered report to FILE instead of stdout
 Print help (see a summary with \*(Aq\-h\*(Aq)
 .TP
 <\fIREPORT.json\fR>
-JSON report written by `wsblast \-\-format json` (schema 1.x)
+JSON report written by `wsblast \-\-format json` (schema 1.x), or comparison written by `wsblast \-\-compare ... \-\-format json` (schema 1.1 or 1.2)
 .SH VERSION
 v0.2.0

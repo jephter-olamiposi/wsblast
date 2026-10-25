@@ -405,15 +405,118 @@ fn render_exits_with_1_for_missing_or_foreign_files() {
 
 #[cfg(feature = "compare")]
 #[test]
-fn compare_rejects_the_html_format() {
+fn compare_writes_an_html_page() {
     let report = fixture("constant.json");
+    let out = scratch("compare.html");
     let result = wsblast(&[
         os("--compare"),
         report.as_os_str(),
         report.as_os_str(),
         os("--format"),
         os("html"),
+        os("-o"),
+        out.as_os_str(),
     ]);
+    assert_eq!(result.code, Some(0), "{}", result.stderr);
+    let html = std::fs::read_to_string(&out).expect("html written");
+    assert_eq!(result.stdout, format!("{html}\n"), "printed and written");
+    assert!(html.starts_with("<!doctype html>"));
+    assert!(html.contains("wsblast baseline comparison"));
+    assert!(html.contains("No regressions: no metric changed by more than"));
+    assert_eq!(html.matches("<svg class=\"chart\"").count(), 2);
+    assert!(!html.contains("http://") && !html.contains("https://"));
+    assert!(!html.contains("<script"));
+    let _ = std::fs::remove_file(out);
+}
+
+/// A comparison JSON renders as the comparison it was written from: text
+/// and Markdown byte for byte, HTML with the changes it records.
+#[cfg(feature = "compare")]
+#[test]
+fn render_reads_comparison_json() {
+    let legacy = |name: &str| {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/compare_legacy")
+            .join(name)
+    };
+    for direction in ["forward", "reverse"] {
+        let saved = legacy(&format!("{direction}.json"));
+        for (format, ext) in [("markdown", "md"), ("text", "txt")] {
+            let rendered = wsblast(&[os("render"), saved.as_os_str(), os("--format"), os(format)]);
+            assert_eq!(rendered.code, Some(0), "{}", rendered.stderr);
+            let live = std::fs::read_to_string(legacy(&format!("{direction}.{ext}")))
+                .unwrap()
+                .replace("\r\n", "\n");
+            assert_eq!(
+                rendered.stdout.replace("\r\n", "\n"),
+                live,
+                "{direction} {format}"
+            );
+        }
+    }
+
+    let saved = legacy("forward.json");
+    let comparison: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+    let regressions = comparison["regressions"].as_array().unwrap().len();
+    let improvements = comparison["improvements"].as_array().unwrap().len();
+    let html = wsblast(&[os("render"), saved.as_os_str()]);
+    assert_eq!(html.code, Some(0), "{}", html.stderr);
+    assert!(html.stdout.starts_with("<!doctype html>"));
+    assert!(html.stdout.contains("Comparison JSON, schema 1.1.0"));
+    assert!(html.stdout.contains("Comparison saved"));
+    assert!(
+        html.stdout
+            .contains(&format!("REGRESSION: {regressions} metrics regressed"))
+    );
+    assert_eq!(
+        html.stdout.matches("<tr class=\"regressed\">").count(),
+        regressions
+    );
+    assert_eq!(
+        html.stdout.matches("<tr class=\"improved\">").count(),
+        improvements
+    );
+    assert!(!html.stdout.contains("<svg"));
+
+    let cases = [
+        (
+            r#"{"schema_version": "2.0.0", "regressions": [], "improvements": []}"#,
+            "unsupported comparison schema version '2.0.0'",
+        ),
+        (
+            r#"{"schema_version": "1.2.0", "regressions": [], "improvements": []}"#,
+            "not a wsblast comparison JSON",
+        ),
+        (
+            r#"{"schema_version": "1.2.0", "threshold": 10, "regressions": [{"metric": "x"}], "improvements": []}"#,
+            "not a wsblast comparison JSON",
+        ),
+    ];
+    for (content, message) in cases {
+        let path = scratch("bad-comparison.json");
+        std::fs::write(&path, content).unwrap();
+        let result = wsblast(&[os("render"), path.as_os_str()]);
+        assert_eq!(result.code, Some(1), "{content}");
+        assert!(
+            result.stderr.contains(message),
+            "{content}: {}",
+            result.stderr
+        );
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(not(feature = "compare"))]
+#[test]
+fn render_names_the_feature_a_comparison_json_needs() {
+    let saved =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/compare_legacy/forward.json");
+    let result = wsblast(&[os("render"), saved.as_os_str()]);
     assert_eq!(result.code, Some(1));
-    assert!(result.stderr.contains("--format html"), "{}", result.stderr);
+    assert!(
+        result.stderr.contains("'compare' feature"),
+        "{}",
+        result.stderr
+    );
 }

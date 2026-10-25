@@ -1,5 +1,6 @@
 //! SLO evaluation, report rendering (terminal text, JSON schema 1.0,
-//! Markdown), and the baseline comparison behind `--compare`.
+//! Markdown), and the baseline comparison behind `--compare` and its
+//! rendering (text, JSON, Markdown; HTML is in `html.rs`).
 
 use crate::cli::OutputFormat;
 use crate::config::{LoadTestConfig, SloThresholds};
@@ -196,6 +197,31 @@ pub(crate) struct BaselineComparison {
     /// Whether both reports had a time series, so `series.*` metrics were
     /// compared.
     pub(crate) series_compared: bool,
+    /// Every metric that was scored, changed beyond the threshold or not,
+    /// in metric-name order. Not part of the comparison JSON.
+    #[serde(skip)]
+    pub(crate) compared: Vec<ComparedMetric>,
+}
+
+/// One scored metric of a comparison.
+#[cfg(feature = "compare")]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ComparedMetric {
+    pub(crate) metric: String,
+    pub(crate) baseline: f64,
+    pub(crate) current: f64,
+    pub(crate) pct_change: f64,
+    pub(crate) higher_is_better: bool,
+    pub(crate) outcome: ChangeOutcome,
+}
+
+/// How a compared metric moved relative to the threshold.
+#[cfg(feature = "compare")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChangeOutcome {
+    Regression,
+    Improvement,
+    WithinThreshold,
 }
 
 /// `pct_change` is the signed relative change from baseline to current, in percent.
@@ -247,6 +273,13 @@ enum MetricDirection {
     HigherIsBetter,
     LowerIsBetter,
     Neutral,
+}
+
+/// Whether a higher value of a compared metric is better, for a metric name
+/// read from a comparison JSON. Neutral metrics are never in one.
+#[cfg(feature = "compare")]
+pub(crate) fn higher_is_better(metric: &str) -> bool {
+    metric_direction(metric) == MetricDirection::HigherIsBetter
 }
 
 /// Classifies a metric by the direction that constitutes an improvement.
@@ -304,6 +337,7 @@ pub(crate) fn compare_metrics_in(
 ) -> BaselineComparison {
     let mut regressions = Vec::new();
     let mut improvements = Vec::new();
+    let mut compared = Vec::new();
 
     let mut baseline_map = metrics_to_map(baseline);
     let mut current_map = metrics_to_map(current);
@@ -352,6 +386,21 @@ pub(crate) fn compare_metrics_in(
             MetricDirection::Neutral => (false, false),
         };
 
+        compared.push(ComparedMetric {
+            metric: metric_name.clone(),
+            baseline: baseline_val,
+            current: current_val,
+            pct_change,
+            higher_is_better: direction == MetricDirection::HigherIsBetter,
+            outcome: if regressed {
+                ChangeOutcome::Regression
+            } else if improved {
+                ChangeOutcome::Improvement
+            } else {
+                ChangeOutcome::WithinThreshold
+            },
+        });
+
         if regressed {
             regressions.push(Regression {
                 metric: metric_name.clone(),
@@ -376,6 +425,7 @@ pub(crate) fn compare_metrics_in(
         improvements,
         window: window.copied(),
         series_compared,
+        compared,
     }
 }
 
@@ -464,26 +514,182 @@ fn metrics_to_map(metrics: &AggregatedMetrics) -> BTreeMap<String, f64> {
     map
 }
 
-/// Renders a comparison report in the specified format.
+/// What the comparison renderers read: a comparison computed from two
+/// reports, or one read back from a comparison JSON.
 #[cfg(feature = "compare")]
+pub(crate) struct ComparisonView<'a> {
+    pub(crate) threshold: f64,
+    pub(crate) window: Option<CompareWindow>,
+    pub(crate) regressions: &'a [Regression],
+    pub(crate) improvements: &'a [Improvement],
+    pub(crate) source: ComparisonSource<'a>,
+}
+
+/// Where a [`ComparisonView`] comes from.
+#[cfg(feature = "compare")]
+pub(crate) enum ComparisonSource<'a> {
+    /// Computed now from two reports.
+    Reports {
+        /// The baseline and current report files, as given.
+        files: Option<(String, String)>,
+        baseline: &'a AggregatedMetrics,
+        current: &'a AggregatedMetrics,
+        series_compared: bool,
+        compared: &'a [ComparedMetric],
+    },
+    /// Read from a comparison JSON, which holds only the changes beyond the
+    /// threshold and no time series.
+    Saved {
+        schema_version: &'a str,
+        /// What the timestamp is and when, for the header.
+        timestamp: Option<(&'static str, String)>,
+    },
+}
+
+#[cfg(feature = "compare")]
+impl BaselineComparison {
+    /// The view of this comparison. `files` names the two reports.
+    pub(crate) fn view(
+        &self,
+        threshold: f64,
+        files: Option<(String, String)>,
+    ) -> ComparisonView<'_> {
+        ComparisonView {
+            threshold,
+            window: self.window,
+            regressions: &self.regressions,
+            improvements: &self.improvements,
+            source: ComparisonSource::Reports {
+                files,
+                baseline: &self.baseline,
+                current: &self.current,
+                series_compared: self.series_compared,
+                compared: &self.compared,
+            },
+        }
+    }
+}
+
+/// A comparison JSON (schema 1.x, as written by `--compare --format json`)
+/// read back from a file.
+#[cfg(feature = "compare")]
+#[derive(Debug, Deserialize)]
+pub(crate) struct SavedComparison {
+    schema_version: String,
+    threshold: f64,
+    #[serde(default)]
+    window: Option<SavedWindow>,
+    regressions: Vec<Regression>,
+    improvements: Vec<Improvement>,
+}
+
+#[cfg(feature = "compare")]
+#[derive(Debug, Deserialize)]
+struct SavedWindow {
+    start_secs: f64,
+    #[serde(default)]
+    end_secs: Option<f64>,
+}
+
+#[cfg(feature = "compare")]
+impl SavedComparison {
+    /// Parses `json` when it is a comparison document: an object with
+    /// `regressions` and `improvements` and no `metrics`. Returns `None` for
+    /// anything else, such as a run report.
+    pub(crate) fn detect(json: &str) -> Option<std::result::Result<Self, String>> {
+        let value: serde_json::Value = serde_json::from_str(json).ok()?;
+        if !is_comparison_document(&value) {
+            return None;
+        }
+        Some(Self::from_value(value))
+    }
+
+    fn from_value(value: serde_json::Value) -> std::result::Result<Self, String> {
+        match value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some(version) if version.starts_with("1.") => {}
+            Some(version) => {
+                return Err(format!(
+                    "unsupported comparison schema version '{version}' (this wsblast reads 1.x)"
+                ));
+            }
+            None => return Err("no schema_version field; not a wsblast comparison JSON".into()),
+        }
+        let saved: Self = serde_json::from_value(value)
+            .map_err(|e| format!("not a wsblast comparison JSON: {e}"))?;
+        if !saved.threshold.is_finite() || saved.threshold < 0.0 {
+            return Err(format!(
+                "not a wsblast comparison JSON: threshold {} is not a non-negative number",
+                saved.threshold
+            ));
+        }
+        saved.window()?;
+        Ok(saved)
+    }
+
+    fn window(&self) -> std::result::Result<Option<CompareWindow>, String> {
+        let Some(window) = &self.window else {
+            return Ok(None);
+        };
+        let secs = |value: f64| {
+            Duration::try_from_secs_f64(value)
+                .map_err(|_| format!("not a wsblast comparison JSON: window bound {value} is not a non-negative number of seconds"))
+        };
+        Ok(Some(CompareWindow {
+            start: Some(secs(window.start_secs)?).filter(|start| !start.is_zero()),
+            end: window.end_secs.map(secs).transpose()?,
+        }))
+    }
+
+    /// The view the renderers read; `timestamp` is shown in the HTML header.
+    pub(crate) fn view(&self, timestamp: Option<(&'static str, String)>) -> ComparisonView<'_> {
+        ComparisonView {
+            threshold: self.threshold,
+            window: self.window().ok().flatten(),
+            regressions: &self.regressions,
+            improvements: &self.improvements,
+            source: ComparisonSource::Saved {
+                schema_version: &self.schema_version,
+                timestamp,
+            },
+        }
+    }
+}
+
+/// Whether a JSON value has the shape of a comparison document rather than
+/// a run report.
+fn is_comparison_document(value: &serde_json::Value) -> bool {
+    value.get("regressions").is_some()
+        && value.get("improvements").is_some()
+        && value.get("metrics").is_none()
+}
+
+/// Renders a comparison report in the specified format.
+#[cfg(all(feature = "compare", test))]
 pub(crate) fn render_comparison_report(
     comparison: &BaselineComparison,
     format: OutputFormat,
     threshold: f64,
 ) -> String {
+    render_comparison_view(&comparison.view(threshold, None), format)
+}
+
+/// Renders a comparison view in `format`.
+#[cfg(feature = "compare")]
+pub(crate) fn render_comparison_view(view: &ComparisonView<'_>, format: OutputFormat) -> String {
     match format {
-        OutputFormat::Text => render_text_comparison(comparison, threshold),
-        OutputFormat::Json => render_json_comparison(comparison, threshold),
-        // The command line rejects --compare with --format html; Markdown
-        // is the closest readable format for any other caller.
-        OutputFormat::Markdown | OutputFormat::Html => {
-            render_markdown_comparison(comparison, threshold)
-        }
+        OutputFormat::Text => render_text_comparison(view),
+        OutputFormat::Json => render_json_comparison(view),
+        OutputFormat::Markdown => render_markdown_comparison(view),
+        OutputFormat::Html => crate::html::render_html_comparison(view),
     }
 }
 
 #[cfg(feature = "compare")]
-fn render_text_comparison(comparison: &BaselineComparison, threshold: f64) -> String {
+fn render_text_comparison(comparison: &ComparisonView<'_>) -> String {
+    let threshold = comparison.threshold;
     let mut out = String::new();
 
     out.push('\n');
@@ -504,7 +710,7 @@ fn render_text_comparison(comparison: &BaselineComparison, threshold: f64) -> St
         reg_table.load_preset(UTF8_FULL);
         reg_table.set_header(vec!["Metric", "Baseline", "Current", "Change", "Status"]);
 
-        for r in &comparison.regressions {
+        for r in comparison.regressions {
             reg_table.add_row(vec![
                 &r.metric,
                 &format!("{:.3}", r.baseline),
@@ -522,7 +728,7 @@ fn render_text_comparison(comparison: &BaselineComparison, threshold: f64) -> St
         imp_table.load_preset(UTF8_FULL);
         imp_table.set_header(vec!["Metric", "Baseline", "Current", "Change", "Status"]);
 
-        for i in &comparison.improvements {
+        for i in comparison.improvements {
             imp_table.add_row(vec![
                 &i.metric,
                 &format!("{:.3}", i.baseline),
@@ -543,15 +749,15 @@ fn render_text_comparison(comparison: &BaselineComparison, threshold: f64) -> St
 }
 
 #[cfg(feature = "compare")]
-fn render_json_comparison(comparison: &BaselineComparison, threshold: f64) -> String {
+fn render_json_comparison(comparison: &ComparisonView<'_>) -> String {
     #[derive(serde::Serialize)]
     struct JsonComparison<'a> {
-        schema_version: &'static str,
+        schema_version: &'a str,
         threshold: f64,
         #[serde(skip_serializing_if = "Option::is_none")]
         window: Option<JsonWindow>,
-        regressions: &'a Vec<Regression>,
-        improvements: &'a Vec<Improvement>,
+        regressions: &'a [Regression],
+        improvements: &'a [Improvement],
     }
 
     #[derive(serde::Serialize)]
@@ -564,27 +770,35 @@ fn render_json_comparison(comparison: &BaselineComparison, threshold: f64) -> St
     // 1.2.0 adds the `series.*` metrics and `window`. A comparison that
     // uses neither, such as one of two 0.2.0 reports, is written exactly as
     // before, as 1.1.0.
-    let schema_version = if comparison.series_compared || comparison.window.is_some() {
-        "1.2.0"
-    } else {
-        "1.1.0"
+    let schema_version = match &comparison.source {
+        ComparisonSource::Saved { schema_version, .. } => schema_version,
+        ComparisonSource::Reports {
+            series_compared, ..
+        } => {
+            if *series_compared || comparison.window.is_some() {
+                "1.2.0"
+            } else {
+                "1.1.0"
+            }
+        }
     };
     let report = JsonComparison {
         schema_version,
-        threshold,
+        threshold: comparison.threshold,
         window: comparison.window.map(|window| JsonWindow {
             start_secs: window.start.map_or(0.0, |start| start.as_secs_f64()),
             end_secs: window.end.map(|end| end.as_secs_f64()),
         }),
-        regressions: &comparison.regressions,
-        improvements: &comparison.improvements,
+        regressions: comparison.regressions,
+        improvements: comparison.improvements,
     };
 
     serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into())
 }
 
 #[cfg(feature = "compare")]
-fn render_markdown_comparison(comparison: &BaselineComparison, threshold: f64) -> String {
+fn render_markdown_comparison(comparison: &ComparisonView<'_>) -> String {
+    let threshold = comparison.threshold;
     let mut md = String::new();
     md.push_str("# `wsblast` Baseline Comparison Report\n\n");
     md.push_str(&format!("- **Threshold:** `±{:.1}%`\n", threshold));
@@ -599,7 +813,7 @@ fn render_markdown_comparison(comparison: &BaselineComparison, threshold: f64) -
         md.push_str("## ⚠ Regressions Detected\n\n");
         md.push_str("| Metric | Baseline | Current | Change |\n");
         md.push_str("| :--- | ---: | ---: | ---: |\n");
-        for r in &comparison.regressions {
+        for r in comparison.regressions {
             md.push_str(&format!(
                 "| {} | {:.3} | {:.3} | {:+.2}% |\n",
                 r.metric, r.baseline, r.current, r.pct_change
@@ -612,7 +826,7 @@ fn render_markdown_comparison(comparison: &BaselineComparison, threshold: f64) -
         md.push_str("## ✓ Improvements Detected\n\n");
         md.push_str("| Metric | Baseline | Current | Change |\n");
         md.push_str("| :--- | ---: | ---: | ---: |\n");
-        for i in &comparison.improvements {
+        for i in comparison.improvements {
             md.push_str(&format!(
                 "| {} | {:.3} | {:.3} | {:+.2}% |\n",
                 i.metric, i.baseline, i.current, i.pct_change
@@ -945,6 +1159,12 @@ impl SavedReport {
                 ));
             }
             None => return Err("no schema_version field; not a wsblast JSON report".into()),
+        }
+        if is_comparison_document(&value) {
+            return Err(
+                "a --compare report; rendering one needs the 'compare' feature, which this build of wsblast does not include"
+                    .into(),
+            );
         }
         serde_json::from_value(value).map_err(|e| format!("not a wsblast JSON report: {e}"))
     }

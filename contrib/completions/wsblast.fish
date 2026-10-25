@@ -67,7 +67,7 @@ complete -c wsblast -n "__fish_wsblast_needs_command" -l format -d 'Output repor
 json\t'Schema-versioned JSON for CI parsing and metric archiving'
 markdown\t'GitHub Flavored Markdown table for PR comments and job summaries'
 html\t'A self-contained HTML page with charts of the time series, to open in a browser or attach to a CI run'"
-complete -c wsblast -n "__fish_wsblast_needs_command" -l compare -d 'Compare two JSON reports for regression detection' -r -F
+complete -c wsblast -n "__fish_wsblast_needs_command" -l compare -d 'Compare two JSON reports for regression detection (--format text, json, markdown or html)' -r -F
 complete -c wsblast -n "__fish_wsblast_needs_command" -l compare-threshold -d 'Regression threshold percentage (default: 10%)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l compare-window -d 'Restrict the time-series metrics of --compare to START..END of each run (e.g., \'10s..50s\', \'10s..\', \'..50s\')' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l capture -d 'Record every data frame and connection event to FILE as JSON lines (see METHODOLOGY.md)' -r -F
@@ -92,7 +92,7 @@ complete -c wsblast -n "__fish_wsblast_needs_command" -s h -l help -d 'Print hel
 complete -c wsblast -n "__fish_wsblast_needs_command" -s V -l version -d 'Print version'
 complete -c wsblast -n "__fish_wsblast_needs_command" -a "mock" -d 'Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file'
 complete -c wsblast -n "__fish_wsblast_needs_command" -a "agent" -d 'Run a load agent that generates load for a coordinator (`wsblast URL --agents ...`), one test at a time'
-complete -c wsblast -n "__fish_wsblast_needs_command" -a "render" -d 'Render a saved JSON report (from --format json) as HTML, Markdown or text without running a test'
+complete -c wsblast -n "__fish_wsblast_needs_command" -a "render" -d 'Render a saved JSON report (from --format json) or comparison (from --compare --format json) as HTML, Markdown or text without running a test'
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l listen -d 'Address to listen on (host:port; port 0 picks a free port)' -r
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l delay -d 'Hold every reply for this long after its request arrived (e.g. \'20ms\')' -r
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l jitter -d 'Add a uniformly distributed extra delay between 0 and this to every reply' -r

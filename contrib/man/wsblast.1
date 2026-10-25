@@ -166,7 +166,7 @@ html: A self\-contained HTML page with charts of the time series, to open in a b
 .RE
 .TP
 \fB\-\-compare\fR \fI<FILE>...\fR
-Compare two JSON reports for regression detection
+Compare two JSON reports for regression detection (\-\-format text, json, markdown or html)
 .TP
 \fB\-\-compare\-threshold\fR \fI<PERCENT>\fR [default: 10]
 Regression threshold percentage (default: 10%)
@@ -242,6 +242,6 @@ wsblast\-agent(1)
 Run a load agent that generates load for a coordinator (`wsblast URL \-\-agents ...`), one test at a time
 .TP
 wsblast\-render(1)
-Render a saved JSON report (from \-\-format json) as HTML, Markdown or text without running a test
+Render a saved JSON report (from \-\-format json) or comparison (from \-\-compare \-\-format json) as HTML, Markdown or text without running a test
 .SH VERSION
 v0.2.0

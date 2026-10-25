@@ -65,7 +65,7 @@ apikey\:"API Key"))' \
 json\:"Schema-versioned JSON for CI parsing and metric archiving"
 markdown\:"GitHub Flavored Markdown table for PR comments and job summaries"
 html\:"A self-contained HTML page with charts of the time series, to open in a browser or attach to a CI run"))' \
-'*--compare=[Compare two JSON reports for regression detection]:FILE:_files:FILE:_files' \
+'*--compare=[Compare two JSON reports for regression detection (--format text, json, markdown or html)]:FILE:_files:FILE:_files' \
 '--compare-threshold=[Regression threshold percentage (default\: 10%)]:PERCENT:_default' \
 '--compare-window=[Restrict the time-series metrics of --compare to START..END of each run (e.g., '\''10s..50s'\'', '\''10s..'\'', '\''..50s'\'')]:START..END:_default' \
 '--capture=[Record every data frame and connection event to FILE as JSON lines (see METHODOLOGY.md)]:FILE:_files' \
@@ -136,7 +136,7 @@ text\:"Terminal tables"))' \
 '--output=[Write the rendered report to FILE instead of stdout]:FILE:_files' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
-':report -- JSON report written by `wsblast --format json` (schema 1.x):_files' \
+':report -- JSON report written by `wsblast --format json` (schema 1.x), or comparison written by `wsblast --compare ... --format json` (schema 1.1 or 1.2):_files' \
 && ret=0
 ;;
         esac
@@ -149,7 +149,7 @@ _wsblast_commands() {
     local commands; commands=(
 'mock:Run a local WebSocket test server\: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file' \
 'agent:Run a load agent that generates load for a coordinator (\`wsblast URL --agents ...\`), one test at a time' \
-'render:Render a saved JSON report (from --format json) as HTML, Markdown or text without running a test' \
+'render:Render a saved JSON report (from --format json) or comparison (from --compare --format json) as HTML, Markdown or text without running a test' \
     )
     _describe -t commands 'wsblast commands' commands "$@"
 }

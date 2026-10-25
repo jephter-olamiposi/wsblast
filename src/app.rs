@@ -212,12 +212,6 @@ fn run_compare(cli: &Cli) -> Result<()> {
         })
     })?;
 
-    if cli.format == crate::cli::OutputFormat::Html {
-        return Err(WsBlastError::Config(ConfigError::UnsupportedOption(
-            "--compare writes text, json or markdown; --format html is for run reports".into(),
-        )));
-    }
-
     if !cli.compare_threshold.is_finite() || cli.compare_threshold < 0.0 {
         return Err(WsBlastError::Config(ConfigError::InvalidThreshold(
             format!(
@@ -246,7 +240,12 @@ fn run_compare(cli: &Cli) -> Result<()> {
 
     let comparison =
         report::compare_metrics_in(&baseline, &current, cli.compare_threshold, window.as_ref());
-    let rendered = report::render_comparison_report(&comparison, cli.format, cli.compare_threshold);
+    let files = Some((
+        baseline_path.display().to_string(),
+        current_path.display().to_string(),
+    ));
+    let rendered =
+        report::render_comparison_view(&comparison.view(cli.compare_threshold, files), cli.format);
 
     println!("{rendered}");
 
@@ -291,8 +290,9 @@ fn check_window_covers(
     ))))
 }
 
-/// `wsblast render`: reads a saved JSON report and renders it without
-/// running a test. The exit code does not reflect the report's SLO result.
+/// `wsblast render`: reads a saved JSON report, or a comparison JSON from
+/// `--compare --format json`, and renders it without running a test. The
+/// exit code does not reflect the report's SLO result or regressions.
 fn run_render(args: &crate::cli::RenderArgs) -> Result<()> {
     let path = args.report.display().to_string();
     let json = std::fs::read_to_string(&args.report).map_err(|e| {
@@ -301,20 +301,35 @@ fn run_render(args: &crate::cli::RenderArgs) -> Result<()> {
             format!("cannot read report '{path}': {e}"),
         ))
     })?;
-    let saved = report::SavedReport::parse(&json).map_err(|reason| {
+    let invalid = |reason: String| {
         WsBlastError::Config(ConfigError::InvalidOption(format!("'{path}': {reason}")))
-    })?;
-    // The report does not record when the run happened; the file's
-    // modification time is when it was written.
-    let saved_at = std::fs::metadata(&args.report)
-        .and_then(|meta| meta.modified())
-        .ok()
-        .map(|time| ("Report saved", crate::clock::rfc3339_utc(time)));
-    let rendered = report::render_view(&saved.view(saved_at), args.format.into());
+    };
+    // A report does not record when it was written; the file's
+    // modification time is.
+    let saved_at = |label: &'static str| {
+        std::fs::metadata(&args.report)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .map(|time| (label, crate::clock::rfc3339_utc(time)))
+    };
+    let format = args.format.into();
+    #[cfg(feature = "compare")]
+    if let Some(saved) = report::SavedComparison::detect(&json) {
+        let saved = saved.map_err(invalid)?;
+        let rendered =
+            report::render_comparison_view(&saved.view(saved_at("Comparison saved")), format);
+        return write_rendered(args, &rendered);
+    }
+    let saved = report::SavedReport::parse(&json).map_err(invalid)?;
+    let rendered = report::render_view(&saved.view(saved_at("Report saved")), format);
+    write_rendered(args, &rendered)
+}
 
+/// Writes what `wsblast render` rendered to `--output` or stdout.
+fn write_rendered(args: &crate::cli::RenderArgs, rendered: &str) -> Result<()> {
     match &args.output {
         Some(output) => {
-            std::fs::write(output, &rendered).map_err(|e| {
+            std::fs::write(output, rendered).map_err(|e| {
                 WsBlastError::Io(std::io::Error::new(
                     e.kind(),
                     format!("cannot write '{}': {e}", output.display()),
