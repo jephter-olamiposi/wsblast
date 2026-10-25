@@ -1155,6 +1155,10 @@ pub(crate) enum Credential {
     Value(Secret),
     /// Printed by a command before the run, and optionally during it.
     Command(TokenCommand),
+    /// Signed by wsblast before the run and again before it expires, or
+    /// for every handshake attempt.
+    #[cfg(feature = "jwt")]
+    Jwt(crate::auth::jwt::JwtConfig),
 }
 
 /// A credential whose `Debug` output is redacted.
@@ -2369,6 +2373,11 @@ fn chaos_from_cli(cli: &Cli) -> Result<Option<crate::chaos::ChaosConfig>> {
 fn auth_from_cli(cli: &Cli) -> Result<Option<AuthConfig>> {
     use crate::cli::AuthType;
     let invalid = |message: &str| WsBlastError::from(ConfigError::InvalidAuth(message.to_string()));
+    if cli.auth_type != AuthType::Jwt
+        && let Some(flag) = jwt_flag_given(cli)
+    {
+        return Err(invalid(&format!("{flag} requires --auth-type jwt")));
+    }
     let (scheme, header, value, flag) = match cli.auth_type {
         AuthType::None => {
             if cli.auth_token.is_some() || cli.auth_apikey.is_some() || cli.auth_token_cmd.is_some()
@@ -2391,6 +2400,21 @@ fn auth_from_cli(cli: &Cli) -> Result<Option<AuthConfig>> {
             &cli.auth_apikey,
             "--auth-apikey",
         ),
+        #[cfg(feature = "jwt")]
+        AuthType::Jwt => {
+            reject_token_options(cli, "jwt")?;
+            return Ok(Some(AuthConfig {
+                scheme: AuthScheme::Static,
+                header: cli.auth_header.clone(),
+                credential: Credential::Jwt(crate::auth::jwt::config_from_cli(cli)?),
+            }));
+        }
+        #[cfg(not(feature = "jwt"))]
+        AuthType::Jwt => {
+            return Err(invalid(
+                "--auth-type jwt needs the jwt feature: cargo install wsblast --features jwt",
+            ));
+        }
     };
 
     let credential = match &cli.auth_token_cmd {
@@ -2456,6 +2480,44 @@ fn auth_from_cli(cli: &Cli) -> Result<Option<AuthConfig>> {
         header: header.clone(),
         credential,
     }))
+}
+
+/// The first `--auth-jwt-*` option given on the command line, if any.
+#[cfg(feature = "auth")]
+fn jwt_flag_given(cli: &Cli) -> Option<&'static str> {
+    [
+        ("--auth-jwt-alg", cli.auth_jwt_alg.is_some()),
+        ("--auth-jwt-key", cli.auth_jwt_key.is_some()),
+        ("--auth-jwt-claims", cli.auth_jwt_claims.is_some()),
+        ("--auth-jwt-ttl", cli.auth_jwt_ttl.is_some()),
+        ("--auth-jwt-per-connection", cli.auth_jwt_per_connection),
+    ]
+    .into_iter()
+    .find_map(|(flag, set)| set.then_some(flag))
+}
+
+/// Rejects the token and API key options for an `--auth-type` that makes
+/// its own credential.
+#[cfg(feature = "jwt")]
+fn reject_token_options(cli: &Cli, kind: &str) -> Result<()> {
+    for (flag, set) in [
+        ("--auth-token", cli.auth_token.is_some()),
+        ("--auth-apikey", cli.auth_apikey.is_some()),
+        ("--auth-token-cmd", cli.auth_token_cmd.is_some()),
+        (
+            "--auth-token-cmd-timeout",
+            cli.auth_token_cmd_timeout.is_some(),
+        ),
+        ("--auth-token-refresh", cli.auth_token_refresh.is_some()),
+    ] {
+        if set {
+            return Err(ConfigError::InvalidAuth(format!(
+                "{flag} cannot be used with --auth-type {kind}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// Parses concise human duration strings into standard [`Duration`].
@@ -2886,6 +2948,80 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("non-empty command"));
+    }
+
+    #[cfg(feature = "jwt")]
+    #[test]
+    fn jwt_auth_flag_combinations_are_checked() {
+        use clap::Parser;
+
+        let rejected = |extra: &str| {
+            let base = ["wsblast", "ws://127.0.0.1:9001"];
+            let cli = Cli::try_parse_from(base.into_iter().chain(extra.split(' '))).unwrap();
+            LoadTestConfig::from_cli(cli).unwrap_err().to_string()
+        };
+        for (extra, message) in [
+            (
+                "--auth-jwt-ttl 1m",
+                "--auth-jwt-ttl requires --auth-type jwt",
+            ),
+            (
+                "--auth-jwt-per-connection",
+                "--auth-jwt-per-connection requires --auth-type jwt",
+            ),
+            (
+                "--auth-type static --auth-token t --auth-jwt-key k",
+                "--auth-jwt-key requires --auth-type jwt",
+            ),
+            (
+                "--auth-type jwt --auth-jwt-key k --auth-token t",
+                "--auth-token cannot be used with --auth-type jwt",
+            ),
+            (
+                "--auth-type jwt --auth-jwt-key k --auth-token-cmd c",
+                "--auth-token-cmd cannot be used with --auth-type jwt",
+            ),
+        ] {
+            let error = rejected(extra);
+            assert!(error.contains(message), "{extra}: {error}");
+        }
+        if std::env::var_os(crate::auth::jwt::KEY_FILE_ENV).is_none() {
+            let error = rejected("--auth-type jwt");
+            assert!(
+                error.contains("--auth-jwt-key FILE or WSBLAST_JWT_KEY_FILE"),
+                "{error}"
+            );
+        }
+
+        let cli = Cli::parse_from([
+            "wsblast",
+            "ws://127.0.0.1:9001",
+            "--auth-type",
+            "jwt",
+            "--auth-jwt-key",
+            "key",
+            "--auth-header",
+            "X-Token",
+        ]);
+        let auth = LoadTestConfig::from_cli(cli).unwrap().auth.unwrap();
+        assert_eq!(auth.header, "X-Token");
+        assert!(matches!(auth.credential, Credential::Jwt(_)));
+    }
+
+    #[cfg(all(feature = "auth", not(feature = "jwt")))]
+    #[test]
+    fn jwt_auth_needs_the_jwt_feature() {
+        use clap::Parser;
+
+        let cli = Cli::parse_from(["wsblast", "ws://127.0.0.1:9001", "--auth-type", "jwt"]);
+        let error = LoadTestConfig::from_cli(cli).unwrap_err().to_string();
+        assert!(error.contains("needs the jwt feature"), "{error}");
+        let cli = Cli::parse_from(["wsblast", "ws://127.0.0.1:9001", "--auth-jwt-ttl", "1m"]);
+        let error = LoadTestConfig::from_cli(cli).unwrap_err().to_string();
+        assert!(
+            error.contains("--auth-jwt-ttl requires --auth-type jwt"),
+            "{error}"
+        );
     }
 
     #[cfg(feature = "auth")]

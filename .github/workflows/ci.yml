@@ -52,6 +52,7 @@ jobs:
           - mock
           - distributed
           - chaos
+          - jwt
           - full
     steps:
       - uses: actions/checkout@v5
@@ -93,6 +94,11 @@ jobs:
       # `otel` is not part of `full`, so its export tests run on their own.
       - name: OpenTelemetry export tests
         run: cargo test --locked --features full,otel --lib --test integration_test export
+      # `jwt` is not part of `full` either.
+      - name: Token authentication tests
+        run: |
+          cargo test --locked --features full,jwt --lib auth
+          cargo test --locked --features full,jwt --test auth_tokens
 
   msrv:
     name: MSRV (${{ matrix.features }})
@@ -100,7 +106,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: [none, default, otel]
+        features: [none, default, otel, jwt]
     steps:
       - uses: actions/checkout@v5
       - name: Read rust-version from Cargo.toml

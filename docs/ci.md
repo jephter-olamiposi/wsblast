@@ -31,7 +31,7 @@ Rules that matter in a pipeline:
 
 ## 2. Installing in CI
 
-Every wsblast feature except the opt-in OpenTelemetry export, including `--compare`, `--scenario`, `--auth-type`, `--mode graphql-ws` and `--prometheus-listen`, is part of the default build, so a plain install has all of them (add `--features otel` for `--otel-endpoint`, see [docs/export.md](export.md)):
+Every wsblast feature except the opt-in OpenTelemetry export and JWT signing, including `--compare`, `--scenario`, `--auth-type`, `--mode graphql-ws` and `--prometheus-listen`, is part of the default build, so a plain install has all of them (add `--features otel` for `--otel-endpoint`, see [docs/export.md](export.md)):
 
 ```bash
 cargo install wsblast --locked
@@ -62,6 +62,30 @@ wsblast "$TARGET" --auth-type apikey --auth-apikey-header X-API-Key \
 - `--auth-token-refresh DURATION` runs the command again during the run, each time `DURATION` after the previous run finished. New handshakes (connections still ramping up, connections a stage adds, and reconnects) use the latest token; connections that are already open are not touched. A failed refresh keeps the previous token and prints a warning to stderr; while refreshes keep failing, at most one warning per minute is printed, with the count of failures it covers. A refresh still running when the run ends is abandoned.
 
 When a run can outlast the token and connections may reconnect, set the refresh interval below the token's lifetime.
+
+### 2.2 JWTs signed by wsblast
+
+With the opt-in `jwt` feature (`cargo install wsblast --locked --features jwt`), `--auth-type jwt` makes wsblast sign its own JSON Web Tokens, so a job that holds the signing key needs no token service:
+
+```bash
+# HS256 with a shared secret; the key file holds the secret's bytes.
+printf '%s' "$WS_JWT_SECRET" > jwt.key
+wsblast "$TARGET" --auth-type jwt --auth-jwt-key jwt.key \
+  --auth-jwt-claims '{"sub":"loadtest","aud":"realtime","iss":"ci"}' --auth-jwt-ttl 10m
+
+# RS256 or ES256 with a PEM private key, path from the environment, a fresh
+# token for every connection attempt.
+export WSBLAST_JWT_KEY_FILE="$RUNNER_TEMP/jwt-signing.pem"
+wsblast "$TARGET" --auth-type jwt --auth-jwt-alg ES256 --auth-jwt-per-connection \
+  --auth-jwt-claims '{"sub":"loadtest","aud":"realtime"}'
+```
+
+- `--auth-jwt-alg` is `HS256` (default), `HS384`, `HS512`, `RS256` or `ES256`. Signing uses ring, the library rustls already uses; no OpenSSL is involved.
+- `--auth-jwt-key FILE`, or the `WSBLAST_JWT_KEY_FILE` environment variable, names the key file. The key itself is never accepted on the command line. For `HS*` the file's bytes are the secret, without one trailing newline (`\n` or `\r\n`), so a file written with `echo` works. `RS256` takes a PEM `PRIVATE KEY` (PKCS#8) or `RSA PRIVATE KEY` (PKCS#1) block of 2048 to 8192 bits. `ES256` takes a P-256 PEM `PRIVATE KEY` (PKCS#8) block; convert a SEC1 `EC PRIVATE KEY` file with `openssl pkcs8 -topk8 -nocrypt -in key.pem -out key.pkcs8.pem`. Encrypted keys are not supported. A key that cannot be read or used is a configuration error (exit code 1) before any connection is opened; the message names the file, never its contents.
+- `--auth-jwt-claims JSON` is an object whose members are copied into every token (`sub`, `aud`, `iss`, custom claims). wsblast sets `iat` and `nbf` to the signing time, `exp` to `iat` plus `--auth-jwt-ttl` (default `5m`, at least `2s`, whole seconds), and `jti` to 16 random bytes in base64url; the claims object must not set these four. The JOSE header is `{"alg":"<alg>","typ":"JWT"}`.
+- By default every handshake sends the same token, and a background thread signs a new one before it expires: a fifth of the lifetime before `exp`, at most one minute before (at 4 minutes for the default `5m`). New handshakes, including reconnects, use the newest token; open connections are not touched. Long runs therefore keep working with any lifetime.
+- `--auth-jwt-per-connection` signs a fresh token, with its own `jti`, for each connection attempt instead, for servers that reject a replayed `jti`. Signing happens before the handshake clock starts, so it is not part of handshake latency, but it costs CPU on the load generator: microseconds for `HS*` and `ES256`, around a millisecond for `RS256` with a 2048-bit key.
+- The token goes in `Authorization` as `Bearer <token>`; `--auth-header` names another header, which then carries the bare token, as with `--auth-type static`. `--auth-jwt-*` options without `--auth-type jwt`, and `--auth-token`, `--auth-apikey` or `--auth-token-cmd` with it, are rejected. `--auth-type jwt` cannot be used with `--agents` in this version, because agents receive the handshake headers only once.
 
 ## 3. Settings for CI runs
 

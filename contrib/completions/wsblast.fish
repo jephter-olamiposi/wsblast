@@ -1,6 +1,6 @@
 # Print an optspec for argparse to handle cmd's options that are independent of any subcommand.
 function __fish_wsblast_global_optspecs
-    string join \n u/url= c/connections= ramp-rate= d/duration= stages= n/requests= r/rate= p/payload= payload-file= binary H/header= subprotocol= mode= connect-timeout= message-timeout= match= ping-interval= max-p50= max-p95= max-p99= max-p999= max-error-rate= min-throughput= max-generator-lag= auth-type= auth-token= auth-token-cmd= auth-token-cmd-timeout= auth-token-refresh= auth-header= auth-apikey= auth-apikey-header= graphql-ws-operation-name= graphql-ws-operation= graphql-ws-variables= graphql-ws-extensions= format= compare= compare-threshold= compare-window= fail-on-regression capture= capture-limit= chaos-delay= chaos-drop= chaos-corrupt= chaos-close= chaos-close-mode= chaos-seed= o/output= tui no-progress no-reconnect prometheus-listen= otel-endpoint= otel-interval= otel-service-name= scenario= phase= agents= agent-token= agent-timeout= agent-ca= h/help V/version
+    string join \n u/url= c/connections= ramp-rate= d/duration= stages= n/requests= r/rate= p/payload= payload-file= binary H/header= subprotocol= mode= connect-timeout= message-timeout= match= ping-interval= max-p50= max-p95= max-p99= max-p999= max-error-rate= min-throughput= max-generator-lag= auth-type= auth-token= auth-token-cmd= auth-token-cmd-timeout= auth-token-refresh= auth-header= auth-apikey= auth-apikey-header= auth-jwt-alg= auth-jwt-key= auth-jwt-claims= auth-jwt-ttl= auth-jwt-per-connection graphql-ws-operation-name= graphql-ws-operation= graphql-ws-variables= graphql-ws-extensions= format= compare= compare-threshold= compare-window= fail-on-regression capture= capture-limit= chaos-delay= chaos-drop= chaos-corrupt= chaos-close= chaos-close-mode= chaos-seed= o/output= tui no-progress no-reconnect prometheus-listen= otel-endpoint= otel-interval= otel-service-name= scenario= phase= agents= agent-token= agent-timeout= agent-ca= h/help V/version
 end
 
 function __fish_wsblast_needs_command
@@ -50,16 +50,25 @@ complete -c wsblast -n "__fish_wsblast_needs_command" -l max-p999 -d 'SLO thresh
 complete -c wsblast -n "__fish_wsblast_needs_command" -l max-error-rate -d 'SLO threshold: Maximum acceptable error rate fraction (e.g., \'0.01\' for 1%, \'0.001\' for 0.1%)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l min-throughput -d 'SLO threshold: Minimum required message throughput (messages/sec)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l max-generator-lag -d 'SLO threshold: Maximum p99 wake-up lag of the load generator itself (e.g. \'20ms\'); a breach means the latency numbers include client-side delay' -r
-complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-type -d 'Authentication type (none, static, apikey)' -r -f -a "none\t'No authentication'
+complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-type -d 'Authentication type' -r -f -a "none\t'No authentication'
 static\t'Static bearer token'
-apikey\t'API Key'"
+apikey\t'API Key'
+jwt\t'JWT signed by wsblast with the --auth-jwt-* options (needs the jwt feature)'"
 complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-token -d 'Static token for auth (used with --auth-type static)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-token-cmd -d 'Command whose trimmed stdout is the token or API key, run through the platform shell before the run (replaces --auth-token or --auth-apikey)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-token-cmd-timeout -d 'Time allowed for each run of --auth-token-cmd [default: 30s]' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-token-refresh -d 'Re-run --auth-token-cmd every DURATION during the run; new handshakes use the latest token' -r
-complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-header -d 'Header name for static token (used with --auth-type static)' -r
+complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-header -d 'Header that carries the token (used with every --auth-type except apikey)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-apikey -d 'API Key (used with --auth-type apikey)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-apikey-header -d 'API Key header name (used with --auth-type apikey)' -r
+complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-jwt-alg -d 'JWT signing algorithm (used with --auth-type jwt) [default: HS256]' -r -f -a "HS256\t'HMAC with SHA-256'
+HS384\t'HMAC with SHA-384'
+HS512\t'HMAC with SHA-512'
+RS256\t'RSASSA-PKCS1-v1_5 with SHA-256'
+ES256\t'ECDSA with P-256 and SHA-256'"
+complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-jwt-key -d 'File with the JWT signing key: the secret bytes for HS*, a PEM private key for RS256 and ES256; or set WSBLAST_JWT_KEY_FILE' -r -F
+complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-jwt-claims -d 'JSON object of claims added to every JWT (e.g. \'{"sub":"loadtest","aud":"ws"}\')' -r
+complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-jwt-ttl -d 'JWT lifetime, which sets iat, nbf and exp; tokens are re-signed before they expire [default: 5m]' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l graphql-ws-operation-name -d 'GraphQL WS operation name' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l graphql-ws-operation -d 'GraphQL WS operation (query/mutation/subscription)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l graphql-ws-variables -d 'GraphQL WS variables (JSON)' -r
@@ -92,6 +101,7 @@ complete -c wsblast -n "__fish_wsblast_needs_command" -l agent-token -d 'Token t
 complete -c wsblast -n "__fish_wsblast_needs_command" -l agent-timeout -d 'Time the agents get to become ready before the start, and to send their results after the end of the run' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l agent-ca -d 'PEM file of CA certificates to trust for wss:// agents, in addition to the platform\'s roots' -r -F
 complete -c wsblast -n "__fish_wsblast_needs_command" -l binary -d 'Send payload as WebSocket binary frames instead of text frames'
+complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-jwt-per-connection -d 'Sign a fresh JWT with a unique jti for every connection attempt instead of sharing one token'
 complete -c wsblast -n "__fish_wsblast_needs_command" -l fail-on-regression -d 'Fail on regression (exit code 2)'
 complete -c wsblast -n "__fish_wsblast_needs_command" -l tui -d 'Launch interactive terminal dashboard (TUI)'
 complete -c wsblast -n "__fish_wsblast_needs_command" -l no-progress -d 'Suppress interactive progress bar (recommended for non-interactive CI/CD runners)'

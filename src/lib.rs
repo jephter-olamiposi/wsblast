@@ -105,7 +105,8 @@
 //!   are in [`AggregatedMetrics::chaos`].
 //! - `auth` and `compare` add the `--auth-*` and `--compare` command-line
 //!   options and have no library API. Send credentials with
-//!   [`header`](LoadTestConfigBuilder::header).
+//!   [`header`](LoadTestConfigBuilder::header). The opt-in `jwt` feature
+//!   adds `--auth-type jwt`, also without a library API.
 //!
 #![cfg_attr(
     not(feature = "scenario"),
@@ -147,7 +148,12 @@
 mod app;
 #[cfg(feature = "auth")]
 mod auth;
-#[cfg(any(feature = "capture", feature = "mock", feature = "distributed"))]
+#[cfg(any(
+    feature = "capture",
+    feature = "mock",
+    feature = "distributed",
+    feature = "jwt"
+))]
 mod base64;
 #[cfg(feature = "capture")]
 mod capture;

@@ -4,7 +4,7 @@
 .SH NAME
 wsblast \- High\-performance WebSocket load\-testing CLI with percentile latency & CI gating
 .SH SYNOPSIS
-\fBwsblast\fR [\fB\-u\fR|\fB\-\-url\fR] [\fB\-c\fR|\fB\-\-connections\fR] [\fB\-\-ramp\-rate\fR] [\fB\-d\fR|\fB\-\-duration\fR] [\fB\-\-stages\fR] [\fB\-n\fR|\fB\-\-requests\fR] [\fB\-r\fR|\fB\-\-rate\fR] [\fB\-p\fR|\fB\-\-payload\fR] [\fB\-\-payload\-file\fR] [\fB\-\-binary\fR] [\fB\-H\fR|\fB\-\-header\fR] [\fB\-\-subprotocol\fR] [\fB\-\-mode\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-message\-timeout\fR] [\fB\-\-match\fR] [\fB\-\-ping\-interval\fR] [\fB\-\-max\-p50\fR] [\fB\-\-max\-p95\fR] [\fB\-\-max\-p99\fR] [\fB\-\-max\-p999\fR] [\fB\-\-max\-error\-rate\fR] [\fB\-\-min\-throughput\fR] [\fB\-\-max\-generator\-lag\fR] [\fB\-\-auth\-type\fR] [\fB\-\-auth\-token\fR] [\fB\-\-auth\-token\-cmd\fR] [\fB\-\-auth\-token\-cmd\-timeout\fR] [\fB\-\-auth\-token\-refresh\fR] [\fB\-\-auth\-header\fR] [\fB\-\-auth\-apikey\fR] [\fB\-\-auth\-apikey\-header\fR] [\fB\-\-graphql\-ws\-operation\-name\fR] [\fB\-\-graphql\-ws\-operation\fR] [\fB\-\-graphql\-ws\-variables\fR] [\fB\-\-graphql\-ws\-extensions\fR] [\fB\-\-format\fR] [\fB\-\-compare\fR] [\fB\-\-compare\-threshold\fR] [\fB\-\-compare\-window\fR] [\fB\-\-fail\-on\-regression\fR] [\fB\-\-capture\fR] [\fB\-\-capture\-limit\fR] [\fB\-\-chaos\-delay\fR] [\fB\-\-chaos\-drop\fR] [\fB\-\-chaos\-corrupt\fR] [\fB\-\-chaos\-close\fR] [\fB\-\-chaos\-close\-mode\fR] [\fB\-\-chaos\-seed\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-tui\fR] [\fB\-\-no\-progress\fR] [\fB\-\-no\-reconnect\fR] [\fB\-\-prometheus\-listen\fR] [\fB\-\-otel\-endpoint\fR] [\fB\-\-otel\-interval\fR] [\fB\-\-otel\-service\-name\fR] [\fB\-\-scenario\fR] [\fB\-\-phase\fR] [\fB\-\-agents\fR] [\fB\-\-agent\-token\fR] [\fB\-\-agent\-timeout\fR] [\fB\-\-agent\-ca\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIURL\fR] [\fIsubcommands\fR]
+\fBwsblast\fR [\fB\-u\fR|\fB\-\-url\fR] [\fB\-c\fR|\fB\-\-connections\fR] [\fB\-\-ramp\-rate\fR] [\fB\-d\fR|\fB\-\-duration\fR] [\fB\-\-stages\fR] [\fB\-n\fR|\fB\-\-requests\fR] [\fB\-r\fR|\fB\-\-rate\fR] [\fB\-p\fR|\fB\-\-payload\fR] [\fB\-\-payload\-file\fR] [\fB\-\-binary\fR] [\fB\-H\fR|\fB\-\-header\fR] [\fB\-\-subprotocol\fR] [\fB\-\-mode\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-message\-timeout\fR] [\fB\-\-match\fR] [\fB\-\-ping\-interval\fR] [\fB\-\-max\-p50\fR] [\fB\-\-max\-p95\fR] [\fB\-\-max\-p99\fR] [\fB\-\-max\-p999\fR] [\fB\-\-max\-error\-rate\fR] [\fB\-\-min\-throughput\fR] [\fB\-\-max\-generator\-lag\fR] [\fB\-\-auth\-type\fR] [\fB\-\-auth\-token\fR] [\fB\-\-auth\-token\-cmd\fR] [\fB\-\-auth\-token\-cmd\-timeout\fR] [\fB\-\-auth\-token\-refresh\fR] [\fB\-\-auth\-header\fR] [\fB\-\-auth\-apikey\fR] [\fB\-\-auth\-apikey\-header\fR] [\fB\-\-auth\-jwt\-alg\fR] [\fB\-\-auth\-jwt\-key\fR] [\fB\-\-auth\-jwt\-claims\fR] [\fB\-\-auth\-jwt\-ttl\fR] [\fB\-\-auth\-jwt\-per\-connection\fR] [\fB\-\-graphql\-ws\-operation\-name\fR] [\fB\-\-graphql\-ws\-operation\fR] [\fB\-\-graphql\-ws\-variables\fR] [\fB\-\-graphql\-ws\-extensions\fR] [\fB\-\-format\fR] [\fB\-\-compare\fR] [\fB\-\-compare\-threshold\fR] [\fB\-\-compare\-window\fR] [\fB\-\-fail\-on\-regression\fR] [\fB\-\-capture\fR] [\fB\-\-capture\-limit\fR] [\fB\-\-chaos\-delay\fR] [\fB\-\-chaos\-drop\fR] [\fB\-\-chaos\-corrupt\fR] [\fB\-\-chaos\-close\fR] [\fB\-\-chaos\-close\-mode\fR] [\fB\-\-chaos\-seed\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-tui\fR] [\fB\-\-no\-progress\fR] [\fB\-\-no\-reconnect\fR] [\fB\-\-prometheus\-listen\fR] [\fB\-\-otel\-endpoint\fR] [\fB\-\-otel\-interval\fR] [\fB\-\-otel\-service\-name\fR] [\fB\-\-scenario\fR] [\fB\-\-phase\fR] [\fB\-\-agents\fR] [\fB\-\-agent\-token\fR] [\fB\-\-agent\-timeout\fR] [\fB\-\-agent\-ca\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIURL\fR] [\fIsubcommands\fR]
 .SH DESCRIPTION
 wsblast stresses WebSocket targets, computes high\-resolution latency percentiles (p50/p95/p99/p99.9), maps failure taxonomy, and gates CI pipelines via SLO thresholds.
 .SH OPTIONS
@@ -104,7 +104,7 @@ SLO threshold: Minimum required message throughput (messages/sec)
 SLO threshold: Maximum p99 wake\-up lag of the load generator itself (e.g. \*(Aq20ms\*(Aq); a breach means the latency numbers include client\-side delay
 .TP
 \fB\-\-auth\-type\fR \fI<TYPE>\fR [default: none]
-Authentication type (none, static, apikey)
+Authentication type
 .br
 
 .br
@@ -116,6 +116,8 @@ none: No authentication
 static: Static bearer token
 .IP \(bu 2
 apikey: API Key
+.IP \(bu 2
+jwt: JWT signed by wsblast with the \-\-auth\-jwt\-* options (needs the jwt feature)
 .RE
 .TP
 \fB\-\-auth\-token\fR \fI<TOKEN>\fR
@@ -131,13 +133,44 @@ Time allowed for each run of \-\-auth\-token\-cmd [default: 30s]
 Re\-run \-\-auth\-token\-cmd every DURATION during the run; new handshakes use the latest token
 .TP
 \fB\-\-auth\-header\fR \fI<HEADER>\fR [default: Authorization]
-Header name for static token (used with \-\-auth\-type static)
+Header that carries the token (used with every \-\-auth\-type except apikey)
 .TP
 \fB\-\-auth\-apikey\fR \fI<KEY>\fR
 API Key (used with \-\-auth\-type apikey)
 .TP
 \fB\-\-auth\-apikey\-header\fR \fI<HEADER>\fR [default: X\-API\-Key]
 API Key header name (used with \-\-auth\-type apikey)
+.TP
+\fB\-\-auth\-jwt\-alg\fR \fI<ALG>\fR
+JWT signing algorithm (used with \-\-auth\-type jwt) [default: HS256]
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+HS256: HMAC with SHA\-256
+.IP \(bu 2
+HS384: HMAC with SHA\-384
+.IP \(bu 2
+HS512: HMAC with SHA\-512
+.IP \(bu 2
+RS256: RSASSA\-PKCS1\-v1_5 with SHA\-256
+.IP \(bu 2
+ES256: ECDSA with P\-256 and SHA\-256
+.RE
+.TP
+\fB\-\-auth\-jwt\-key\fR \fI<FILE>\fR
+File with the JWT signing key: the secret bytes for HS*, a PEM private key for RS256 and ES256; or set WSBLAST_JWT_KEY_FILE
+.TP
+\fB\-\-auth\-jwt\-claims\fR \fI<JSON>\fR
+JSON object of claims added to every JWT (e.g. \*(Aq{"sub":"loadtest","aud":"ws"}\*(Aq)
+.TP
+\fB\-\-auth\-jwt\-ttl\fR \fI<DURATION>\fR
+JWT lifetime, which sets iat, nbf and exp; tokens are re\-signed before they expire [default: 5m]
+.TP
+\fB\-\-auth\-jwt\-per\-connection\fR
+Sign a fresh JWT with a unique jti for every connection attempt instead of sharing one token
 .TP
 \fB\-\-graphql\-ws\-operation\-name\fR \fI<NAME>\fR
 GraphQL WS operation name

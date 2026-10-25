@@ -1,23 +1,47 @@
 //! Standard base64 (RFC 4648 section 4, with `=` padding), used for binary
-//! frames in capture files and payloads sent to distributed agents. Small
+//! frames in capture files, payloads sent to distributed agents and PEM
+//! keys, and unpadded base64url (RFC 4648 section 5), used for JWTs. Small
 //! enough that it is not worth a dependency.
 
 #[cfg(any(feature = "capture", feature = "distributed"))]
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+#[cfg(feature = "jwt")]
+const URL_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
 /// Encodes `input` as padded standard base64.
 #[cfg(any(feature = "capture", feature = "distributed"))]
 pub(crate) fn encode(input: &[u8]) -> String {
+    encode_with(input, ALPHABET, true)
+}
+
+/// Encodes `input` as base64url without padding, as JWS compact
+/// serialization requires (RFC 7515 section 2).
+#[cfg(feature = "jwt")]
+pub(crate) fn encode_url(input: &[u8]) -> String {
+    encode_with(input, URL_ALPHABET, false)
+}
+
+#[cfg(any(feature = "capture", feature = "distributed", feature = "jwt"))]
+fn encode_with(input: &[u8], alphabet: &[u8; 64], pad: bool) -> String {
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let b1 = chunk.get(1).copied().unwrap_or(0);
         let b2 = chunk.get(2).copied().unwrap_or(0);
         let n = (u32::from(chunk[0]) << 16) | (u32::from(b1) << 8) | u32::from(b2);
-        let sextet = |shift: u32| char::from(ALPHABET[((n >> shift) & 63) as usize]);
+        let sextet = |shift: u32| char::from(alphabet[((n >> shift) & 63) as usize]);
         out.push(sextet(18));
         out.push(sextet(12));
-        out.push(if chunk.len() > 1 { sextet(6) } else { '=' });
-        out.push(if chunk.len() > 2 { sextet(0) } else { '=' });
+        if chunk.len() > 1 {
+            out.push(sextet(6));
+        } else if pad {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(sextet(0));
+        } else if pad {
+            out.push('=');
+        }
     }
     out
 }
@@ -25,7 +49,7 @@ pub(crate) fn encode(input: &[u8]) -> String {
 /// Decodes padded standard base64, as written by `encode`. Returns `None`
 /// for any other input: a wrong length, a character outside the alphabet or
 /// misplaced padding.
-#[cfg(any(feature = "mock", feature = "distributed"))]
+#[cfg(any(feature = "mock", feature = "distributed", feature = "jwt"))]
 pub(crate) fn decode(input: &str) -> Option<Vec<u8>> {
     let input = input.as_bytes();
     if !input.len().is_multiple_of(4) {
@@ -54,7 +78,7 @@ pub(crate) fn decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-#[cfg(any(feature = "mock", feature = "distributed"))]
+#[cfg(any(feature = "mock", feature = "distributed", feature = "jwt"))]
 fn sextet(c: u8) -> Option<u32> {
     let value = match c {
         b'A'..=b'Z' => c - b'A',
@@ -109,5 +133,24 @@ mod tests {
             assert_eq!(encode(input.as_bytes()), expected, "{input:?}");
         }
         assert_eq!(encode(&[0x00, 0xff, 0xfe, 0x80]), "AP/+gA==");
+    }
+
+    #[cfg(feature = "jwt")]
+    #[test]
+    fn encodes_unpadded_base64url() {
+        let vectors = [
+            ("", ""),
+            ("f", "Zg"),
+            ("fo", "Zm8"),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg"),
+            ("fooba", "Zm9vYmE"),
+            ("foobar", "Zm9vYmFy"),
+        ];
+        for (input, expected) in vectors {
+            assert_eq!(encode_url(input.as_bytes()), expected, "{input:?}");
+        }
+        assert_eq!(encode_url(&[0x00, 0xff, 0xfe, 0x80]), "AP_-gA");
+        assert_eq!(encode_url(&[0xfb, 0xff]), "-_8");
     }
 }

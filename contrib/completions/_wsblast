@@ -48,16 +48,25 @@ graphql-ws\:"Apollo GraphQL WS protocol (subscriptions)"))' \
 '--max-error-rate=[SLO threshold\: Maximum acceptable error rate fraction (e.g., '\''0.01'\'' for 1%, '\''0.001'\'' for 0.1%)]:FLOAT:_default' \
 '--min-throughput=[SLO threshold\: Minimum required message throughput (messages/sec)]:RPS:_default' \
 '--max-generator-lag=[SLO threshold\: Maximum p99 wake-up lag of the load generator itself (e.g. '\''20ms'\''); a breach means the latency numbers include client-side delay]:DURATION:_default' \
-'--auth-type=[Authentication type (none, static, apikey)]:TYPE:((none\:"No authentication"
+'--auth-type=[Authentication type]:TYPE:((none\:"No authentication"
 static\:"Static bearer token"
-apikey\:"API Key"))' \
+apikey\:"API Key"
+jwt\:"JWT signed by wsblast with the --auth-jwt-* options (needs the jwt feature)"))' \
 '--auth-token=[Static token for auth (used with --auth-type static)]:TOKEN:_default' \
 '(--auth-token --auth-apikey)--auth-token-cmd=[Command whose trimmed stdout is the token or API key, run through the platform shell before the run (replaces --auth-token or --auth-apikey)]:COMMAND:_default' \
 '--auth-token-cmd-timeout=[Time allowed for each run of --auth-token-cmd \[default\: 30s\]]:DURATION:_default' \
 '--auth-token-refresh=[Re-run --auth-token-cmd every DURATION during the run; new handshakes use the latest token]:DURATION:_default' \
-'--auth-header=[Header name for static token (used with --auth-type static)]:HEADER:_default' \
+'--auth-header=[Header that carries the token (used with every --auth-type except apikey)]:HEADER:_default' \
 '--auth-apikey=[API Key (used with --auth-type apikey)]:KEY:_default' \
 '--auth-apikey-header=[API Key header name (used with --auth-type apikey)]:HEADER:_default' \
+'--auth-jwt-alg=[JWT signing algorithm (used with --auth-type jwt) \[default\: HS256\]]:ALG:((HS256\:"HMAC with SHA-256"
+HS384\:"HMAC with SHA-384"
+HS512\:"HMAC with SHA-512"
+RS256\:"RSASSA-PKCS1-v1_5 with SHA-256"
+ES256\:"ECDSA with P-256 and SHA-256"))' \
+'--auth-jwt-key=[File with the JWT signing key\: the secret bytes for HS*, a PEM private key for RS256 and ES256; or set WSBLAST_JWT_KEY_FILE]:FILE:_files' \
+'--auth-jwt-claims=[JSON object of claims added to every JWT (e.g. '\''{"sub"\:"loadtest","aud"\:"ws"}'\'')]:JSON:_default' \
+'--auth-jwt-ttl=[JWT lifetime, which sets iat, nbf and exp; tokens are re-signed before they expire \[default\: 5m\]]:DURATION:_default' \
 '--graphql-ws-operation-name=[GraphQL WS operation name]:NAME:_default' \
 '--graphql-ws-operation=[GraphQL WS operation (query/mutation/subscription)]:OPERATION:_default' \
 '--graphql-ws-variables=[GraphQL WS variables (JSON)]:JSON:_default' \
@@ -91,6 +100,7 @@ graceful\:"Sends a Close frame with code 1001 (going away), then closes the TCP 
 '--agent-timeout=[Time the agents get to become ready before the start, and to send their results after the end of the run]:DURATION:_default' \
 '--agent-ca=[PEM file of CA certificates to trust for wss\:// agents, in addition to the platform'\''s roots]:PEM:_files' \
 '--binary[Send payload as WebSocket binary frames instead of text frames]' \
+'--auth-jwt-per-connection[Sign a fresh JWT with a unique jti for every connection attempt instead of sharing one token]' \
 '--fail-on-regression[Fail on regression (exit code 2)]' \
 '--tui[Launch interactive terminal dashboard (TUI)]' \
 '--no-progress[Suppress interactive progress bar (recommended for non-interactive CI/CD runners)]' \

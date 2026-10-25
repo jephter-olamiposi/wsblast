@@ -1,11 +1,16 @@
-//! Static token and API key authentication for WebSocket handshakes, with the
-//! credential given on the command line or printed by a command.
+//! Handshake authentication: a static token or API key given on the command
+//! line or printed by a command, and, with the `jwt` feature, tokens that
+//! wsblast signs itself.
 //!
 //! A credential is turned into one handshake header before the run starts.
-//! When the credential comes from `--auth-token-cmd` with
-//! `--auth-token-refresh`, the header lives in a [`LiveAuthHeader`] that a
-//! background thread updates and that every handshake reads; otherwise it is
-//! merged into the static handshake headers.
+//! When the credential changes during the run (`--auth-token-cmd` with
+//! `--auth-token-refresh`, or a JWT), the header lives in a
+//! [`LiveAuthHeader`] that every handshake attempt reads and that a
+//! background thread keeps current; otherwise it is merged into the static
+//! handshake headers.
+
+#[cfg(feature = "jwt")]
+pub(crate) mod jwt;
 
 use crate::config::{AuthConfig, AuthScheme, Credential, TokenCommand};
 use crate::error::ConfigError;
@@ -24,36 +29,57 @@ const POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// the gap are counted and reported with the next warning.
 const WARNING_GAP: Duration = Duration::from_secs(60);
 
-/// The authentication header of a run whose token is refreshed while the
+/// The authentication header of a run whose credential changes while the
 /// run is going. Clones share the current value.
 #[derive(Clone)]
 pub(crate) struct LiveAuthHeader {
     name: HeaderName,
-    value: Arc<RwLock<HeaderValue>>,
+    source: Source,
+}
+
+#[derive(Clone)]
+enum Source {
+    /// One value for every handshake, replaced by a refresh thread.
+    Shared(Arc<RwLock<HeaderValue>>),
+    /// A JWT signed for each handshake attempt.
+    #[cfg(feature = "jwt")]
+    PerAttempt(Arc<jwt::PerAttempt>),
 }
 
 impl LiveAuthHeader {
     fn new(name: HeaderName, value: HeaderValue) -> Self {
         Self {
             name,
-            value: Arc::new(RwLock::new(value)),
+            source: Source::Shared(Arc::new(RwLock::new(value))),
         }
     }
 
     /// Sets the header on a handshake request, replacing any value it had.
-    /// The read lock is held only to clone the value, which shares its
-    /// bytes instead of copying them.
+    /// A shared value is read under the lock only to clone it, which shares
+    /// its bytes instead of copying them.
     pub(crate) fn apply(&self, headers: &mut HeaderMap) {
-        let value = self
-            .value
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+        let value = match &self.source {
+            Source::Shared(value) => value.read().unwrap_or_else(PoisonError::into_inner).clone(),
+            #[cfg(feature = "jwt")]
+            Source::PerAttempt(signer) => match signer.header_value() {
+                Some(value) => value,
+                None => {
+                    headers.remove(&self.name);
+                    return;
+                }
+            },
+        };
         headers.insert(self.name.clone(), value);
     }
 
     fn set(&self, value: HeaderValue) {
-        *self.value.write().unwrap_or_else(PoisonError::into_inner) = value;
+        match &self.source {
+            Source::Shared(shared) => {
+                *shared.write().unwrap_or_else(PoisonError::into_inner) = value;
+            }
+            #[cfg(feature = "jwt")]
+            Source::PerAttempt(_) => {}
+        }
     }
 }
 
@@ -66,19 +92,27 @@ impl fmt::Debug for LiveAuthHeader {
     }
 }
 
-/// Stops the background token refresh when dropped.
+/// Stops the background token refresh, if there is one, when dropped.
 #[derive(Debug)]
 pub(crate) struct RefreshGuard {
     // Dropping the sender wakes the refresh thread, which then exits.
-    _stop: mpsc::Sender<()>,
+    _stop: Option<mpsc::Sender<()>>,
+}
+
+impl RefreshGuard {
+    /// A guard for a live header that no thread refreshes.
+    #[cfg(feature = "jwt")]
+    fn none() -> Self {
+        Self { _stop: None }
+    }
 }
 
 /// Resolves `auth` into its handshake header before the run starts.
 ///
 /// A static credential, or a command credential without refresh, is
-/// merged into `headers`. A command credential with refresh is removed
-/// from `headers` and returned as a [`LiveAuthHeader`] together with the
-/// guard of the thread that refreshes it.
+/// merged into `headers`. A credential that changes during the run is
+/// removed from `headers` and returned as a [`LiveAuthHeader`] together
+/// with the guard of the thread that refreshes it.
 pub(crate) fn prepare_auth(
     auth: &AuthConfig,
     headers: &mut HeaderMap,
@@ -100,6 +134,11 @@ pub(crate) fn prepare_auth(
         Credential::Command(command) => {
             fetch_header(auth.scheme, &name, command).map_err(ConfigError::AuthTokenCommand)?
         }
+        #[cfg(feature = "jwt")]
+        Credential::Jwt(config) => {
+            headers.remove(&name);
+            return jwt::prepare(config, name).map(Some);
+        }
     };
 
     if let Credential::Command(command) = &auth.credential
@@ -107,7 +146,15 @@ pub(crate) fn prepare_auth(
     {
         headers.remove(&name);
         let live = LiveAuthHeader::new(name.clone(), value);
-        let guard = spawn_refresh(auth.scheme, name, command.clone(), every, live.clone());
+        let scheme = auth.scheme;
+        let command = command.clone();
+        let guard = spawn_refresh_loop(
+            "--auth-token-cmd refresh",
+            live.clone(),
+            every,
+            every,
+            move || Ok((fetch_header(scheme, &name, &command)?, Some(every))),
+        );
         return Ok(Some((live, guard)));
     }
     headers.insert(name, value);
@@ -241,51 +288,81 @@ fn failure(status: ExitStatus, stderr: &[u8]) -> String {
     }
 }
 
-/// Re-runs the token command every `command.refresh` on a plain thread,
-/// so a slow command never occupies the runtime and never delays process
-/// exit. The wait starts when the previous run of the command finishes.
-fn spawn_refresh(
-    scheme: AuthScheme,
-    name: HeaderName,
-    command: TokenCommand,
-    every: Duration,
+/// What one refresh produced: the new header value and the time until
+/// the next refresh, or `None` when the value no longer needs refreshing.
+type Refreshed = Result<(HeaderValue, Option<Duration>), String>;
+
+/// Runs `refresh` on a plain thread, first after `first` and then after
+/// the delay each refresh returns, so a slow refresh never occupies the
+/// runtime and never delays process exit. A failed refresh keeps the
+/// previous value, warns (rate limited), and is retried after `retry`.
+fn spawn_refresh_loop(
+    what: &'static str,
     live: LiveAuthHeader,
+    first: Duration,
+    retry: Duration,
+    refresh: impl FnMut() -> Refreshed + Send + 'static,
 ) -> RefreshGuard {
     let (stop, stopped) = mpsc::channel::<()>();
-    std::thread::spawn(move || {
-        let mut warnings = WarningLimiter::new(WARNING_GAP);
-        loop {
-            match stopped.recv_timeout(every) {
-                Err(RecvTimeoutError::Timeout) => {}
-                _ => return,
-            }
-            match fetch_header(scheme, &name, &command) {
-                Ok(value) => {
-                    live.set(value);
-                    warnings.succeeded();
-                }
-                Err(err) => {
-                    if let Some(suppressed) = warnings.failed(Instant::now()) {
-                        warn_refresh_failed(&err, suppressed);
-                    }
-                }
-            }
-        }
-    });
-    RefreshGuard { _stop: stop }
+    std::thread::spawn(move || refresh_loop(&stopped, what, &live, first, retry, refresh));
+    RefreshGuard { _stop: Some(stop) }
 }
 
-fn warn_refresh_failed(err: &str, suppressed: u64) {
+/// The body of a refresh thread; returns when `stopped` is signalled or
+/// disconnected. Each wait starts when the previous refresh finished.
+fn refresh_loop(
+    stopped: &mpsc::Receiver<()>,
+    what: &str,
+    live: &LiveAuthHeader,
+    first: Duration,
+    retry: Duration,
+    mut refresh: impl FnMut() -> Refreshed,
+) {
+    let mut warnings = WarningLimiter::new(WARNING_GAP);
+    let mut wait = first;
+    loop {
+        match stopped.recv_timeout(wait) {
+            Err(RecvTimeoutError::Timeout) => {}
+            _ => return,
+        }
+        match refresh() {
+            Ok((value, next)) => {
+                live.set(value);
+                warnings.succeeded();
+                match next {
+                    Some(next) => wait = next,
+                    None => return,
+                }
+            }
+            Err(err) => {
+                if let Some(suppressed) = warnings.failed(Instant::now()) {
+                    warn(
+                        &format!("{what} failed: {err}; new handshakes keep the previous token"),
+                        suppressed,
+                    );
+                }
+                wait = retry;
+            }
+        }
+    }
+}
+
+/// How long before a credential expires it is replaced: a fifth of its
+/// lifetime, at most one minute.
+#[cfg(feature = "jwt")]
+fn refresh_margin(lifetime: Duration) -> Duration {
+    (lifetime / 5).min(Duration::from_secs(60))
+}
+
+/// Prints a warning to stderr, with the count of earlier ones not shown.
+fn warn(message: &str, suppressed: u64) {
     use colored::Colorize;
     let earlier = if suppressed > 0 {
         format!(" ({suppressed} earlier failures not shown)")
     } else {
         String::new()
     };
-    eprintln!(
-        "{} --auth-token-cmd refresh failed: {err}; new handshakes keep the previous token{earlier}",
-        "Warning:".bold().yellow(),
-    );
+    eprintln!("{} {message}{earlier}", "Warning:".bold().yellow());
 }
 
 /// Lets one warning through per failure, but at most one per `gap`,
@@ -343,12 +420,16 @@ impl LiveAuthHeader {
         &self.name
     }
 
-    /// The current value.
+    /// The current value. A header signed per attempt has no shared value,
+    /// so this signs one; the coordinator rejects that mode with agents.
     pub(crate) fn current(&self) -> HeaderValue {
-        self.value
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        match &self.source {
+            Source::Shared(value) => value.read().unwrap_or_else(PoisonError::into_inner).clone(),
+            #[cfg(feature = "jwt")]
+            Source::PerAttempt(signer) => signer
+                .header_value()
+                .unwrap_or_else(|| HeaderValue::from_static("")),
+        }
     }
 
     /// Replaces the value for every later handshake.

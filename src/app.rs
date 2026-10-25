@@ -515,6 +515,15 @@ fn check_distributed_options(cli: &Cli) -> Result<()> {
             "--chaos-* cannot be used with --agents in this version of wsblast".to_string(),
         )));
     }
+    // A token re-signed before expiry is pushed to the agents like a
+    // refreshed one. A token signed per connection attempt would need the
+    // signing key on every agent, and the key stays on the coordinator.
+    #[cfg(feature = "auth")]
+    if cli.auth_jwt_per_connection {
+        return Err(WsBlastError::Config(ConfigError::UnsupportedOption(
+            "--auth-jwt-per-connection cannot be used with --agents: the signing key stays on the coordinator; without the flag the shared token is re-signed before expiry and pushed to the agents".to_string(),
+        )));
+    }
     Ok(())
 }
 

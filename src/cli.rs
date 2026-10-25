@@ -167,7 +167,7 @@ pub(crate) struct Cli {
     #[arg(long = "max-generator-lag", value_name = "DURATION")]
     pub max_generator_lag: Option<String>,
 
-    /// Authentication type (none, static, apikey)
+    /// Authentication type
     #[cfg(feature = "auth")]
     #[arg(long = "auth-type", value_name = "TYPE", value_enum, default_value_t = AuthType::None)]
     pub auth_type: AuthType,
@@ -204,7 +204,7 @@ pub(crate) struct Cli {
     )]
     pub auth_token_refresh: Option<String>,
 
-    /// Header name for static token (used with --auth-type static)
+    /// Header that carries the token (used with every --auth-type except apikey)
     #[cfg(feature = "auth")]
     #[arg(
         long = "auth-header",
@@ -226,6 +226,36 @@ pub(crate) struct Cli {
         default_value = "X-API-Key"
     )]
     pub auth_apikey_header: String,
+
+    /// JWT signing algorithm (used with --auth-type jwt) [default: HS256]
+    #[cfg(feature = "auth")]
+    #[arg(
+        long = "auth-jwt-alg",
+        value_name = "ALG",
+        value_enum,
+        ignore_case = true
+    )]
+    pub auth_jwt_alg: Option<JwtAlg>,
+
+    /// File with the JWT signing key: the secret bytes for HS*, a PEM private key for RS256 and ES256; or set WSBLAST_JWT_KEY_FILE
+    #[cfg(feature = "auth")]
+    #[arg(long = "auth-jwt-key", value_name = "FILE")]
+    pub auth_jwt_key: Option<PathBuf>,
+
+    /// JSON object of claims added to every JWT (e.g. '{"sub":"loadtest","aud":"ws"}')
+    #[cfg(feature = "auth")]
+    #[arg(long = "auth-jwt-claims", value_name = "JSON")]
+    pub auth_jwt_claims: Option<String>,
+
+    /// JWT lifetime, which sets iat, nbf and exp; tokens are re-signed before they expire [default: 5m]
+    #[cfg(feature = "auth")]
+    #[arg(long = "auth-jwt-ttl", value_name = "DURATION")]
+    pub auth_jwt_ttl: Option<String>,
+
+    /// Sign a fresh JWT with a unique jti for every connection attempt instead of sharing one token
+    #[cfg(feature = "auth")]
+    #[arg(long = "auth-jwt-per-connection")]
+    pub auth_jwt_per_connection: bool,
 
     /// GraphQL WS operation name
     #[cfg(feature = "graphql-ws")]
@@ -553,6 +583,43 @@ pub(crate) enum AuthType {
     /// API Key
     #[value(name = "apikey", alias = "api-key")]
     ApiKey,
+    /// JWT signed by wsblast with the --auth-jwt-* options (needs the jwt feature)
+    Jwt,
+}
+
+/// JWS algorithm of `--auth-type jwt` tokens (RFC 7518 section 3.1).
+#[cfg(feature = "auth")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum JwtAlg {
+    /// HMAC with SHA-256
+    #[value(name = "HS256")]
+    Hs256,
+    /// HMAC with SHA-384
+    #[value(name = "HS384")]
+    Hs384,
+    /// HMAC with SHA-512
+    #[value(name = "HS512")]
+    Hs512,
+    /// RSASSA-PKCS1-v1_5 with SHA-256
+    #[value(name = "RS256")]
+    Rs256,
+    /// ECDSA with P-256 and SHA-256
+    #[value(name = "ES256")]
+    Es256,
+}
+
+#[cfg(feature = "jwt")]
+impl JwtAlg {
+    /// The `alg` header value.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Hs256 => "HS256",
+            Self::Hs384 => "HS384",
+            Self::Hs512 => "HS512",
+            Self::Rs256 => "RS256",
+            Self::Es256 => "ES256",
+        }
+    }
 }
 
 /// What each worker does on its connection.
