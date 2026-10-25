@@ -27,6 +27,10 @@ pub enum WsBlastError {
     /// A latency histogram could not be created or merged.
     #[error("Metrics initialization failed: {0}")]
     Metrics(String),
+
+    /// A distributed run could not start, or every agent was lost.
+    #[error("Distributed run failed: {0}")]
+    Distributed(String),
 }
 
 /// Reasons a configuration is rejected before load generation starts.

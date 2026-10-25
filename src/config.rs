@@ -70,9 +70,24 @@ pub struct LoadTestConfig {
     /// Where `--capture` records frames, if anywhere.
     #[cfg(feature = "capture")]
     pub(crate) capture: Option<crate::capture::CaptureConfig>,
+    /// On a distributed agent, which share of every stage target this
+    /// machine opens; `stages` keeps the targets of the whole run.
+    #[cfg(feature = "distributed")]
+    pub(crate) stage_share: Option<crate::distributed::Share>,
 }
 
 impl LoadTestConfig {
+    /// The number of connections a staged run should have open `elapsed`
+    /// after it started: the stage target, or this agent's share of it.
+    pub(crate) fn stage_target(&self, elapsed: Duration) -> usize {
+        let target = Stage::target_at(&self.stages, elapsed);
+        #[cfg(feature = "distributed")]
+        if let Some(share) = self.stage_share {
+            return share.of(target);
+        }
+        target
+    }
+
     /// Starts a configuration for `target_url` with the command-line defaults.
     ///
     /// The URL is parsed and checked by
@@ -587,6 +602,8 @@ impl LoadTestConfigBuilder {
                 path,
                 limit: self.capture_limit,
             }),
+            #[cfg(feature = "distributed")]
+            stage_share: None,
         })
     }
 }

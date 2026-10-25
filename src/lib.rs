@@ -95,6 +95,9 @@
 //! - `mock`: the `wsblast mock` test server and the [`mock`] module, to run
 //!   it in-process: echo with delays, jitter, stalls, rejected upgrades and
 //!   server closes, or replay of a capture file.
+//! - `distributed`: the [`distributed`] module, load agents and a
+//!   coordinator that generate one run's load from several machines and
+//!   merge their results exactly.
 //! - `auth` and `compare` add the `--auth-*` and `--compare` command-line
 //!   options and have no library API. Send credentials with
 //!   [`header`](LoadTestConfigBuilder::header).
@@ -115,6 +118,10 @@
     doc = "[`mock`]: https://docs.rs/wsblast/latest/wsblast/mock/index.html"
 )]
 #![cfg_attr(
+    not(feature = "distributed"),
+    doc = "[`distributed`]: https://docs.rs/wsblast/latest/wsblast/distributed/index.html"
+)]
+#![cfg_attr(
     feature = "capture",
     doc = "[`capture`]: LoadTestConfigBuilder::capture\n\
            [`capture_limit`]: LoadTestConfigBuilder::capture_limit"
@@ -131,13 +138,16 @@
 mod app;
 #[cfg(feature = "auth")]
 mod auth;
-#[cfg(any(feature = "capture", feature = "mock"))]
+#[cfg(any(feature = "capture", feature = "mock", feature = "distributed"))]
 mod base64;
 #[cfg(feature = "capture")]
 mod capture;
 mod cli;
 mod config;
 mod connect;
+#[cfg(feature = "distributed")]
+#[cfg_attr(docsrs, doc(cfg(feature = "distributed")))]
+pub mod distributed;
 mod error;
 #[cfg(any(feature = "prometheus", feature = "otel"))]
 mod export;
@@ -156,7 +166,9 @@ pub use cli::{OutputFormat, TestMode};
 pub use config::ScenarioConfig;
 pub use config::{LoadTestConfig, LoadTestConfigBuilder, ReplyMatch, SloThresholds, Stage};
 pub use error::{ConfigError, ErrorCategory, Result, WorkerError, WsBlastError};
-pub use metrics::{AggregatedMetrics, CaptureSummary, LatencyStats, LiveSnapshot};
+pub use metrics::{
+    AggregatedMetrics, CaptureSummary, DistributedSummary, LatencyStats, LiveSnapshot,
+};
 #[cfg(feature = "scenario")]
 pub use report::PhaseTarget;
 pub use report::{SloCheck, SloEvaluation, evaluate_slos, render_report};

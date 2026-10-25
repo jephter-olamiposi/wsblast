@@ -1,11 +1,12 @@
 //! Standard base64 (RFC 4648 section 4, with `=` padding), used for binary
-//! frames in capture files. Small enough that it is not worth a dependency.
+//! frames in capture files and payloads sent to distributed agents. Small
+//! enough that it is not worth a dependency.
 
-#[cfg(feature = "capture")]
+#[cfg(any(feature = "capture", feature = "distributed"))]
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Encodes `input` as padded standard base64.
-#[cfg(feature = "capture")]
+#[cfg(any(feature = "capture", feature = "distributed"))]
 pub(crate) fn encode(input: &[u8]) -> String {
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
@@ -24,7 +25,7 @@ pub(crate) fn encode(input: &[u8]) -> String {
 /// Decodes padded standard base64, as written by `encode`. Returns `None`
 /// for any other input: a wrong length, a character outside the alphabet or
 /// misplaced padding.
-#[cfg(feature = "mock")]
+#[cfg(any(feature = "mock", feature = "distributed"))]
 pub(crate) fn decode(input: &str) -> Option<Vec<u8>> {
     let input = input.as_bytes();
     if !input.len().is_multiple_of(4) {
@@ -53,7 +54,7 @@ pub(crate) fn decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-#[cfg(feature = "mock")]
+#[cfg(any(feature = "mock", feature = "distributed"))]
 fn sextet(c: u8) -> Option<u32> {
     let value = match c {
         b'A'..=b'Z' => c - b'A',

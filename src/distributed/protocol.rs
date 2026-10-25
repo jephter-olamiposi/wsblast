@@ -1,0 +1,998 @@
+//! The control protocol between a coordinator and its agents: the messages,
+//! the wire forms of a configuration and of a result, how a run is split
+//! between agents, and the token check.
+//!
+//! Every message is one JSON text frame with a `type` field. The `hello`
+//! exchange carries [`PROTOCOL_VERSION`] and stays the same in every version,
+//! so two builds that speak different versions always fail with a clear
+//! message instead of misreading each other. docs/distributed.md describes
+//! the sequence.
+
+use crate::cli::TestMode;
+use crate::config::{LoadTestConfig, PayloadConfig, ReplyMatch, Stage};
+use crate::error::{ConfigError, ErrorCategory, Result, WsBlastError};
+use crate::metrics::{LiveSnapshot, MetricsTotals};
+use crate::timeseries::{SeriesPart, TimeSeries, interval_histogram};
+use clap::ValueEnum;
+use hdrhistogram::Histogram;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
+
+/// Version of the control protocol. Raised on any incompatible change to a
+/// message after `hello`.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// The shortest agent token accepted.
+pub const MIN_TOKEN_LEN: usize = 16;
+
+/// Environment variable that holds the agent token for `wsblast agent` and
+/// for a coordinator run with `--agents`.
+pub const TOKEN_ENV: &str = "WSBLAST_AGENT_TOKEN";
+
+/// One control message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum Message {
+    /// First message in each direction: the protocol version and the
+    /// sender's wsblast version.
+    Hello { protocol: u32, version: String },
+    /// Coordinator to agent: this agent's share of the run. The agent waits
+    /// up to `start_timeout` for `start` once it is ready.
+    Prepare {
+        config: Box<WireConfig>,
+        start_timeout: Duration,
+    },
+    /// Agent to coordinator: the configuration is valid, the target is
+    /// resolved and the agent waits for `start`.
+    Ready { connections: usize },
+    /// Coordinator to agent: start the run now.
+    Start,
+    /// Agent to coordinator, every second while the run lasts.
+    Snapshot {
+        elapsed: Duration,
+        live: WireSnapshot,
+    },
+    /// Coordinator to agent: end the run early (Ctrl+C on the coordinator).
+    /// Before `start` it cancels the test.
+    Stop,
+    /// Agent to coordinator: the outcome of the run. Always the last message
+    /// an agent sends for a test.
+    Result { result: Box<WireResult> },
+    /// Either direction: the test cannot go on. The sender closes the
+    /// connection after it.
+    Error { message: String },
+}
+
+impl Message {
+    /// The message as a text frame.
+    pub(crate) fn encode(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            r#"{"type":"error","message":"message could not be encoded"}"#.to_string()
+        })
+    }
+
+    /// Parses a text frame.
+    pub(crate) fn decode(text: &str) -> std::result::Result<Self, String> {
+        serde_json::from_str(text).map_err(|e| format!("malformed control message: {e}"))
+    }
+
+    /// The `type` of the message, for error messages.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Hello { .. } => "hello",
+            Self::Prepare { .. } => "prepare",
+            Self::Ready { .. } => "ready",
+            Self::Start => "start",
+            Self::Snapshot { .. } => "snapshot",
+            Self::Stop => "stop",
+            Self::Result { .. } => "result",
+            Self::Error { .. } => "error",
+        }
+    }
+
+    /// This build's hello.
+    pub(crate) fn hello() -> Self {
+        Self::Hello {
+            protocol: PROTOCOL_VERSION,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+}
+
+/// Checks the peer's hello against this build's protocol version.
+pub(crate) fn check_protocol(protocol: u32, version: &str) -> std::result::Result<(), String> {
+    if protocol == PROTOCOL_VERSION {
+        return Ok(());
+    }
+    Err(format!(
+        "protocol version mismatch: this is wsblast {} speaking protocol {PROTOCOL_VERSION}, the peer is wsblast {version} speaking protocol {protocol}; run the same wsblast version on the coordinator and every agent",
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
+/// Compares a presented token with the expected one in time that depends
+/// only on the expected token's length, so the comparison does not reveal
+/// how many leading bytes were right.
+pub(crate) fn tokens_match(expected: &str, presented: &str) -> bool {
+    let expected = expected.as_bytes();
+    let presented = presented.as_bytes();
+    let mut diff = u8::from(expected.len() != presented.len());
+    for (i, byte) in expected.iter().enumerate() {
+        let other = presented.get(i).copied().unwrap_or(!*byte);
+        diff |= byte ^ other;
+    }
+    std::hint::black_box(diff) == 0
+}
+
+/// Extracts the token of an `Authorization: Bearer <token>` header value.
+pub(crate) fn bearer_token(header: &str) -> Option<&str> {
+    let (scheme, token) = header.trim().split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| token.trim())
+        .filter(|token| !token.is_empty())
+}
+
+/// Rejects a token shorter than [`MIN_TOKEN_LEN`].
+pub(crate) fn validate_token(token: &str) -> Result<()> {
+    if token.chars().count() < MIN_TOKEN_LEN {
+        return Err(ConfigError::InvalidOption(format!(
+            "the agent token must be at least {MIN_TOKEN_LEN} characters long; generate one with e.g. `openssl rand -hex 32`"
+        ))
+        .into());
+    }
+    if token.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(ConfigError::InvalidOption(
+            "the agent token must not contain whitespace or control characters".to_string(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// The part of a total that agent `index` of `agents` takes: the total
+/// divided as evenly as possible, with the remainder going to the first
+/// agents, one each.
+pub(crate) fn split(total: u64, index: usize, agents: usize) -> u64 {
+    let agents = agents.max(1) as u64;
+    total / agents + u64::from((index as u64) < total % agents)
+}
+
+/// Which share of every stage target an agent opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Share {
+    /// Position of the agent in `--agents`, from 0.
+    pub(crate) index: usize,
+    /// Number of agents.
+    pub(crate) agents: usize,
+}
+
+impl Share {
+    /// This agent's part of `total` connections. The parts of all agents add
+    /// up to `total` for every value, so a staged run follows the requested
+    /// profile at every moment, not only at the ends of the stages.
+    pub(crate) fn of(self, total: usize) -> usize {
+        split(total as u64, self.index, self.agents) as usize
+    }
+}
+
+/// A stage on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireStage {
+    pub(crate) duration: Duration,
+    pub(crate) target: usize,
+}
+
+/// A payload on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum WirePayload {
+    /// A text payload, possibly a template with placeholders.
+    Text { text: String },
+    /// A binary payload, standard base64 with padding.
+    Binary { base64: String },
+}
+
+/// GraphQL WS settings on the wire.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct WireGraphql {
+    pub(crate) operation: String,
+    pub(crate) operation_name: Option<String>,
+    pub(crate) variables: Option<serde_json::Value>,
+    pub(crate) extensions: Option<serde_json::Value>,
+}
+
+/// One agent's share of a run, as the coordinator sends it.
+///
+/// A dedicated type, so the wire format stays the same when
+/// [`LoadTestConfig`] changes, and so only the settings an agent needs
+/// travel: SLOs, report settings and file paths stay on the coordinator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct WireConfig {
+    pub(crate) target: String,
+    /// The `--mode` value, as spelled on the command line.
+    pub(crate) mode: String,
+    /// Connections this agent opens; for a staged run, its share of the
+    /// highest stage target.
+    pub(crate) connections: usize,
+    pub(crate) ramp_rate: u64,
+    pub(crate) duration: Duration,
+    /// The stages of the whole run; the agent opens `stage_share` of each
+    /// target.
+    pub(crate) stages: Vec<WireStage>,
+    pub(crate) stage_share: Option<Share>,
+    pub(crate) max_requests: Option<u64>,
+    pub(crate) rate_per_conn: u64,
+    pub(crate) payload: WirePayload,
+    /// Handshake headers as name and value, including resolved credentials.
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) subprotocol: Option<String>,
+    pub(crate) connect_timeout: Duration,
+    pub(crate) message_timeout: Duration,
+    pub(crate) ping_interval: Duration,
+    /// The `--match` value, as spelled on the command line.
+    pub(crate) reply_match: String,
+    pub(crate) reconnect: bool,
+    pub(crate) graphql: Option<WireGraphql>,
+}
+
+fn unsupported(message: impl Into<String>) -> WsBlastError {
+    ConfigError::UnsupportedOption(message.into()).into()
+}
+
+/// Rejects settings a distributed run does not support in this version.
+pub(crate) fn check_supported(config: &LoadTestConfig) -> Result<()> {
+    #[cfg(feature = "capture")]
+    if config.capture.is_some() {
+        return Err(unsupported(
+            "--capture is not supported with --agents; capture on a single machine instead",
+        ));
+    }
+    #[cfg(feature = "auth")]
+    if config.live_auth.is_some() {
+        return Err(unsupported(
+            "--auth-token-refresh is not supported with --agents",
+        ));
+    }
+    if config.tui {
+        return Err(unsupported(
+            "--tui is not supported with --agents; the coordinator prints progress lines instead",
+        ));
+    }
+    Ok(())
+}
+
+/// Splits `config` between `agents` agents, in `--agents` order.
+///
+/// Connections, `--requests` and `--ramp-rate` are divided with [`split`];
+/// the message rate per connection is unchanged, so the total rate is the
+/// same as on one machine. A staged run sends every agent the whole profile
+/// and its [`Share`].
+///
+/// # Errors
+///
+/// Returns a configuration error when a share would be zero (more agents
+/// than connections, requests or ramp rate), or when a setting cannot be
+/// sent.
+pub(crate) fn plan(config: &LoadTestConfig, agents: usize) -> Result<Vec<WireConfig>> {
+    if agents == 0 {
+        return Err(ConfigError::InvalidOption("--agents lists no agent".to_string()).into());
+    }
+    check_supported(config)?;
+    if config.connections < agents {
+        let what = if config.stages.is_empty() {
+            format!("{} connections", config.connections)
+        } else {
+            format!("a highest stage target of {}", config.connections)
+        };
+        return Err(ConfigError::InvalidOption(format!(
+            "{agents} agents cannot share {what}: every agent needs at least one connection; use fewer agents or more connections"
+        ))
+        .into());
+    }
+    if let Some(requests) = config.max_requests
+        && requests < agents as u64
+    {
+        return Err(ConfigError::InvalidOption(format!(
+            "{agents} agents cannot share -n {requests}: every agent needs at least one request"
+        ))
+        .into());
+    }
+    if config.ramp_rate > 0 && config.ramp_rate < agents as u64 {
+        return Err(ConfigError::InvalidOption(format!(
+            "{agents} agents cannot share --ramp-rate {}: every agent needs a ramp rate of at least 1 per second",
+            config.ramp_rate
+        ))
+        .into());
+    }
+
+    let base = WireConfig::from_config(config)?;
+    Ok((0..agents)
+        .map(|index| {
+            let share = Share { index, agents };
+            let mut wire = base.clone();
+            wire.connections = share.of(config.connections);
+            wire.ramp_rate = split(config.ramp_rate, index, agents);
+            wire.max_requests = config
+                .max_requests
+                .map(|requests| split(requests, index, agents));
+            wire.stage_share = (!config.stages.is_empty()).then_some(share);
+            wire
+        })
+        .collect())
+}
+
+/// The command-line spelling of `mode`.
+fn mode_name(mode: TestMode) -> String {
+    mode.to_possible_value()
+        .map(|value| value.get_name().to_string())
+        .unwrap_or_default()
+}
+
+impl WireConfig {
+    /// The settings of `config` that agents need, unsplit.
+    pub(crate) fn from_config(config: &LoadTestConfig) -> Result<Self> {
+        let payload = match &config.payload {
+            PayloadConfig::StaticText(text) => WirePayload::Text {
+                text: text.as_str().to_string(),
+            },
+            PayloadConfig::DynamicText(text) => WirePayload::Text { text: text.clone() },
+            PayloadConfig::Binary(bytes) => WirePayload::Binary {
+                base64: crate::base64::encode(bytes),
+            },
+        };
+        let headers = config
+            .headers
+            .iter()
+            .map(|(name, value)| {
+                value
+                    .to_str()
+                    .map(|value| (name.as_str().to_string(), value.to_string()))
+                    .map_err(|_| {
+                        WsBlastError::from(ConfigError::InvalidHeader(format!(
+                            "the value of header '{name}' is not visible ASCII and cannot be sent to agents"
+                        )))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        #[cfg(feature = "graphql-ws")]
+        let graphql = config.graphql_ws.as_ref().map(|graphql| WireGraphql {
+            operation: graphql.operation.clone(),
+            operation_name: graphql.operation_name.clone(),
+            variables: graphql.variables.clone(),
+            extensions: graphql.extensions.clone(),
+        });
+        #[cfg(not(feature = "graphql-ws"))]
+        let graphql = None;
+        Ok(Self {
+            target: config.target_url.to_string(),
+            mode: mode_name(config.mode),
+            connections: config.connections,
+            ramp_rate: config.ramp_rate,
+            duration: config.duration,
+            stages: config
+                .stages
+                .iter()
+                .map(|stage| WireStage {
+                    duration: stage.duration,
+                    target: stage.target,
+                })
+                .collect(),
+            stage_share: None,
+            max_requests: config.max_requests,
+            rate_per_conn: config.rate_per_conn,
+            payload,
+            headers,
+            subprotocol: config.subprotocol.clone(),
+            connect_timeout: config.connect_timeout,
+            message_timeout: config.message_timeout,
+            ping_interval: config.ping_interval,
+            reply_match: config.reply_match.flag_value(),
+            reconnect: !config.no_reconnect,
+            graphql,
+        })
+    }
+
+    /// Builds the agent's configuration with the same validation as the
+    /// command line.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error [`LoadTestConfigBuilder::build`] returns, or a
+    /// configuration error for a mode or setting this build does not
+    /// support.
+    ///
+    /// [`LoadTestConfigBuilder::build`]: crate::LoadTestConfigBuilder::build
+    pub(crate) fn into_config(self) -> Result<LoadTestConfig> {
+        let mode = TestMode::from_str(&self.mode, false).map_err(|_| {
+            unsupported(format!(
+                "mode '{}' is not supported by this agent's build of wsblast",
+                self.mode
+            ))
+        })?;
+        let reply_match: ReplyMatch = self.reply_match.parse()?;
+        let mut builder = LoadTestConfig::builder(self.target)
+            .mode(mode)
+            .connections(self.connections)
+            .ramp_rate(self.ramp_rate)
+            .duration(self.duration)
+            .stages(
+                self.stages
+                    .iter()
+                    .map(|stage| Stage::new(stage.duration, stage.target))
+                    .collect(),
+            )
+            .rate_per_connection(self.rate_per_conn)
+            .connect_timeout(self.connect_timeout)
+            .message_timeout(self.message_timeout)
+            .ping_interval(self.ping_interval)
+            .reply_match(reply_match)
+            .reconnect(self.reconnect)
+            .progress(false);
+        if let Some(requests) = self.max_requests {
+            builder = builder.max_requests(requests);
+        }
+        builder = match self.payload {
+            WirePayload::Text { text } => builder.payload_text(text),
+            WirePayload::Binary { base64 } => {
+                let bytes = crate::base64::decode(&base64).ok_or_else(|| {
+                    ConfigError::InvalidOption("the binary payload is not valid base64".to_string())
+                })?;
+                builder.payload_binary(bytes)
+            }
+        };
+        for (name, value) in &self.headers {
+            builder = builder.header(name, value);
+        }
+        if let Some(subprotocol) = self.subprotocol {
+            builder = builder.subprotocol(subprotocol);
+        }
+        if let Some(graphql) = self.graphql {
+            #[cfg(feature = "graphql-ws")]
+            {
+                builder = builder.graphql_operation(graphql.operation);
+                if let Some(name) = graphql.operation_name {
+                    builder = builder.graphql_operation_name(name);
+                }
+                if let Some(variables) = graphql.variables {
+                    builder = builder.graphql_variables(variables);
+                }
+                if let Some(extensions) = graphql.extensions {
+                    builder = builder.graphql_extensions(extensions);
+                }
+            }
+            #[cfg(not(feature = "graphql-ws"))]
+            {
+                let _ = graphql;
+                return Err(unsupported(
+                    "GraphQL WS settings need the 'graphql-ws' feature, which this agent's build of wsblast does not include",
+                ));
+            }
+        }
+        let mut config = builder.build()?;
+        if let Some(share) = self.stage_share {
+            if share.agents == 0 || share.index >= share.agents {
+                return Err(ConfigError::InvalidOption(format!(
+                    "invalid stage share {} of {}",
+                    share.index, share.agents
+                ))
+                .into());
+            }
+            if config.stages.is_empty() {
+                return Err(
+                    ConfigError::InvalidOption("a stage share needs stages".to_string()).into(),
+                );
+            }
+            config.connections = share.of(config.connections);
+            config.stage_share = Some(share);
+        }
+        if config.connections == 0 {
+            return Err(ConfigError::ZeroConcurrency(0).into());
+        }
+        Ok(config)
+    }
+}
+
+/// The live counters on the wire.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireSnapshot {
+    pub(crate) active_connections: u64,
+    pub(crate) connections_established: u64,
+    pub(crate) connections_failed: u64,
+    pub(crate) reconnects: u64,
+    pub(crate) messages_sent: u64,
+    pub(crate) messages_received: u64,
+    pub(crate) bytes_sent: u64,
+    pub(crate) bytes_received: u64,
+    pub(crate) total_errors: u64,
+    pub(crate) unsolicited_frames: u64,
+}
+
+impl From<LiveSnapshot> for WireSnapshot {
+    fn from(snap: LiveSnapshot) -> Self {
+        Self {
+            active_connections: snap.active_connections,
+            connections_established: snap.connections_established,
+            connections_failed: snap.connections_failed,
+            reconnects: snap.reconnects,
+            messages_sent: snap.messages_sent,
+            messages_received: snap.messages_received,
+            bytes_sent: snap.bytes_sent,
+            bytes_received: snap.bytes_received,
+            total_errors: snap.total_errors,
+            unsolicited_frames: snap.unsolicited_frames,
+        }
+    }
+}
+
+impl WireSnapshot {
+    /// Adds another agent's counters.
+    pub(crate) fn add(&mut self, other: &Self) {
+        self.active_connections += other.active_connections;
+        self.connections_established += other.connections_established;
+        self.connections_failed += other.connections_failed;
+        self.reconnects += other.reconnects;
+        self.messages_sent += other.messages_sent;
+        self.messages_received += other.messages_received;
+        self.bytes_sent += other.bytes_sent;
+        self.bytes_received += other.bytes_received;
+        self.total_errors += other.total_errors;
+        self.unsolicited_frames += other.unsolicited_frames;
+    }
+}
+
+/// A histogram as its recorded values: `(value, count)` for every bucket
+/// with a count, where `value` is the highest value the bucket holds.
+/// Recording these into an empty histogram with the same bounds and
+/// precision gives the same buckets, so every percentile, the minimum, the
+/// maximum and the mean come out exactly as on the agent.
+pub(crate) type Sparse = Vec<(u64, u64)>;
+
+/// The recorded values of `hist`.
+pub(crate) fn to_sparse(hist: &Histogram<u64>) -> Sparse {
+    hist.iter_recorded()
+        .map(|value| {
+            (
+                value.value_iterated_to(),
+                value.count_since_last_iteration(),
+            )
+        })
+        .collect()
+}
+
+/// Records `sparse` into `empty`.
+pub(crate) fn from_sparse(
+    sparse: &[(u64, u64)],
+    mut empty: Histogram<u64>,
+) -> std::result::Result<Histogram<u64>, String> {
+    for &(value, count) in sparse {
+        empty
+            .record_n(value, count)
+            .map_err(|e| format!("histogram value {value} out of range: {e:?}"))?;
+    }
+    Ok(empty)
+}
+
+/// An agent's [`MetricsTotals`] on the wire.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct WireTotals {
+    pub(crate) messages_sent: u64,
+    pub(crate) messages_recv: u64,
+    pub(crate) bytes_sent: u64,
+    pub(crate) bytes_recv: u64,
+    pub(crate) reconnects: u64,
+    pub(crate) unsolicited_frames: u64,
+    pub(crate) sent_message_errors: u64,
+    pub(crate) interrupted: u64,
+    pub(crate) errors: HashMap<ErrorCategory, u64>,
+    pub(crate) handshake: Sparse,
+    pub(crate) rtt: Sparse,
+    pub(crate) response: Sparse,
+}
+
+impl From<&MetricsTotals> for WireTotals {
+    fn from(totals: &MetricsTotals) -> Self {
+        Self {
+            messages_sent: totals.messages_sent,
+            messages_recv: totals.messages_recv,
+            bytes_sent: totals.bytes_sent,
+            bytes_recv: totals.bytes_recv,
+            reconnects: totals.reconnects,
+            unsolicited_frames: totals.unsolicited_frames,
+            sent_message_errors: totals.sent_message_errors,
+            interrupted: totals.interrupted,
+            errors: totals.errors.clone(),
+            handshake: to_sparse(&totals.handshake),
+            rtt: to_sparse(&totals.rtt),
+            response: to_sparse(&totals.response),
+        }
+    }
+}
+
+impl WireTotals {
+    /// Rebuilds the totals, histograms included.
+    pub(crate) fn into_totals(self) -> std::result::Result<MetricsTotals, String> {
+        let empty = || MetricsTotals::empty_histogram().map_err(|e| e.to_string());
+        Ok(MetricsTotals {
+            handshake: from_sparse(&self.handshake, empty()?)?,
+            rtt: from_sparse(&self.rtt, empty()?)?,
+            response: from_sparse(&self.response, empty()?)?,
+            messages_sent: self.messages_sent,
+            messages_recv: self.messages_recv,
+            bytes_sent: self.bytes_sent,
+            bytes_recv: self.bytes_recv,
+            reconnects: self.reconnects,
+            unsolicited_frames: self.unsolicited_frames,
+            sent_message_errors: self.sent_message_errors,
+            interrupted: self.interrupted,
+            errors: self.errors,
+        })
+    }
+}
+
+/// The latency histogram of one interval of an agent's time series.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireInterval {
+    /// Interval index, counted from the agent's start.
+    pub(crate) index: u64,
+    pub(crate) values: Sparse,
+}
+
+/// The result of an agent's run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct WireResult {
+    /// The agent's own run time, from its start to the end of its run.
+    pub(crate) elapsed: Duration,
+    /// The agent's wall clock when it started, in milliseconds since the
+    /// Unix epoch. Informational: agents' clocks are not synchronised.
+    pub(crate) started_at_unix_ms: u64,
+    /// Connection slots the agent was configured to open.
+    pub(crate) connections: u64,
+    /// Slots its ramp had not reached when the run ended.
+    pub(crate) not_started: u64,
+    pub(crate) totals: WireTotals,
+    pub(crate) time_series: TimeSeries,
+    pub(crate) intervals: Vec<WireInterval>,
+}
+
+/// A decoded result, ready to merge.
+pub(crate) struct AgentResult {
+    pub(crate) elapsed: Duration,
+    pub(crate) started_at_unix_ms: u64,
+    pub(crate) connections: u64,
+    pub(crate) not_started: u64,
+    pub(crate) totals: MetricsTotals,
+    pub(crate) series: SeriesPart,
+}
+
+impl WireResult {
+    /// Packs an agent's merged totals and its time series.
+    pub(crate) fn new(
+        totals: &MetricsTotals,
+        outcome_meta: ResultMeta,
+        time_series: TimeSeries,
+        buckets: &BTreeMap<u64, Histogram<u64>>,
+    ) -> Self {
+        Self {
+            elapsed: outcome_meta.elapsed,
+            started_at_unix_ms: outcome_meta.started_at_unix_ms,
+            connections: outcome_meta.connections,
+            not_started: outcome_meta.not_started,
+            totals: WireTotals::from(totals),
+            time_series,
+            intervals: buckets
+                .iter()
+                .map(|(index, hist)| WireInterval {
+                    index: *index,
+                    values: to_sparse(hist),
+                })
+                .collect(),
+        }
+    }
+
+    /// Rebuilds the histograms.
+    pub(crate) fn decode(self) -> std::result::Result<AgentResult, String> {
+        let mut buckets = BTreeMap::new();
+        for interval in self.intervals {
+            let empty = interval_histogram().ok_or("cannot create an interval histogram")?;
+            buckets.insert(interval.index, from_sparse(&interval.values, empty)?);
+        }
+        Ok(AgentResult {
+            elapsed: self.elapsed,
+            started_at_unix_ms: self.started_at_unix_ms,
+            connections: self.connections,
+            not_started: self.not_started,
+            totals: self.totals.into_totals()?,
+            series: SeriesPart {
+                series: self.time_series,
+                buckets,
+            },
+        })
+    }
+}
+
+/// The counts of a result that do not come from the workers.
+pub(crate) struct ResultMeta {
+    pub(crate) elapsed: Duration,
+    pub(crate) started_at_unix_ms: u64,
+    pub(crate) connections: u64,
+    pub(crate) not_started: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::{AggregatedMetrics, LiveMetrics, WorkerMetrics};
+
+    fn config(builder: crate::LoadTestConfigBuilder) -> LoadTestConfig {
+        builder.build().expect("valid config")
+    }
+
+    #[test]
+    fn split_is_even_with_the_remainder_on_the_first_agents() {
+        let parts: Vec<u64> = (0..3).map(|i| split(10, i, 3)).collect();
+        assert_eq!(parts, [4, 3, 3]);
+        let parts: Vec<u64> = (0..4).map(|i| split(12, i, 4)).collect();
+        assert_eq!(parts, [3, 3, 3, 3]);
+        let parts: Vec<u64> = (0..3).map(|i| split(2, i, 3)).collect();
+        assert_eq!(parts, [1, 1, 0]);
+        for total in 0..200u64 {
+            for agents in 1..9 {
+                let sum: u64 = (0..agents).map(|i| split(total, i, agents)).sum();
+                assert_eq!(sum, total, "{total} over {agents}");
+            }
+        }
+    }
+
+    #[test]
+    fn plan_divides_connections_requests_and_ramp() {
+        let base = LoadTestConfig::builder("ws://127.0.0.1:9/")
+            .connections(10)
+            .ramp_rate(7)
+            .max_requests(101)
+            .rate_per_connection(20);
+        let shares = plan(&config(base), 3).unwrap();
+        let conns: Vec<usize> = shares.iter().map(|s| s.connections).collect();
+        assert_eq!(conns, [4, 3, 3]);
+        let ramps: Vec<u64> = shares.iter().map(|s| s.ramp_rate).collect();
+        assert_eq!(ramps, [3, 2, 2]);
+        let requests: Vec<Option<u64>> = shares.iter().map(|s| s.max_requests).collect();
+        assert_eq!(requests, [Some(34), Some(34), Some(33)]);
+        assert!(shares.iter().all(|s| s.rate_per_conn == 20));
+        assert!(shares.iter().all(|s| s.stage_share.is_none()));
+    }
+
+    #[test]
+    fn plan_rejects_zero_shares() {
+        let few = config(LoadTestConfig::builder("ws://127.0.0.1:9/").connections(2));
+        let err = plan(&few, 3).unwrap_err().to_string();
+        assert!(err.contains("3 agents cannot share 2 connections"), "{err}");
+
+        let requests = config(
+            LoadTestConfig::builder("ws://127.0.0.1:9/")
+                .connections(9)
+                .max_requests(2),
+        );
+        assert!(plan(&requests, 3).unwrap_err().to_string().contains("-n 2"));
+
+        let ramp = config(
+            LoadTestConfig::builder("ws://127.0.0.1:9/")
+                .connections(9)
+                .ramp_rate(2),
+        );
+        assert!(
+            plan(&ramp, 3)
+                .unwrap_err()
+                .to_string()
+                .contains("--ramp-rate 2")
+        );
+
+        let stages = config(
+            LoadTestConfig::builder("ws://127.0.0.1:9/")
+                .stages(vec![Stage::new(Duration::from_secs(1), 2)]),
+        );
+        assert!(
+            plan(&stages, 3)
+                .unwrap_err()
+                .to_string()
+                .contains("highest stage target of 2")
+        );
+    }
+
+    #[test]
+    fn staged_shares_add_up_to_the_target_at_every_moment() {
+        let stages = vec![
+            Stage::new(Duration::from_secs(10), 17),
+            Stage::new(Duration::from_secs(5), 17),
+            Stage::new(Duration::from_secs(7), 3),
+        ];
+        let whole = config(LoadTestConfig::builder("ws://127.0.0.1:9/").stages(stages.clone()));
+        let agents: Vec<LoadTestConfig> = plan(&whole, 3)
+            .unwrap()
+            .into_iter()
+            .map(|wire| wire.into_config().unwrap())
+            .collect();
+        let peaks: Vec<usize> = agents.iter().map(|c| c.connections).collect();
+        assert_eq!(peaks, [6, 6, 5]);
+        for ms in (0..=23_000).step_by(37) {
+            let at = Duration::from_millis(ms);
+            let sum: usize = agents.iter().map(|c| c.stage_target(at)).sum();
+            assert_eq!(sum, Stage::target_at(&stages, at), "at {at:?}");
+        }
+    }
+
+    #[test]
+    fn wire_config_round_trips_through_json_and_validation() {
+        let original = config(
+            LoadTestConfig::builder("wss://example.com/socket?x=1")
+                .connections(8)
+                .duration(Duration::from_millis(2_500))
+                .rate_per_connection(5)
+                .payload_text(r#"{"seq":{{seq}}}"#)
+                .reply_match("json:/seq".parse().unwrap())
+                .header("Authorization", "Bearer secret")
+                .header("X-Multi", "a")
+                .header("X-Multi", "b")
+                .subprotocol("chat")
+                .connect_timeout(Duration::from_secs(2))
+                .message_timeout(Duration::from_millis(750))
+                .ping_interval(Duration::from_secs(3))
+                .reconnect(false),
+        );
+        let wire = WireConfig::from_config(&original).unwrap();
+        let message = Message::Prepare {
+            config: Box::new(wire.clone()),
+            start_timeout: Duration::from_secs(30),
+        };
+        let Message::Prepare {
+            config: decoded, ..
+        } = Message::decode(&message.encode()).unwrap()
+        else {
+            panic!("not a prepare message");
+        };
+        assert_eq!(*decoded, wire);
+        let rebuilt = decoded.into_config().unwrap();
+        assert_eq!(rebuilt.target_url, original.target_url);
+        assert_eq!(rebuilt.connections, 8);
+        assert_eq!(rebuilt.duration, original.duration);
+        assert_eq!(rebuilt.rate_per_conn, 5);
+        assert_eq!(rebuilt.reply_match, original.reply_match);
+        assert_eq!(rebuilt.headers, original.headers);
+        assert_eq!(rebuilt.subprotocol.as_deref(), Some("chat"));
+        assert_eq!(rebuilt.connect_timeout, original.connect_timeout);
+        assert_eq!(rebuilt.message_timeout, original.message_timeout);
+        assert_eq!(rebuilt.ping_interval, original.ping_interval);
+        assert!(rebuilt.no_reconnect);
+        assert!(
+            matches!(rebuilt.payload, PayloadConfig::DynamicText(ref t) if t == r#"{"seq":{{seq}}}"#)
+        );
+    }
+
+    #[test]
+    fn binary_payloads_travel_as_base64() {
+        let bytes = vec![0u8, 1, 2, 254, 255, 10, 13];
+        let original = config(
+            LoadTestConfig::builder("ws://127.0.0.1:9/")
+                .mode(TestMode::Stream)
+                .payload_binary(bytes.clone()),
+        );
+        let wire = WireConfig::from_config(&original).unwrap();
+        assert!(matches!(wire.payload, WirePayload::Binary { .. }));
+        let rebuilt = wire.into_config().unwrap();
+        assert_eq!(rebuilt.mode, TestMode::Stream);
+        assert!(matches!(rebuilt.payload, PayloadConfig::Binary(ref b) if b[..] == bytes[..]));
+    }
+
+    #[test]
+    fn agents_validate_the_config_they_receive() {
+        let mut wire =
+            WireConfig::from_config(&config(LoadTestConfig::builder("ws://127.0.0.1:9/"))).unwrap();
+        wire.target = "http://127.0.0.1:9/".to_string();
+        assert!(matches!(
+            wire.clone().into_config(),
+            Err(WsBlastError::Config(ConfigError::UnsupportedScheme(_)))
+        ));
+        wire.target = "ws://127.0.0.1:9/".to_string();
+        wire.mode = "carrier-pigeon".to_string();
+        assert!(wire.clone().into_config().is_err());
+        wire.mode = "listen".to_string();
+        wire.reply_match = "exact".to_string();
+        assert!(wire.clone().into_config().is_err());
+        wire.reply_match = "first".to_string();
+        wire.connections = 0;
+        assert!(wire.into_config().is_err());
+    }
+
+    fn worker(live: &std::sync::Arc<LiveMetrics>, seed: u64) -> WorkerMetrics {
+        let mut w = WorkerMetrics::new(std::sync::Arc::clone(live)).unwrap();
+        w.record_handshake(Duration::from_micros(800 + seed * 13));
+        for i in 0..500u64 {
+            w.record_message_sent(32);
+            let micros = (i * 7919 + seed * 104_729) % 90_000 + 1;
+            w.record_message_recv(32, Some(Duration::from_micros(micros)));
+            w.record_response_time(Duration::from_micros(micros + 17));
+        }
+        w.record_error(
+            ErrorCategory::Timeout,
+            crate::metrics::ErrorScope::SentMessage,
+        );
+        w.record_connection_failed(ErrorCategory::TcpConnect);
+        w
+    }
+
+    #[test]
+    fn sparse_histograms_preserve_every_statistic_exactly() {
+        let live = LiveMetrics::new();
+        let workers: Vec<WorkerMetrics> = (0..6).map(|seed| worker(&live, seed)).collect();
+        let single = AggregatedMetrics::merge(workers.clone(), Duration::from_secs(2), 6).unwrap();
+
+        // Three agents with two workers each, sent over the wire as JSON.
+        let mut merged = MetricsTotals::new().unwrap();
+        for pair in workers.chunks(2) {
+            let mut totals = MetricsTotals::new().unwrap();
+            for w in pair {
+                totals.add_worker(w.clone());
+            }
+            let json = serde_json::to_string(&WireTotals::from(&totals)).unwrap();
+            let decoded: WireTotals = serde_json::from_str(&json).unwrap();
+            merged.add(&decoded.into_totals().unwrap()).unwrap();
+        }
+        let distributed = merged.finish(Duration::from_secs(2), 6);
+        assert_eq!(distributed, single);
+        assert!(single.message_rtt.p999_us > single.message_rtt.p50_us);
+    }
+
+    #[test]
+    fn interval_histograms_round_trip() {
+        let mut hist = interval_histogram().unwrap();
+        for v in [1, 5, 999, 1_234, 56_789, 59_000_000] {
+            hist.record_n(v, v % 7 + 1).unwrap();
+        }
+        let back = from_sparse(&to_sparse(&hist), interval_histogram().unwrap()).unwrap();
+        assert_eq!(back, hist);
+        for q in [0.5, 0.9, 0.99, 1.0] {
+            assert_eq!(back.value_at_quantile(q), hist.value_at_quantile(q));
+        }
+    }
+
+    #[test]
+    fn out_of_range_values_are_rejected() {
+        let empty = MetricsTotals::empty_histogram().unwrap();
+        assert!(from_sparse(&[(u64::MAX, 1)], empty).is_err());
+    }
+
+    #[test]
+    fn token_comparison() {
+        assert!(tokens_match("0123456789abcdef", "0123456789abcdef"));
+        assert!(!tokens_match("0123456789abcdef", "0123456789abcdeg"));
+        assert!(!tokens_match("0123456789abcdef", "0123456789abcde"));
+        assert!(!tokens_match("0123456789abcdef", "0123456789abcdef0"));
+        assert!(!tokens_match("0123456789abcdef", ""));
+        assert_eq!(bearer_token("Bearer abc"), Some("abc"));
+        assert_eq!(bearer_token("bearer  abc "), Some("abc"));
+        assert_eq!(bearer_token("Basic abc"), None);
+        assert_eq!(bearer_token("Bearer "), None);
+        assert!(validate_token("short").is_err());
+        assert!(validate_token("0123456789abcde f").is_err());
+        assert!(validate_token("0123456789abcdef").is_ok());
+    }
+
+    #[test]
+    fn protocol_versions_must_match() {
+        assert!(check_protocol(PROTOCOL_VERSION, "0.0.0").is_ok());
+        let err = check_protocol(PROTOCOL_VERSION + 1, "9.9.9").unwrap_err();
+        assert!(err.contains("protocol version mismatch"), "{err}");
+        assert!(err.contains("9.9.9"), "{err}");
+        let Message::Hello { protocol, .. } = Message::decode(&Message::hello().encode()).unwrap()
+        else {
+            panic!("not a hello");
+        };
+        assert_eq!(protocol, PROTOCOL_VERSION);
+        assert_eq!(
+            Message::decode(r#"{"type":"start"}"#).unwrap().kind(),
+            "start"
+        );
+        assert!(Message::decode(r#"{"type":"launch"}"#).is_err());
+    }
+}

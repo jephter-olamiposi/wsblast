@@ -1,0 +1,565 @@
+//! Distributed runs end to end: agents on 127.0.0.1:0 in this process, a
+//! coordinator, and the mock server as the target.
+
+#![cfg(all(feature = "distributed", feature = "mock"))]
+
+use futures_util::{SinkExt, StreamExt};
+use std::time::{Duration, SystemTime};
+use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::protocol::Message;
+use tokio_util::sync::CancellationToken;
+use wsblast::distributed::{AgentConfig, AgentServer, Coordinator, DistributedOutcome};
+use wsblast::mock::{MockConfig, MockServer};
+use wsblast::{LoadTestConfig, LoadTestConfigBuilder, Stage};
+
+const TOKEN: &str = "test-token-0123456789";
+
+struct Harness {
+    target: String,
+    agents: Vec<String>,
+    stop: CancellationToken,
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
+}
+
+async fn spawn_target(stop: &CancellationToken) -> String {
+    let server = MockServer::bind(MockConfig::builder().listen("127.0.0.1:0").build().unwrap())
+        .await
+        .unwrap();
+    let url = server.url();
+    tokio::spawn(server.run(stop.clone()));
+    url
+}
+
+async fn spawn_agent(stop: &CancellationToken, config: AgentConfig) -> String {
+    let agent = AgentServer::bind(config).await.unwrap();
+    let addr = agent.local_addr().to_string();
+    tokio::spawn(agent.run(stop.clone()));
+    addr
+}
+
+fn agent_config() -> wsblast::distributed::AgentConfigBuilder {
+    AgentConfig::builder().listen("127.0.0.1:0").token(TOKEN)
+}
+
+/// A target and `count` agents, the agent at `slow` delaying its ready reply.
+async fn harness(count: usize, slow: Option<(usize, Duration)>) -> Harness {
+    let stop = CancellationToken::new();
+    let target = spawn_target(&stop).await;
+    let mut agents = Vec::new();
+    for i in 0..count {
+        let mut builder = agent_config();
+        if let Some((index, delay)) = slow
+            && index == i
+        {
+            builder = builder.ready_delay(delay);
+        }
+        agents.push(spawn_agent(&stop, builder.build().unwrap()).await);
+    }
+    Harness {
+        target,
+        agents,
+        stop,
+    }
+}
+
+async fn run(
+    harness: &Harness,
+    configure: impl FnOnce(LoadTestConfigBuilder) -> LoadTestConfigBuilder,
+) -> wsblast::Result<DistributedOutcome> {
+    let config = configure(LoadTestConfig::builder(&harness.target))
+        .build()
+        .unwrap();
+    Coordinator::new(config, &harness.agents, TOKEN)?
+        .with_signal_handling(false)
+        .agent_timeout(Duration::from_secs(10))
+        .run()
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn merged_totals_equal_the_sum_of_agent_totals() {
+    let harness = harness(3, None).await;
+    let outcome = run(&harness, |b| {
+        b.connections(7)
+            .duration(Duration::from_millis(1_500))
+            .rate_per_connection(40)
+    })
+    .await
+    .unwrap();
+
+    let merged = &outcome.metrics;
+    let agents: Vec<_> = outcome
+        .agents
+        .iter()
+        .map(|agent| agent.metrics.as_ref().expect("no agent is lost"))
+        .collect();
+    assert_eq!(agents.len(), 3);
+    let attempted: Vec<u64> = agents
+        .iter()
+        .map(|m| m.total_connections_attempted)
+        .collect();
+    assert_eq!(attempted, [3, 2, 2]);
+
+    let sum = |f: fn(&wsblast::AggregatedMetrics) -> u64| agents.iter().map(|m| f(m)).sum::<u64>();
+    assert_eq!(merged.total_connections_attempted, 7);
+    assert_eq!(merged.total_connections_established, 7);
+    assert_eq!(merged.total_messages_sent, sum(|m| m.total_messages_sent));
+    assert_eq!(merged.total_messages_recv, sum(|m| m.total_messages_recv));
+    assert_eq!(merged.total_bytes_sent, sum(|m| m.total_bytes_sent));
+    assert_eq!(merged.total_bytes_recv, sum(|m| m.total_bytes_recv));
+    assert_eq!(merged.message_rtt.count, sum(|m| m.message_rtt.count));
+    assert_eq!(merged.response_time.count, sum(|m| m.response_time.count));
+    assert_eq!(merged.handshake_latency.count, 7);
+    assert!(merged.total_messages_recv > 100, "{merged:?}");
+
+    // Merged from the histograms, the extremes are those of the agents and
+    // every percentile lies between the agents' values for it.
+    let rtt: Vec<_> = agents.iter().map(|m| &m.message_rtt).collect();
+    assert_eq!(
+        merged.message_rtt.max_us,
+        rtt.iter().map(|s| s.max_us).max().unwrap()
+    );
+    assert_eq!(
+        merged.message_rtt.min_us,
+        rtt.iter().map(|s| s.min_us).min().unwrap()
+    );
+    let picks: [fn(&wsblast::LatencyStats) -> u64; 3] = [|s| s.p50_us, |s| s.p99_us, |s| s.p999_us];
+    for pick in picks {
+        let values: Vec<u64> = rtt.iter().map(|s| pick(s)).collect();
+        let merged_value = pick(&merged.message_rtt);
+        assert!(
+            *values.iter().min().unwrap() <= merged_value
+                && merged_value <= *values.iter().max().unwrap(),
+            "{merged_value} outside {values:?}"
+        );
+    }
+
+    let series = &merged.time_series;
+    assert_eq!(series.latency_basis, "response_time");
+    let series_sent: u64 = series.points.iter().map(|p| p.messages_sent).sum();
+    assert_eq!(series_sent, merged.total_messages_sent);
+    let series_samples: u64 = series.points.iter().map(|p| p.latency.count).sum();
+    assert_eq!(series_samples, merged.response_time.count);
+
+    let summary = merged.distributed.as_ref().expect("distributed summary");
+    assert_eq!(summary.agents, harness.agents);
+    assert!(summary.lost_agents.is_empty());
+    // Elapsed runs from the start to the last result, so it is at least the
+    // duration and not padded by any grace period.
+    assert!(
+        merged.elapsed >= Duration::from_millis(1_490),
+        "{:?}",
+        merged.elapsed
+    );
+    assert!(
+        merged.elapsed < Duration::from_secs(4),
+        "{:?}",
+        merged.elapsed
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn request_limit_is_split_exactly() {
+    let harness = harness(3, None).await;
+    let outcome = run(&harness, |b| {
+        b.connections(3)
+            .duration(Duration::from_secs(20))
+            .max_requests(10)
+    })
+    .await
+    .unwrap();
+    let sent: Vec<u64> = outcome
+        .agents
+        .iter()
+        .map(|agent| agent.metrics.as_ref().unwrap().total_messages_sent)
+        .collect();
+    assert_eq!(sent, [4, 3, 3]);
+    assert_eq!(outcome.metrics.total_messages_sent, 10);
+    assert!(outcome.metrics.elapsed < Duration::from_secs(10));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stages_are_shared_between_agents() {
+    let harness = harness(2, None).await;
+    let outcome = run(&harness, |b| {
+        b.stages(vec![
+            Stage::new(Duration::from_millis(300), 5),
+            Stage::new(Duration::from_millis(900), 5),
+        ])
+    })
+    .await
+    .unwrap();
+    let opened: Vec<u64> = outcome
+        .agents
+        .iter()
+        .map(|agent| {
+            agent
+                .metrics
+                .as_ref()
+                .unwrap()
+                .total_connections_established
+        })
+        .collect();
+    assert_eq!(opened, [3, 2]);
+    assert_eq!(outcome.metrics.total_connections_established, 5);
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_agent_starts_before_every_agent_is_ready() {
+    let delay = Duration::from_millis(1_500);
+    let harness = harness(3, Some((1, delay))).await;
+    let before = unix_ms();
+    let outcome = run(&harness, |b| {
+        b.connections(3).duration(Duration::from_millis(500))
+    })
+    .await
+    .unwrap();
+    let starts: Vec<u64> = outcome
+        .agents
+        .iter()
+        .map(|agent| agent.started_at_unix_ms.unwrap())
+        .collect();
+    for start in &starts {
+        assert!(
+            *start >= before + 1_400,
+            "an agent started {} ms after the run began, before the slow agent was ready",
+            start - before
+        );
+    }
+    let spread = starts.iter().max().unwrap() - starts.iter().min().unwrap();
+    assert!(spread < 250, "agents started {spread} ms apart: {starts:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wrong_token_is_rejected_with_401_and_nothing_runs() {
+    let harness = harness(2, None).await;
+    let config = LoadTestConfig::builder(&harness.target)
+        .connections(2)
+        .duration(Duration::from_millis(300))
+        .build()
+        .unwrap();
+    let err = Coordinator::new(config.clone(), &harness.agents, "wrong-token-0123456789")
+        .unwrap()
+        .with_signal_handling(false)
+        .run()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("HTTP 401"), "{err}");
+    assert!(err.contains("nothing was run"), "{err}");
+
+    // The rejected coordinator did not leave the agents busy.
+    let outcome = Coordinator::new(config, &harness.agents, TOKEN)
+        .unwrap()
+        .with_signal_handling(false)
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(outcome.metrics.total_connections_established, 2);
+
+    // A raw handshake without a token gets 401 as well.
+    let url = format!("ws://{}/", harness.agents[0]);
+    match tokio_tungstenite::connect_async(url).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status(), 401);
+        }
+        other => panic!("expected HTTP 401, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_busy_agent_turns_a_second_coordinator_away() {
+    let harness = harness(1, None).await;
+    let config = LoadTestConfig::builder(&harness.target)
+        .connections(1)
+        .duration(Duration::from_millis(1_500))
+        .build()
+        .unwrap();
+    let first = tokio::spawn({
+        let config = config.clone();
+        let agents = harness.agents.clone();
+        async move {
+            Coordinator::new(config, &agents, TOKEN)
+                .unwrap()
+                .with_signal_handling(false)
+                .run()
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let err = Coordinator::new(config, &harness.agents, TOKEN)
+        .unwrap()
+        .with_signal_handling(false)
+        .run()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("busy"), "{err}");
+    assert!(first.await.unwrap().is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_the_coordinator_stops_the_agents_and_keeps_their_results() {
+    let harness = harness(2, None).await;
+    let config = LoadTestConfig::builder(&harness.target)
+        .connections(4)
+        .duration(Duration::from_secs(60))
+        .rate_per_connection(20)
+        .build()
+        .unwrap();
+    let coordinator = Coordinator::new(config, &harness.agents, TOKEN)
+        .unwrap()
+        .with_signal_handling(false);
+    let cancel = coordinator.cancel_token();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        cancel.cancel();
+    });
+    let outcome = coordinator.run().await.unwrap();
+    assert!(outcome.metrics.elapsed < Duration::from_secs(10));
+    assert!(outcome.metrics.total_messages_recv > 0);
+    assert_eq!(outcome.lost_agents().count(), 0);
+}
+
+/// What a scripted agent does after `start`.
+#[derive(Clone, Copy)]
+enum Script {
+    /// Answers hello with another protocol version.
+    WrongProtocol,
+    /// Completes the setup, then disconnects shortly after `start`.
+    DisconnectAfterStart,
+}
+
+/// A hand-written agent speaking the JSON protocol, to test what a real
+/// agent never does.
+async fn spawn_scripted_agent(stop: &CancellationToken, script: Script) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let stop = stop.clone();
+    tokio::spawn(async move {
+        loop {
+            let (tcp, _) = tokio::select! {
+                accepted = listener.accept() => accepted.unwrap(),
+                () = stop.cancelled() => return,
+            };
+            tokio::spawn(async move {
+                let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                while let Some(Ok(Message::Text(text))) = ws.next().await {
+                    let message: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+                    let reply = match (message["type"].as_str().unwrap(), script) {
+                        ("hello", Script::WrongProtocol) => {
+                            r#"{"type":"hello","protocol":999,"version":"9.9.9"}"#.to_string()
+                        }
+                        ("hello", _) => {
+                            r#"{"type":"hello","protocol":1,"version":"test"}"#.to_string()
+                        }
+                        ("prepare", _) => r#"{"type":"ready","connections":1}"#.to_string(),
+                        ("start", Script::DisconnectAfterStart) => {
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                            return;
+                        }
+                        _ => continue,
+                    };
+                    ws.send(Message::Text(reply.into())).await.unwrap();
+                }
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_protocol_mismatch_fails_before_anything_runs() {
+    let mut harness = harness(1, None).await;
+    let scripted = spawn_scripted_agent(&harness.stop, Script::WrongProtocol).await;
+    harness.agents.push(scripted.clone());
+    let err = run(&harness, |b| {
+        b.connections(2).duration(Duration::from_millis(300))
+    })
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains(&format!("agent {scripted}")), "{err}");
+    assert!(err.contains("protocol version mismatch"), "{err}");
+    assert!(err.contains("nothing was run"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_agent_is_reported_and_the_others_still_count() {
+    let mut harness = harness(2, None).await;
+    let scripted = spawn_scripted_agent(&harness.stop, Script::DisconnectAfterStart).await;
+    harness.agents.push(scripted.clone());
+    let outcome = run(&harness, |b| {
+        b.connections(3)
+            .duration(Duration::from_millis(1_000))
+            .rate_per_connection(20)
+    })
+    .await
+    .unwrap();
+    let lost: Vec<&str> = outcome
+        .lost_agents()
+        .map(|agent| agent.address.as_str())
+        .collect();
+    assert_eq!(lost, [scripted.as_str()]);
+    let error = outcome.agents[2].error.as_deref().unwrap();
+    assert!(error.contains("disconnected"), "{error}");
+    let summary = outcome.metrics.distributed.as_ref().unwrap();
+    assert_eq!(summary.lost_agents, [scripted]);
+    // Only the two real agents' single connections are counted.
+    assert_eq!(outcome.metrics.total_connections_attempted, 2);
+    assert_eq!(outcome.metrics.total_connections_established, 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agents_serve_the_control_channel_over_tls() {
+    let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+    let dir = std::env::temp_dir().join(format!("wsblast-agent-tls-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cert = dir.join("cert.pem");
+    let key = dir.join("key.pem");
+    std::fs::write(&cert, certified.cert.pem()).unwrap();
+    std::fs::write(&key, certified.signing_key.serialize_pem()).unwrap();
+
+    // Bind the address `localhost` resolves to first, which the coordinator
+    // also tries first (see tests/tls.rs).
+    let local = tokio::net::lookup_host("localhost:0")
+        .await
+        .unwrap()
+        .next()
+        .unwrap();
+    let stop = CancellationToken::new();
+    let target = spawn_target(&stop).await;
+    let agent = AgentServer::bind(
+        AgentConfig::builder()
+            .listen(local.to_string())
+            .token(TOKEN)
+            .tls(&cert, &key)
+            .build()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let agent_url = format!("wss://localhost:{}", agent.local_addr().port());
+    assert!(agent.url().starts_with("wss://"));
+    tokio::spawn(agent.run(stop.clone()));
+
+    let config = LoadTestConfig::builder(&target)
+        .connections(2)
+        .duration(Duration::from_millis(400))
+        .build()
+        .unwrap();
+    let outcome = Coordinator::new(config.clone(), [&agent_url], TOKEN)
+        .unwrap()
+        .agent_ca(&cert)
+        .with_signal_handling(false)
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(outcome.metrics.total_connections_established, 2);
+
+    // Without the CA the certificate is not trusted.
+    let err = Coordinator::new(config, [&agent_url], TOKEN)
+        .unwrap()
+        .with_signal_handling(false)
+        .run()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("TLS") || err.contains("certificate"), "{err}");
+    stop.cancel();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The `type` of the next control message.
+async fn next_type<S>(ws: &mut tokio_tungstenite::WebSocketStream<S>) -> String
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let Some(Ok(Message::Text(text))) = ws.next().await else {
+        panic!("connection ended");
+    };
+    let message: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+    message["type"].as_str().unwrap().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_stops_its_run_when_the_coordinator_disconnects() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let harness = harness(1, None).await;
+    let mut request = format!("ws://{}/", harness.agents[0])
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {TOKEN}").parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let send = |text: String| Message::Text(text.into());
+    ws.send(send(
+        r#"{"type":"hello","protocol":1,"version":"test"}"#.into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_type(&mut ws).await, "hello");
+    let prepare = serde_json::json!({
+        "type": "prepare",
+        "start_timeout": {"secs": 5, "nanos": 0},
+        "config": {
+            "target": harness.target,
+            "mode": "echo",
+            "connections": 2,
+            "ramp_rate": 0,
+            "duration": {"secs": 3600, "nanos": 0},
+            "stages": [],
+            "stage_share": null,
+            "max_requests": null,
+            "rate_per_conn": 10,
+            "payload": {"kind": "text", "text": "hi"},
+            "headers": [],
+            "subprotocol": null,
+            "connect_timeout": {"secs": 5, "nanos": 0},
+            "message_timeout": {"secs": 5, "nanos": 0},
+            "ping_interval": {"secs": 0, "nanos": 0},
+            "reply_match": "first",
+            "reconnect": true,
+            "graphql": null
+        }
+    });
+    ws.send(send(prepare.to_string())).await.unwrap();
+    assert_eq!(next_type(&mut ws).await, "ready");
+    ws.send(send(r#"{"type":"start"}"#.into())).await.unwrap();
+    assert_eq!(next_type(&mut ws).await, "snapshot");
+    drop(ws);
+
+    // The hour-long run stops, so the agent takes the next test.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match run(&harness, |b| {
+            b.connections(1).duration(Duration::from_millis(200))
+        })
+        .await
+        {
+            Ok(outcome) => {
+                assert_eq!(outcome.metrics.total_connections_established, 1);
+                break;
+            }
+            Err(err) if std::time::Instant::now() < deadline => {
+                assert!(err.to_string().contains("busy"), "{err}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(err) => panic!("the agent is still busy: {err}"),
+        }
+    }
+}

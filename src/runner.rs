@@ -2,7 +2,7 @@
 //! scenarios: worker spawning, the connection ramp, run duration, signals and
 //! the final metrics merge.
 
-use crate::config::{LoadTestConfig, Stage};
+use crate::config::LoadTestConfig;
 #[cfg(feature = "scenario")]
 use crate::config::{ScenarioConfig, ScenarioPhase};
 use crate::connect::ConnectTarget;
@@ -27,6 +27,13 @@ use tokio_util::sync::CancellationToken;
 type SessionCapture = Option<crate::capture::CaptureHandle>;
 #[cfg(not(feature = "capture"))]
 type SessionCapture = ();
+
+/// A capture file created but not yet started; nothing without the `capture`
+/// feature.
+#[cfg(feature = "capture")]
+type PendingCapture = Option<crate::capture::CaptureFile>;
+#[cfg(not(feature = "capture"))]
+type PendingCapture = ();
 
 /// How often a staged run adjusts its connection count.
 const STAGE_TICK: Duration = Duration::from_millis(10);
@@ -314,7 +321,7 @@ impl Runner {
                 _ = self.cancel_token.cancelled() => break,
                 _ = tick.tick() => {}
             }
-            let wanted = Stage::target_at(&self.config.stages, start_time.elapsed());
+            let wanted = self.config.stage_target(start_time.elapsed());
             while open.len() < wanted {
                 let Ok(metrics) = WorkerMetrics::new(Arc::clone(&self.live_metrics)) else {
                     break;
@@ -346,20 +353,13 @@ impl Runner {
     /// Returns [`crate::error::WsBlastError::Metrics`] if per-worker telemetry
     /// initialization fails.
     pub(crate) async fn run_and_collect(&self) -> crate::error::Result<RunOutcome> {
-        let total_connections = self.config.connections;
-        check_file_descriptor_limit(total_connections);
-
         let _signal_listener = if self.handle_signals {
             spawn_signal_listener(self.cancel_token.clone())
         } else {
             None
         };
 
-        warn_if_ramp_exceeds_duration(
-            total_connections,
-            self.config.ramp_rate,
-            self.config.duration,
-        );
+        self.warn_about_limits();
 
         // Created before the target is resolved so a bad path fails fast.
         #[cfg(feature = "capture")]
@@ -370,12 +370,8 @@ impl Runner {
             )?),
             _ => None,
         };
-
-        let spawn_delay = if self.config.ramp_rate > 0 {
-            Some(Duration::from_secs_f64(1.0 / self.config.ramp_rate as f64))
-        } else {
-            None
-        };
+        #[cfg(not(feature = "capture"))]
+        let capture_file = ();
 
         // Resolve the target and load the TLS roots once, before the clock
         // starts, so neither is counted in the run time or handshake latency.
@@ -384,17 +380,74 @@ impl Runner {
                 Arc::new(target)
             }
             _ = self.cancel_token.cancelled() => {
+                let total_connections = self.config.connections as u64;
+                let started_at = Instant::now();
                 return Ok(RunOutcome {
                     worker_metrics: Vec::new(),
                     elapsed: Duration::ZERO,
-                    connections: total_connections as u64,
-                    not_started: total_connections as u64,
-                    started_at: Instant::now(),
+                    connections: total_connections,
+                    not_started: total_connections,
+                    started_at,
                     time_series: TimeSeries::default(),
+                    #[cfg(feature = "distributed")]
+                    interval_store: IntervalStore::new(started_at, interval_for(self.config.duration)),
                     capture: None,
                 });
             }
         };
+        self.drive(target, capture_file).await
+    }
+
+    /// Prints the warnings about the ramp and the open-file limit that a run
+    /// of this configuration deserves.
+    fn warn_about_limits(&self) {
+        check_file_descriptor_limit(self.config.connections);
+        warn_if_ramp_exceeds_duration(
+            self.config.connections,
+            self.config.ramp_rate,
+            self.config.duration,
+        );
+    }
+
+    /// Resolves the target and builds the TLS configuration without starting
+    /// the run, so a distributed agent can be ready before the coordinator
+    /// starts every agent at once.
+    #[cfg(feature = "distributed")]
+    pub(crate) async fn prepare_target(&self) -> Arc<ConnectTarget> {
+        self.warn_about_limits();
+        Arc::new(ConnectTarget::prepare(&self.config.target_url, self.config.connect_timeout).await)
+    }
+
+    /// Starts the clock and runs against a target from
+    /// [`Runner::prepare_target`]. Signals are not handled here; the caller
+    /// cancels the run through [`Runner::cancel_token`].
+    #[cfg(feature = "distributed")]
+    pub(crate) async fn run_prepared(
+        &self,
+        target: Arc<ConnectTarget>,
+    ) -> crate::error::Result<RunOutcome> {
+        #[cfg(feature = "capture")]
+        let capture_file = None;
+        #[cfg(not(feature = "capture"))]
+        let capture_file = ();
+        self.drive(target, capture_file).await
+    }
+
+    /// Starts the clock, runs the workers until the run is cancelled and
+    /// collects their metrics.
+    async fn drive(
+        &self,
+        target: Arc<ConnectTarget>,
+        capture_file: PendingCapture,
+    ) -> crate::error::Result<RunOutcome> {
+        let total_connections = self.config.connections;
+        let spawn_delay = if self.config.ramp_rate > 0 {
+            Some(Duration::from_secs_f64(1.0 / self.config.ramp_rate as f64))
+        } else {
+            None
+        };
+        #[cfg(not(feature = "capture"))]
+        let () = capture_file;
 
         // `--duration` is total wall-clock time including the ramp, so the
         // timer shares `start_time` with elapsed, throughput, and progress.
@@ -521,6 +574,8 @@ impl Runner {
             not_started,
             started_at: start_time,
             time_series,
+            #[cfg(feature = "distributed")]
+            interval_store,
             capture,
         })
     }
@@ -541,6 +596,10 @@ pub(crate) struct RunOutcome {
     #[cfg_attr(not(feature = "scenario"), allow(dead_code))]
     pub(crate) started_at: Instant,
     pub(crate) time_series: TimeSeries,
+    /// The per-interval latency histograms `time_series` was built from,
+    /// which a distributed agent sends so its coordinator can merge them.
+    #[cfg(feature = "distributed")]
+    pub(crate) interval_store: Arc<IntervalStore>,
     /// Totals of the capture this runner opened itself, if any.
     pub(crate) capture: Option<crate::metrics::CaptureSummary>,
 }

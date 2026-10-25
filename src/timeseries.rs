@@ -74,6 +74,16 @@ impl IntervalStore {
         IntervalLatency::from_histogram(buckets.get(&bucket))
     }
 
+    /// A copy of every interval's histogram, keyed by interval index, for a
+    /// distributed agent to send to its coordinator.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn buckets(&self) -> BTreeMap<u64, Histogram<u64>> {
+        self.buckets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     pub(crate) fn absorb(&self, bucket: u64, hist: &Histogram<u64>) {
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
         match buckets.get_mut(&bucket) {
@@ -325,6 +335,89 @@ impl TimeSeries {
     }
 }
 
+/// One machine's part of a distributed run: its series and the per-interval
+/// latency histograms the series was built from, keyed by interval index.
+#[cfg(feature = "distributed")]
+pub(crate) struct SeriesPart {
+    pub(crate) series: TimeSeries,
+    pub(crate) buckets: BTreeMap<u64, Histogram<u64>>,
+}
+
+#[cfg(feature = "distributed")]
+impl TimeSeries {
+    /// Merges the series of machines that ran at the same time, each counted
+    /// from its own start. Points with the same interval index are added up:
+    /// counters and open connections are summed, the duration is the longest
+    /// of them, and the latency is read from the sum of the interval
+    /// histograms, so interval percentiles are those of every sample, not an
+    /// average of percentiles.
+    pub(crate) fn merge_parallel(parts: Vec<SeriesPart>) -> Self {
+        let Some(first) = parts.iter().find(|part| !part.series.points.is_empty()) else {
+            return parts
+                .into_iter()
+                .next()
+                .map(|part| part.series)
+                .unwrap_or_default();
+        };
+        let interval_secs = first.series.interval_secs;
+        let latency_basis = first.series.latency_basis.clone();
+        let index_of = |start_secs: f64| {
+            if interval_secs > 0.0 {
+                (start_secs / interval_secs).round().max(0.0) as u64
+            } else {
+                0
+            }
+        };
+
+        let mut points: BTreeMap<u64, TimeSeriesPoint> = BTreeMap::new();
+        let mut histograms: BTreeMap<u64, Histogram<u64>> = BTreeMap::new();
+        for part in parts {
+            for point in part.series.points {
+                let merged =
+                    points
+                        .entry(index_of(point.start_secs))
+                        .or_insert_with(|| TimeSeriesPoint {
+                            start_secs: point.start_secs,
+                            ..TimeSeriesPoint::default()
+                        });
+                merged.start_secs = merged.start_secs.min(point.start_secs);
+                merged.duration_secs = merged.duration_secs.max(point.duration_secs);
+                merged.active_connections += point.active_connections;
+                merged.messages_sent += point.messages_sent;
+                merged.messages_recv += point.messages_recv;
+                merged.bytes_sent += point.bytes_sent;
+                merged.bytes_recv += point.bytes_recv;
+                merged.errors += point.errors;
+            }
+            for (bucket, hist) in part.buckets {
+                match histograms.get_mut(&bucket) {
+                    Some(existing) => {
+                        let _ = existing.add(&hist);
+                    }
+                    None => {
+                        histograms.insert(bucket, hist);
+                    }
+                }
+            }
+        }
+
+        let points = points
+            .into_iter()
+            .map(|(index, mut point)| {
+                point.throughput_msg_per_sec = point.messages_sent.max(point.messages_recv) as f64
+                    / point.duration_secs.max(0.000_1);
+                point.latency = IntervalLatency::from_histogram(histograms.get(&index));
+                point
+            })
+            .collect();
+        Self {
+            interval_secs,
+            latency_basis,
+            points,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +486,53 @@ mod tests {
         let last = &series.points[2];
         assert_eq!(last.duration_secs, 0.5);
         assert_eq!(last.throughput_msg_per_sec, 14.0);
+    }
+
+    #[cfg(feature = "distributed")]
+    #[test]
+    fn parallel_series_add_counters_and_merge_interval_histograms() {
+        let point = |start: f64, duration: f64, sent: u64, active: u64| TimeSeriesPoint {
+            start_secs: start,
+            duration_secs: duration,
+            active_connections: active,
+            messages_sent: sent,
+            messages_recv: sent,
+            ..TimeSeriesPoint::default()
+        };
+        let series = |points| TimeSeries {
+            interval_secs: 1.0,
+            latency_basis: "rtt".into(),
+            points,
+        };
+        let hist_of = |values: &[u64]| {
+            let mut hist = interval_histogram().unwrap();
+            for value in values {
+                hist.record(*value).unwrap();
+            }
+            hist
+        };
+        let a = SeriesPart {
+            series: series(vec![point(0.0, 1.0, 10, 2), point(1.0, 0.5, 4, 2)]),
+            buckets: BTreeMap::from([(0, hist_of(&[1_000; 9])), (1, hist_of(&[2_000]))]),
+        };
+        let b = SeriesPart {
+            series: series(vec![point(0.0, 1.0, 6, 3), point(1.0, 0.52, 6, 1)]),
+            buckets: BTreeMap::from([(0, hist_of(&[50_000]))]),
+        };
+        let merged = TimeSeries::merge_parallel(vec![a, b]);
+        assert_eq!(merged.points.len(), 2);
+        let first = &merged.points[0];
+        assert_eq!((first.messages_sent, first.active_connections), (16, 5));
+        assert_eq!(first.throughput_msg_per_sec, 16.0);
+        // Ten samples: nine at 1 ms and one at 50 ms, so p50 is 1 ms and
+        // p99 is 50 ms, which no average of the two parts would give.
+        assert_eq!(first.latency.count, 10);
+        assert!((990..=1_010).contains(&first.latency.p50_us));
+        assert!((49_500..=50_500).contains(&first.latency.p99_us));
+        let second = &merged.points[1];
+        assert_eq!(second.duration_secs, 0.52);
+        assert_eq!(second.messages_sent, 10);
+        assert_eq!(second.latency.count, 1);
     }
 
     #[cfg(feature = "scenario")]

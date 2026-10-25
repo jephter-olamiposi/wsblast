@@ -528,6 +528,24 @@ pub struct AggregatedMetrics {
     /// Totals of the `--capture` file, when the run wrote one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture: Option<CaptureSummary>,
+    /// The agents of a distributed run (`--agents`); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distributed: Option<DistributedSummary>,
+}
+
+/// Which agents generated the load of a distributed run.
+///
+/// The run's metrics are merged from the agents that sent their result. A
+/// lost agent disconnected or missed its result deadline after the run
+/// started; its connections and messages are not in the report. See
+/// METHODOLOGY.md, section 12.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct DistributedSummary {
+    /// Every agent of the run, as given to `--agents`.
+    pub agents: Vec<String>,
+    /// Agents whose result never arrived, in `agents` order.
+    pub lost_agents: Vec<String>,
 }
 
 /// What a run wrote to its capture file.
@@ -551,6 +569,163 @@ pub struct CaptureSummary {
     pub limit: u64,
 }
 
+/// Histograms and counters added up over any number of workers, before they
+/// are summarised into [`AggregatedMetrics`].
+///
+/// Single runs add their workers; a distributed coordinator adds the totals
+/// each agent sends, which were built the same way, so the summary is the one
+/// a single process with every worker would have produced.
+#[derive(Clone, Debug)]
+pub(crate) struct MetricsTotals {
+    pub(crate) handshake: Histogram<u64>,
+    pub(crate) rtt: Histogram<u64>,
+    pub(crate) response: Histogram<u64>,
+    pub(crate) messages_sent: u64,
+    pub(crate) messages_recv: u64,
+    pub(crate) bytes_sent: u64,
+    pub(crate) bytes_recv: u64,
+    pub(crate) reconnects: u64,
+    pub(crate) unsolicited_frames: u64,
+    pub(crate) sent_message_errors: u64,
+    /// Workers whose first handshake was in progress when the run ended.
+    pub(crate) interrupted: u64,
+    pub(crate) errors: HashMap<ErrorCategory, u64>,
+}
+
+impl MetricsTotals {
+    /// Empty totals with the run-level histogram bounds.
+    pub(crate) fn new() -> WsResult<Self> {
+        Ok(Self {
+            handshake: latency_histogram()?,
+            rtt: latency_histogram()?,
+            response: latency_histogram()?,
+            messages_sent: 0,
+            messages_recv: 0,
+            bytes_sent: 0,
+            bytes_recv: 0,
+            reconnects: 0,
+            unsolicited_frames: 0,
+            sent_message_errors: 0,
+            interrupted: 0,
+            errors: HashMap::new(),
+        })
+    }
+
+    /// The empty histogram the totals' latency histograms are built from, for
+    /// rebuilding one from its recorded values.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn empty_histogram() -> WsResult<Histogram<u64>> {
+        latency_histogram()
+    }
+
+    /// Adds one worker's metrics.
+    pub(crate) fn add_worker(&mut self, w: WorkerMetrics) {
+        let _ = self.handshake.add(&w.handshake_hist);
+        let _ = self.rtt.add(&w.rtt_hist);
+        if let Some(hist) = &w.response_hist {
+            let _ = self.response.add(hist);
+        }
+        self.messages_sent += w.messages_sent;
+        self.messages_recv += w.messages_recv;
+        self.bytes_sent += w.bytes_sent;
+        self.bytes_recv += w.bytes_recv;
+        self.reconnects += w.reconnects;
+        self.unsolicited_frames += w.unsolicited_frames;
+        self.sent_message_errors += w.sent_message_errors;
+        self.interrupted += u64::from(w.interrupted);
+        for (category, count) in w.errors {
+            *self.errors.entry(category).or_insert(0) += count;
+        }
+    }
+
+    /// Adds totals built elsewhere, such as those of another machine.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WsBlastError::Metrics`] when a histogram has other bounds
+    /// and cannot be added.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn add(&mut self, other: &Self) -> WsResult<()> {
+        let merge_error = |e| WsBlastError::Metrics(format!("cannot merge histograms: {e:?}"));
+        self.handshake.add(&other.handshake).map_err(merge_error)?;
+        self.rtt.add(&other.rtt).map_err(merge_error)?;
+        self.response.add(&other.response).map_err(merge_error)?;
+        self.messages_sent += other.messages_sent;
+        self.messages_recv += other.messages_recv;
+        self.bytes_sent += other.bytes_sent;
+        self.bytes_recv += other.bytes_recv;
+        self.reconnects += other.reconnects;
+        self.unsolicited_frames += other.unsolicited_frames;
+        self.sent_message_errors += other.sent_message_errors;
+        self.interrupted += other.interrupted;
+        for (category, count) in &other.errors {
+            *self.errors.entry(*category).or_insert(0) += count;
+        }
+        Ok(())
+    }
+
+    /// Summarises the totals of a run that lasted `elapsed` and was
+    /// configured to open `attempted_conns` slots.
+    pub(crate) fn finish(self, elapsed: Duration, attempted_conns: u64) -> AggregatedMetrics {
+        let error_breakdown = self.errors;
+        // Failed operations over attempted operations: every sent message, plus
+        // every failure that happened before a message could be sent. An error
+        // that ends an already-sent message is a failure but not a new attempt.
+        let total_errors: u64 = error_breakdown.values().sum();
+        let attempted_ops =
+            self.messages_sent + total_errors.saturating_sub(self.sent_message_errors);
+        let error_rate = if attempted_ops > 0 {
+            (total_errors as f64 / attempted_ops as f64).min(1.0)
+        } else {
+            0.0
+        };
+
+        let elapsed_secs = elapsed.as_secs_f64().max(0.0001);
+        // Listen mode never sends, and stream mode may send without replies; using
+        // the larger direction keeps throughput meaningful for every mode.
+        let throughput_msg_per_sec =
+            self.messages_sent.max(self.messages_recv) as f64 / elapsed_secs;
+        let throughput_bytes_per_sec = (self.bytes_sent + self.bytes_recv) as f64 / elapsed_secs;
+
+        let total_connections_established = self
+            .handshake
+            .len()
+            .saturating_sub(self.reconnects)
+            .min(attempted_conns);
+        let total_connections_interrupted = self
+            .interrupted
+            .min(attempted_conns.saturating_sub(total_connections_established));
+        let total_connections_failed = attempted_conns
+            .saturating_sub(total_connections_established)
+            .saturating_sub(total_connections_interrupted);
+
+        AggregatedMetrics {
+            total_connections_attempted: attempted_conns,
+            total_connections_established,
+            total_connections_failed,
+            total_connections_interrupted,
+            total_connections_not_started: 0,
+            total_reconnects: self.reconnects,
+            total_unsolicited_frames: self.unsolicited_frames,
+            total_messages_sent: self.messages_sent,
+            total_messages_recv: self.messages_recv,
+            total_bytes_sent: self.bytes_sent,
+            total_bytes_recv: self.bytes_recv,
+            elapsed,
+            throughput_msg_per_sec,
+            throughput_bytes_per_sec,
+            error_rate,
+            handshake_latency: LatencyStats::from_histogram(&self.handshake),
+            message_rtt: LatencyStats::from_histogram(&self.rtt),
+            response_time: LatencyStats::from_histogram(&self.response),
+            time_series: TimeSeries::default(),
+            error_breakdown,
+            capture: None,
+            distributed: None,
+        }
+    }
+}
+
 impl AggregatedMetrics {
     /// Combines multiple worker metrics into a single unified summary.
     ///
@@ -563,97 +738,25 @@ impl AggregatedMetrics {
         elapsed: Duration,
         attempted_conns: u64,
     ) -> WsResult<Self> {
-        let mut combined_handshake = latency_histogram()?;
-        let mut combined_rtt = latency_histogram()?;
-        let mut combined_response = latency_histogram()?;
-
-        let mut total_messages_sent = 0u64;
-        let mut total_messages_recv = 0u64;
-        let mut total_bytes_sent = 0u64;
-        let mut total_bytes_recv = 0u64;
-        let mut total_reconnects = 0u64;
-        let mut total_unsolicited_frames = 0u64;
-        let mut total_connections_interrupted = 0u64;
-        let mut sent_message_errors = 0u64;
-        let mut error_breakdown = HashMap::new();
-
-        for w in workers {
-            let _ = combined_handshake.add(&w.handshake_hist);
-            let _ = combined_rtt.add(&w.rtt_hist);
-            if let Some(hist) = &w.response_hist {
-                let _ = combined_response.add(hist);
-            }
-            total_messages_sent += w.messages_sent;
-            total_messages_recv += w.messages_recv;
-            total_bytes_sent += w.bytes_sent;
-            total_bytes_recv += w.bytes_recv;
-            total_reconnects += w.reconnects;
-            total_unsolicited_frames += w.unsolicited_frames;
-            sent_message_errors += w.sent_message_errors;
-            total_connections_interrupted += u64::from(w.interrupted);
-
-            for (category, count) in w.errors {
-                *error_breakdown.entry(category).or_insert(0) += count;
-            }
+        let mut totals = MetricsTotals::new()?;
+        for worker in workers {
+            totals.add_worker(worker);
         }
-
-        // Failed operations over attempted operations: every sent message, plus
-        // every failure that happened before a message could be sent. An error
-        // that ends an already-sent message is a failure but not a new attempt.
-        let total_errors: u64 = error_breakdown.values().sum();
-        let attempted_ops = total_messages_sent + total_errors.saturating_sub(sent_message_errors);
-        let error_rate = if attempted_ops > 0 {
-            (total_errors as f64 / attempted_ops as f64).min(1.0)
-        } else {
-            0.0
-        };
-
-        let elapsed_secs = elapsed.as_secs_f64().max(0.0001);
-        // Listen mode never sends, and stream mode may send without replies; using
-        // the larger direction keeps throughput meaningful for every mode.
-        let throughput_msg_per_sec =
-            total_messages_sent.max(total_messages_recv) as f64 / elapsed_secs;
-        let throughput_bytes_per_sec = (total_bytes_sent + total_bytes_recv) as f64 / elapsed_secs;
-
-        let total_connections_established = combined_handshake
-            .len()
-            .saturating_sub(total_reconnects)
-            .min(attempted_conns);
-        let total_connections_interrupted = total_connections_interrupted
-            .min(attempted_conns.saturating_sub(total_connections_established));
-        let total_connections_failed = attempted_conns
-            .saturating_sub(total_connections_established)
-            .saturating_sub(total_connections_interrupted);
-
-        Ok(Self {
-            total_connections_attempted: attempted_conns,
-            total_connections_established,
-            total_connections_failed,
-            total_connections_interrupted,
-            total_connections_not_started: 0,
-            total_reconnects,
-            total_unsolicited_frames,
-            total_messages_sent,
-            total_messages_recv,
-            total_bytes_sent,
-            total_bytes_recv,
-            elapsed,
-            throughput_msg_per_sec,
-            throughput_bytes_per_sec,
-            error_rate,
-            handshake_latency: LatencyStats::from_histogram(&combined_handshake),
-            message_rtt: LatencyStats::from_histogram(&combined_rtt),
-            response_time: LatencyStats::from_histogram(&combined_response),
-            time_series: TimeSeries::default(),
-            error_breakdown,
-            capture: None,
-        })
+        Ok(totals.finish(elapsed, attempted_conns))
     }
 
     /// Attaches the run's time series.
     #[must_use]
     pub(crate) fn with_time_series(mut self, time_series: TimeSeries) -> Self {
         self.time_series = time_series;
+        self
+    }
+
+    /// Attaches the agents of a distributed run.
+    #[cfg(feature = "distributed")]
+    #[must_use]
+    pub(crate) fn with_distributed(mut self, summary: DistributedSummary) -> Self {
+        self.distributed = Some(summary);
         self
     }
 

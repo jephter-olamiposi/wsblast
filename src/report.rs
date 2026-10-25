@@ -1149,6 +1149,7 @@ mod tests {
             time_series: crate::timeseries::TimeSeries::default(),
             error_breakdown: HashMap::new(),
             capture: None,
+            distributed: None,
         }
     }
 
