@@ -257,6 +257,31 @@ pub(crate) struct Cli {
     #[arg(long = "auth-jwt-per-connection")]
     pub auth_jwt_per_connection: bool,
 
+    /// OAuth2 token endpoint for the client-credentials grant (used with --auth-type oauth2)
+    #[cfg(feature = "auth")]
+    #[arg(long = "auth-oauth2-token-url", value_name = "URL")]
+    pub auth_oauth2_token_url: Option<String>,
+
+    /// OAuth2 client id (used with --auth-type oauth2)
+    #[cfg(feature = "auth")]
+    #[arg(long = "auth-oauth2-client-id", value_name = "ID")]
+    pub auth_oauth2_client_id: Option<String>,
+
+    /// File with the OAuth2 client secret; or set WSBLAST_OAUTH2_CLIENT_SECRET
+    #[cfg(feature = "auth")]
+    #[arg(long = "auth-oauth2-client-secret-file", value_name = "FILE")]
+    pub auth_oauth2_client_secret_file: Option<PathBuf>,
+
+    /// Scope requested with the OAuth2 token (space-separated)
+    #[cfg(feature = "auth")]
+    #[arg(long = "auth-oauth2-scope", value_name = "SCOPE")]
+    pub auth_oauth2_scope: Option<String>,
+
+    /// Audience parameter sent with the OAuth2 token request, for servers that require one
+    #[cfg(feature = "auth")]
+    #[arg(long = "auth-oauth2-audience", value_name = "AUDIENCE")]
+    pub auth_oauth2_audience: Option<String>,
+
     /// GraphQL WS operation name
     #[cfg(feature = "graphql-ws")]
     #[arg(long = "graphql-ws-operation-name", value_name = "NAME")]
@@ -585,6 +610,9 @@ pub(crate) enum AuthType {
     ApiKey,
     /// JWT signed by wsblast with the --auth-jwt-* options (needs the jwt feature)
     Jwt,
+    /// OAuth2 client-credentials token from the --auth-oauth2-* options (needs the oauth2 feature)
+    #[value(name = "oauth2")]
+    OAuth2,
 }
 
 /// JWS algorithm of `--auth-type jwt` tokens (RFC 7518 section 3.1).

@@ -1,6 +1,6 @@
 # Print an optspec for argparse to handle cmd's options that are independent of any subcommand.
 function __fish_wsblast_global_optspecs
-    string join \n u/url= c/connections= ramp-rate= d/duration= stages= n/requests= r/rate= p/payload= payload-file= binary H/header= subprotocol= mode= connect-timeout= message-timeout= match= ping-interval= max-p50= max-p95= max-p99= max-p999= max-error-rate= min-throughput= max-generator-lag= auth-type= auth-token= auth-token-cmd= auth-token-cmd-timeout= auth-token-refresh= auth-header= auth-apikey= auth-apikey-header= auth-jwt-alg= auth-jwt-key= auth-jwt-claims= auth-jwt-ttl= auth-jwt-per-connection graphql-ws-operation-name= graphql-ws-operation= graphql-ws-variables= graphql-ws-extensions= format= compare= compare-threshold= compare-window= fail-on-regression capture= capture-limit= chaos-delay= chaos-drop= chaos-corrupt= chaos-close= chaos-close-mode= chaos-seed= o/output= tui no-progress no-reconnect prometheus-listen= otel-endpoint= otel-interval= otel-service-name= scenario= phase= agents= agent-token= agent-timeout= agent-ca= h/help V/version
+    string join \n u/url= c/connections= ramp-rate= d/duration= stages= n/requests= r/rate= p/payload= payload-file= binary H/header= subprotocol= mode= connect-timeout= message-timeout= match= ping-interval= max-p50= max-p95= max-p99= max-p999= max-error-rate= min-throughput= max-generator-lag= auth-type= auth-token= auth-token-cmd= auth-token-cmd-timeout= auth-token-refresh= auth-header= auth-apikey= auth-apikey-header= auth-jwt-alg= auth-jwt-key= auth-jwt-claims= auth-jwt-ttl= auth-jwt-per-connection auth-oauth2-token-url= auth-oauth2-client-id= auth-oauth2-client-secret-file= auth-oauth2-scope= auth-oauth2-audience= graphql-ws-operation-name= graphql-ws-operation= graphql-ws-variables= graphql-ws-extensions= format= compare= compare-threshold= compare-window= fail-on-regression capture= capture-limit= chaos-delay= chaos-drop= chaos-corrupt= chaos-close= chaos-close-mode= chaos-seed= o/output= tui no-progress no-reconnect prometheus-listen= otel-endpoint= otel-interval= otel-service-name= scenario= phase= agents= agent-token= agent-timeout= agent-ca= h/help V/version
 end
 
 function __fish_wsblast_needs_command
@@ -53,7 +53,8 @@ complete -c wsblast -n "__fish_wsblast_needs_command" -l max-generator-lag -d 'S
 complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-type -d 'Authentication type' -r -f -a "none\t'No authentication'
 static\t'Static bearer token'
 apikey\t'API Key'
-jwt\t'JWT signed by wsblast with the --auth-jwt-* options (needs the jwt feature)'"
+jwt\t'JWT signed by wsblast with the --auth-jwt-* options (needs the jwt feature)'
+oauth2\t'OAuth2 client-credentials token from the --auth-oauth2-* options (needs the oauth2 feature)'"
 complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-token -d 'Static token for auth (used with --auth-type static)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-token-cmd -d 'Command whose trimmed stdout is the token or API key, run through the platform shell before the run (replaces --auth-token or --auth-apikey)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-token-cmd-timeout -d 'Time allowed for each run of --auth-token-cmd [default: 30s]' -r
@@ -69,6 +70,11 @@ ES256\t'ECDSA with P-256 and SHA-256'"
 complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-jwt-key -d 'File with the JWT signing key: the secret bytes for HS*, a PEM private key for RS256 and ES256; or set WSBLAST_JWT_KEY_FILE' -r -F
 complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-jwt-claims -d 'JSON object of claims added to every JWT (e.g. \'{"sub":"loadtest","aud":"ws"}\')' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-jwt-ttl -d 'JWT lifetime, which sets iat, nbf and exp; tokens are re-signed before they expire [default: 5m]' -r
+complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-oauth2-token-url -d 'OAuth2 token endpoint for the client-credentials grant (used with --auth-type oauth2)' -r
+complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-oauth2-client-id -d 'OAuth2 client id (used with --auth-type oauth2)' -r
+complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-oauth2-client-secret-file -d 'File with the OAuth2 client secret; or set WSBLAST_OAUTH2_CLIENT_SECRET' -r -F
+complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-oauth2-scope -d 'Scope requested with the OAuth2 token (space-separated)' -r
+complete -c wsblast -n "__fish_wsblast_needs_command" -l auth-oauth2-audience -d 'Audience parameter sent with the OAuth2 token request, for servers that require one' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l graphql-ws-operation-name -d 'GraphQL WS operation name' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l graphql-ws-operation -d 'GraphQL WS operation (query/mutation/subscription)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l graphql-ws-variables -d 'GraphQL WS variables (JSON)' -r

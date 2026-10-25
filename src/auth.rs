@@ -1,16 +1,18 @@
 //! Handshake authentication: a static token or API key given on the command
-//! line or printed by a command, and, with the `jwt` feature, tokens that
-//! wsblast signs itself.
+//! line or printed by a command, a JWT that wsblast signs itself (`jwt`
+//! feature) or an OAuth2 client-credentials token (`oauth2` feature).
 //!
 //! A credential is turned into one handshake header before the run starts.
 //! When the credential changes during the run (`--auth-token-cmd` with
-//! `--auth-token-refresh`, or a JWT), the header lives in a
+//! `--auth-token-refresh`, a JWT, or an OAuth2 token), the header lives in a
 //! [`LiveAuthHeader`] that every handshake attempt reads and that a
 //! background thread keeps current; otherwise it is merged into the static
 //! handshake headers.
 
 #[cfg(feature = "jwt")]
 pub(crate) mod jwt;
+#[cfg(feature = "oauth2")]
+pub(crate) mod oauth2;
 
 use crate::config::{AuthConfig, AuthScheme, Credential, TokenCommand};
 use crate::error::ConfigError;
@@ -138,6 +140,11 @@ pub(crate) fn prepare_auth(
         Credential::Jwt(config) => {
             headers.remove(&name);
             return jwt::prepare(config, name).map(Some);
+        }
+        #[cfg(feature = "oauth2")]
+        Credential::OAuth2(config) => {
+            headers.remove(&name);
+            return oauth2::prepare(config, name).map(Some);
         }
     };
 
@@ -349,7 +356,7 @@ fn refresh_loop(
 
 /// How long before a credential expires it is replaced: a fifth of its
 /// lifetime, at most one minute.
-#[cfg(feature = "jwt")]
+#[cfg(any(feature = "jwt", feature = "oauth2"))]
 fn refresh_margin(lifetime: Duration) -> Duration {
     (lifetime / 5).min(Duration::from_secs(60))
 }

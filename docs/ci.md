@@ -31,7 +31,7 @@ Rules that matter in a pipeline:
 
 ## 2. Installing in CI
 
-Every wsblast feature except the opt-in OpenTelemetry export and JWT signing, including `--compare`, `--scenario`, `--auth-type`, `--mode graphql-ws` and `--prometheus-listen`, is part of the default build, so a plain install has all of them (add `--features otel` for `--otel-endpoint`, see [docs/export.md](export.md)):
+Every wsblast feature except the opt-in OpenTelemetry export, JWT signing and OAuth2 tokens, including `--compare`, `--scenario`, `--auth-type`, `--mode graphql-ws` and `--prometheus-listen`, is part of the default build, so a plain install has all of them (add `--features otel` for `--otel-endpoint`, see [docs/export.md](export.md)):
 
 ```bash
 cargo install wsblast --locked
@@ -86,6 +86,31 @@ wsblast "$TARGET" --auth-type jwt --auth-jwt-alg ES256 --auth-jwt-per-connection
 - By default every handshake sends the same token, and a background thread signs a new one before it expires: a fifth of the lifetime before `exp`, at most one minute before (at 4 minutes for the default `5m`). New handshakes, including reconnects, use the newest token; open connections are not touched. Long runs therefore keep working with any lifetime.
 - `--auth-jwt-per-connection` signs a fresh token, with its own `jti`, for each connection attempt instead, for servers that reject a replayed `jti`. Signing happens before the handshake clock starts, so it is not part of handshake latency, but it costs CPU on the load generator: microseconds for `HS*` and `ES256`, around a millisecond for `RS256` with a 2048-bit key.
 - The token goes in `Authorization` as `Bearer <token>`; `--auth-header` names another header, which then carries the bare token, as with `--auth-type static`. `--auth-jwt-*` options without `--auth-type jwt`, and `--auth-token`, `--auth-apikey` or `--auth-token-cmd` with it, are rejected. `--auth-type jwt` cannot be used with `--agents` in this version, because agents receive the handshake headers only once.
+
+### 2.3 OAuth2 client-credentials tokens
+
+With the opt-in `oauth2` feature (`cargo install wsblast --locked --features oauth2`), `--auth-type oauth2` gets an access token from an OAuth 2.0 token endpoint with the client-credentials grant (RFC 6749 section 4.4) and keeps it current during the run:
+
+```bash
+export WSBLAST_OAUTH2_CLIENT_SECRET="$WS_CLIENT_SECRET"   # a CI secret
+wsblast "$TARGET" --auth-type oauth2 \
+  --auth-oauth2-token-url https://auth.example.com/oauth/token \
+  --auth-oauth2-client-id loadtest-ci \
+  --auth-oauth2-scope "realtime:subscribe" \
+  --auth-oauth2-audience https://realtime.example.com
+
+# Or read the secret from a file, for example a mounted secret.
+wsblast "$TARGET" --auth-type oauth2 --auth-oauth2-token-url "$TOKEN_URL" \
+  --auth-oauth2-client-id loadtest-ci --auth-oauth2-client-secret-file /run/secrets/ws-client
+```
+
+- Before the run, wsblast sends `POST` to `--auth-oauth2-token-url` with an `application/x-www-form-urlencoded` body of `grant_type=client_credentials`, plus `scope` from `--auth-oauth2-scope` and `audience` from `--auth-oauth2-audience` when they are given (`audience` is not part of RFC 6749; Auth0 and similar servers require it). The client authenticates with HTTP Basic (`client_secret_basic`, RFC 6749 section 2.3.1), which every authorization server must support: the client id and secret are form-urlencoded and then sent in the `Authorization` header. Credentials in the request body (`client_secret_post`) are not supported.
+- The client secret comes from `--auth-oauth2-client-secret-file FILE` (trailing newlines removed) or, without that option, the `WSBLAST_OAUTH2_CLIENT_SECRET` environment variable. It is never accepted on the command line.
+- The token URL must use `https://`; plain `http://` is accepted only for loopback addresses (`127.0.0.1`, `::1`, `localhost`), such as a local test server. TLS uses rustls with the same root certificates as `wss://` targets (`SSL_CERT_FILE` and `SSL_CERT_DIR` apply). Redirects are not followed, and each request has 30 seconds to complete.
+- The response's `access_token` is sent as `Authorization: Bearer <token>`, or bare in the header `--auth-header` names. A `token_type` other than `Bearer` is rejected.
+- A token endpoint that cannot be reached, answers with an error status, or sends no `access_token` is a configuration error: wsblast exits with code 1 before any connection is opened. The message gives the HTTP status and the response's `error` code (for example `401 Unauthorized: invalid_client`), never the client secret, the token or the rest of the response.
+- When the response has `expires_in`, a new token is requested a fifth of that lifetime before it expires, at most one minute before (after 59 minutes for a one-hour token), and new handshakes and reconnects use it. A failed refresh keeps the previous token, prints a warning (at most one per minute, as for `--auth-token-cmd` refreshes) and is retried after 5 seconds, or sooner for short-lived tokens. A token without `expires_in` is used for the whole run.
+- `--auth-oauth2-*` options without `--auth-type oauth2`, and `--auth-token`, `--auth-apikey` or `--auth-token-cmd` with it, are rejected. Like `--auth-type jwt`, it cannot be used with `--agents` in this version.
 
 ## 3. Settings for CI runs
 

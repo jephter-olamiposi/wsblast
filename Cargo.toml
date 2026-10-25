@@ -82,13 +82,14 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 ring = { version = "0.17.14", default-features = false, features = ["alloc"], optional = true }
 
 [features]
-# Every feature except `otel` and `jwt` is on by default, so `cargo install
-# wsblast` and the release binaries ship the whole CLI. `auth`, `graphql-ws`,
-# `compare`, `prometheus`, `capture`, `mock` and `chaos` add no dependencies;
-# `distributed` uses tokio-rustls, which tokio-tungstenite already pulls in;
-# `scenario` adds the YAML parser. `otel` pulls in the OpenTelemetry SDK and
-# an HTTP client, so it is opt-in. `jwt` is opt-in as well: it adds no crate
-# to the tree, but it signs credentials, which most runs do not need.
+# Every feature except `otel`, `jwt` and `oauth2` is on by default, so
+# `cargo install wsblast` and the release binaries ship the whole CLI.
+# `auth`, `graphql-ws`, `compare`, `prometheus`, `capture`, `mock` and `chaos`
+# add no dependencies; `distributed` uses tokio-rustls, which
+# tokio-tungstenite already pulls in; `scenario` adds the YAML parser. `otel`
+# and `oauth2` pull in an HTTP client (and `otel` the OpenTelemetry SDK), so
+# they are opt-in. `jwt` is opt-in as well: it adds no crate to the tree, but
+# it signs credentials, which most runs do not need.
 # Library users can opt out with `default-features = false`.
 default = ["scenario", "compare", "auth", "graphql-ws", "prometheus", "capture", "mock", "distributed", "chaos"]
 scenario = ["dep:serde_norway"]
@@ -115,6 +116,9 @@ distributed = ["dep:tokio-rustls"]
 # `--auth-type jwt`: tokens signed by wsblast (HS256/384/512, RS256, ES256).
 # Uses ring, which rustls already pulls in, so it adds no crate to the tree.
 jwt = ["auth", "dep:ring"]
+# `--auth-type oauth2`: OAuth 2.0 client-credentials tokens fetched over
+# HTTPS with the same blocking HTTP client and rustls setup as `otel`.
+oauth2 = ["auth", "dep:reqwest"]
 # Kept so existing `--features full` invocations keep working.
 full = ["scenario", "auth", "graphql-ws", "compare", "prometheus", "capture", "mock", "distributed", "chaos"]
 

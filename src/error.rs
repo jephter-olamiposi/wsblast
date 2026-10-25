@@ -75,6 +75,14 @@ pub enum ConfigError {
     #[error("Authentication token command failed: {0}")]
     AuthTokenCommand(String),
 
+    /// The OAuth2 token endpoint did not issue a usable token before the
+    /// run: it could not be reached, answered with an error, or sent a
+    /// response without a Bearer access token. The message carries the
+    /// HTTP status and the response's `error` code, never the client
+    /// secret or a token.
+    #[error("Authentication token request failed: {0}")]
+    AuthTokenRequest(String),
+
     /// An option has an invalid value.
     #[error("Invalid option: {0}")]
     InvalidOption(String),

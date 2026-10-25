@@ -1159,6 +1159,10 @@ pub(crate) enum Credential {
     /// for every handshake attempt.
     #[cfg(feature = "jwt")]
     Jwt(crate::auth::jwt::JwtConfig),
+    /// Fetched from an OAuth2 token endpoint before the run and again
+    /// before it expires.
+    #[cfg(feature = "oauth2")]
+    OAuth2(crate::auth::oauth2::OAuth2Config),
 }
 
 /// A credential whose `Debug` output is redacted.
@@ -2378,6 +2382,11 @@ fn auth_from_cli(cli: &Cli) -> Result<Option<AuthConfig>> {
     {
         return Err(invalid(&format!("{flag} requires --auth-type jwt")));
     }
+    if cli.auth_type != AuthType::OAuth2
+        && let Some(flag) = oauth2_flag_given(cli)
+    {
+        return Err(invalid(&format!("{flag} requires --auth-type oauth2")));
+    }
     let (scheme, header, value, flag) = match cli.auth_type {
         AuthType::None => {
             if cli.auth_token.is_some() || cli.auth_apikey.is_some() || cli.auth_token_cmd.is_some()
@@ -2413,6 +2422,21 @@ fn auth_from_cli(cli: &Cli) -> Result<Option<AuthConfig>> {
         AuthType::Jwt => {
             return Err(invalid(
                 "--auth-type jwt needs the jwt feature: cargo install wsblast --features jwt",
+            ));
+        }
+        #[cfg(feature = "oauth2")]
+        AuthType::OAuth2 => {
+            reject_token_options(cli, "oauth2")?;
+            return Ok(Some(AuthConfig {
+                scheme: AuthScheme::Static,
+                header: cli.auth_header.clone(),
+                credential: Credential::OAuth2(crate::auth::oauth2::config_from_cli(cli)?),
+            }));
+        }
+        #[cfg(not(feature = "oauth2"))]
+        AuthType::OAuth2 => {
+            return Err(invalid(
+                "--auth-type oauth2 needs the oauth2 feature: cargo install wsblast --features oauth2",
             ));
         }
     };
@@ -2496,9 +2520,32 @@ fn jwt_flag_given(cli: &Cli) -> Option<&'static str> {
     .find_map(|(flag, set)| set.then_some(flag))
 }
 
+/// The first `--auth-oauth2-*` option given on the command line, if any.
+#[cfg(feature = "auth")]
+fn oauth2_flag_given(cli: &Cli) -> Option<&'static str> {
+    [
+        (
+            "--auth-oauth2-token-url",
+            cli.auth_oauth2_token_url.is_some(),
+        ),
+        (
+            "--auth-oauth2-client-id",
+            cli.auth_oauth2_client_id.is_some(),
+        ),
+        (
+            "--auth-oauth2-client-secret-file",
+            cli.auth_oauth2_client_secret_file.is_some(),
+        ),
+        ("--auth-oauth2-scope", cli.auth_oauth2_scope.is_some()),
+        ("--auth-oauth2-audience", cli.auth_oauth2_audience.is_some()),
+    ]
+    .into_iter()
+    .find_map(|(flag, set)| set.then_some(flag))
+}
+
 /// Rejects the token and API key options for an `--auth-type` that makes
 /// its own credential.
-#[cfg(feature = "jwt")]
+#[cfg(any(feature = "jwt", feature = "oauth2"))]
 fn reject_token_options(cli: &Cli, kind: &str) -> Result<()> {
     for (flag, set) in [
         ("--auth-token", cli.auth_token.is_some()),
@@ -3020,6 +3067,60 @@ mod tests {
         let error = LoadTestConfig::from_cli(cli).unwrap_err().to_string();
         assert!(
             error.contains("--auth-jwt-ttl requires --auth-type jwt"),
+            "{error}"
+        );
+    }
+
+    #[cfg(all(feature = "auth", not(feature = "oauth2")))]
+    #[test]
+    fn oauth2_auth_needs_the_oauth2_feature() {
+        use clap::Parser;
+
+        let cli = Cli::parse_from(["wsblast", "ws://127.0.0.1:9001", "--auth-type", "oauth2"]);
+        let error = LoadTestConfig::from_cli(cli).unwrap_err().to_string();
+        assert!(error.contains("needs the oauth2 feature"), "{error}");
+    }
+
+    #[cfg(feature = "auth")]
+    #[test]
+    fn oauth2_options_require_oauth2_auth() {
+        use clap::Parser;
+
+        for (extra, message) in [
+            (
+                "--auth-oauth2-scope ws",
+                "--auth-oauth2-scope requires --auth-type oauth2",
+            ),
+            (
+                "--auth-type static --auth-token t --auth-oauth2-client-id id",
+                "--auth-oauth2-client-id requires --auth-type oauth2",
+            ),
+        ] {
+            let base = ["wsblast", "ws://127.0.0.1:9001"];
+            let cli = Cli::try_parse_from(base.into_iter().chain(extra.split(' '))).unwrap();
+            let error = LoadTestConfig::from_cli(cli).unwrap_err().to_string();
+            assert!(error.contains(message), "{extra}: {error}");
+        }
+    }
+
+    #[cfg(feature = "oauth2")]
+    #[test]
+    fn oauth2_rejects_the_token_options() {
+        use clap::Parser;
+
+        let cli = Cli::parse_from([
+            "wsblast",
+            "ws://127.0.0.1:9001",
+            "--auth-type",
+            "oauth2",
+            "--auth-oauth2-token-url",
+            "https://auth.example/token",
+            "--auth-token-cmd",
+            "c",
+        ]);
+        let error = LoadTestConfig::from_cli(cli).unwrap_err().to_string();
+        assert!(
+            error.contains("--auth-token-cmd cannot be used with --auth-type oauth2"),
             "{error}"
         );
     }

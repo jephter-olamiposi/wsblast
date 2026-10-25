@@ -53,6 +53,7 @@ jobs:
           - distributed
           - chaos
           - jwt
+          - oauth2
           - full
     steps:
       - uses: actions/checkout@v5
@@ -94,11 +95,11 @@ jobs:
       # `otel` is not part of `full`, so its export tests run on their own.
       - name: OpenTelemetry export tests
         run: cargo test --locked --features full,otel --lib --test integration_test export
-      # `jwt` is not part of `full` either.
+      # `jwt` and `oauth2` are not part of `full` either.
       - name: Token authentication tests
         run: |
-          cargo test --locked --features full,jwt --lib auth
-          cargo test --locked --features full,jwt --test auth_tokens
+          cargo test --locked --features full,jwt,oauth2 --lib auth
+          cargo test --locked --features full,jwt,oauth2 --test auth_tokens
 
   msrv:
     name: MSRV (${{ matrix.features }})

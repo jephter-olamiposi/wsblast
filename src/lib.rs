@@ -105,8 +105,9 @@
 //!   are in [`AggregatedMetrics::chaos`].
 //! - `auth` and `compare` add the `--auth-*` and `--compare` command-line
 //!   options and have no library API. Send credentials with
-//!   [`header`](LoadTestConfigBuilder::header). The opt-in `jwt` feature
-//!   adds `--auth-type jwt`, also without a library API.
+//!   [`header`](LoadTestConfigBuilder::header). The opt-in `jwt` and
+//!   `oauth2` features add `--auth-type jwt` and `--auth-type oauth2`, also
+//!   without a library API.
 //!
 #![cfg_attr(
     not(feature = "scenario"),
