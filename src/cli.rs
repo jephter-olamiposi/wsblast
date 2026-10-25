@@ -480,6 +480,14 @@ pub(crate) struct MockArgs {
     /// Instead of echoing, send each connection the frames a --capture file recorded as received, with their timing
     #[arg(long = "replay", value_name = "FILE")]
     pub replay: Option<PathBuf>,
+
+    /// PEM certificate chain to serve wss:// instead of ws:// (clients must trust it, e.g. with SSL_CERT_FILE)
+    #[arg(long = "tls-cert", value_name = "PEM", requires = "tls_key")]
+    pub tls_cert: Option<PathBuf>,
+
+    /// PEM private key for --tls-cert
+    #[arg(long = "tls-key", value_name = "PEM", requires = "tls_cert")]
+    pub tls_key: Option<PathBuf>,
 }
 
 impl Cli {

@@ -415,3 +415,161 @@ async fn mock_subcommand_serves_a_gate_and_exits_zero_on_sigint() {
         "{rest:?}"
     );
 }
+
+/// Writes a fresh self-signed certificate for `localhost` and its key as PEM
+/// files, returning their paths.
+fn localhost_certificate(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let cert = dir.join(format!(
+        "wsblast-mock-{}-{name}-cert.pem",
+        std::process::id()
+    ));
+    let key = dir.join(format!(
+        "wsblast-mock-{}-{name}-key.pem",
+        std::process::id()
+    ));
+    std::fs::write(&cert, certified.cert.pem()).unwrap();
+    std::fs::write(&key, certified.signing_key.serialize_pem()).unwrap();
+    (cert, key)
+}
+
+/// The address `localhost` resolves to first, which the client also tries
+/// first (`::1` before `127.0.0.1` on Windows runners).
+async fn localhost_addr() -> std::net::SocketAddr {
+    tokio::net::lookup_host("localhost:0")
+        .await
+        .unwrap()
+        .next()
+        .expect("localhost does not resolve")
+}
+
+#[tokio::test]
+async fn tls_mock_reports_a_wss_url() {
+    let (cert, key) = localhost_certificate("url");
+    let config = MockConfig::builder()
+        .listen("127.0.0.1:0")
+        .tls(&cert, &key)
+        .build()
+        .unwrap();
+    assert!(config.is_tls());
+    let server = MockServer::bind(config).await.unwrap();
+    assert!(
+        server.url().starts_with("wss://127.0.0.1:"),
+        "{}",
+        server.url()
+    );
+}
+
+#[test]
+fn tls_mock_rejects_unusable_certificate_files() {
+    let (cert, key) = localhost_certificate("bad");
+    let not_pem = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("wsblast-mock-{}-not-pem.txt", std::process::id()));
+    std::fs::write(&not_pem, "not a certificate").unwrap();
+    let cases = [
+        (
+            MockConfig::builder().tls(&not_pem, &key),
+            "no PEM certificate",
+        ),
+        (
+            MockConfig::builder().tls(&cert, &not_pem),
+            "no PEM private key",
+        ),
+        (MockConfig::builder().tls(&key, &cert), "no PEM certificate"),
+        (
+            MockConfig::builder().tls("/nonexistent/cert.pem", &key),
+            "/nonexistent/cert.pem",
+        ),
+    ];
+    for (builder, expected) in cases {
+        let err = builder.build().expect_err(expected).to_string();
+        assert!(err.contains(expected), "{expected}: {err}");
+    }
+}
+
+/// `wsblast mock --tls-cert --tls-key` serves wss://, and wsblast completes
+/// echo round trips against it when the certificate is trusted through
+/// SSL_CERT_FILE.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mock_subcommand_serves_wss_with_a_trusted_certificate() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let (cert, key) = localhost_certificate("cli");
+    let listen = std::net::SocketAddr::new(localhost_addr().await.ip(), 0).to_string();
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_wsblast"))
+        .args(["mock", "--listen", listen.as_str()])
+        .arg("--tls-cert")
+        .arg(&cert)
+        .arg("--tls-key")
+        .arg(&key)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let banner = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let bound = banner
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("wss://"))
+        .unwrap_or_else(|| panic!("no wss:// URL in {banner}"));
+    let port = bound.rsplit(':').next().unwrap();
+    let url = format!("wss://localhost:{port}");
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(20),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_wsblast"))
+            .args([url.as_str(), "-c", "2", "-d", "1s", "--no-reconnect"])
+            .args(["--no-progress", "--format", "json"])
+            .env("SSL_CERT_FILE", &cert)
+            .env_remove("SSL_CERT_DIR")
+            .env("NO_COLOR", "1")
+            .output(),
+    )
+    .await
+    .expect("wsblast did not exit within 20s")
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stdout}\n{stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let established = report
+        .pointer("/metrics/total_connections_established")
+        .and_then(serde_json::Value::as_u64);
+    assert_eq!(established, Some(2), "{report:#}");
+    let received = report
+        .pointer("/metrics/total_messages_recv")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
+    assert!(received > 0, "{report:#}");
+}
+
+#[tokio::test]
+async fn mock_tls_flags_need_each_other_and_valid_files() {
+    let (cert, _key) = localhost_certificate("flags");
+    let cert = cert.to_str().unwrap().to_string();
+    let cases: [(&[&str], &str); 2] = [
+        (&["--tls-cert", &cert], "--tls-key"),
+        (
+            &["--tls-cert", &cert, "--tls-key", &cert],
+            "no PEM private key",
+        ),
+    ];
+    for (args, expected) in cases {
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_wsblast"))
+            .args(["mock", "--listen", "127.0.0.1:0"])
+            .args(args)
+            .env("NO_COLOR", "1")
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+    }
+}

@@ -101,6 +101,8 @@ complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l reject-ratio -d
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l stall-every -d 'Stop replying on every connection at each multiple of this period (needs --stall-for)' -r
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l stall-for -d 'How long each stall lasts; shorter than --stall-every' -r
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l replay -d 'Instead of echoing, send each connection the frames a --capture file recorded as received, with their timing' -r -F
+complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l tls-cert -d 'PEM certificate chain to serve wss:// instead of ws:// (clients must trust it, e.g. with SSL_CERT_FILE)' -r -F
+complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l tls-key -d 'PEM private key for --tls-cert' -r -F
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -s h -l help -d 'Print help'
 complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -l listen -d 'Address to accept coordinators on (host:port, e.g. \'0.0.0.0:7700\'; port 0 picks a free port)' -r
 complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -l token -d 'Token coordinators must present, at least 16 characters; required, here or in WSBLAST_AGENT_TOKEN' -r

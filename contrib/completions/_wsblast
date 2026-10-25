@@ -111,6 +111,8 @@ _arguments "${_arguments_options[@]}" : \
 '--stall-every=[Stop replying on every connection at each multiple of this period (needs --stall-for)]:DURATION:_default' \
 '--stall-for=[How long each stall lasts; shorter than --stall-every]:DURATION:_default' \
 '--replay=[Instead of echoing, send each connection the frames a --capture file recorded as received, with their timing]:FILE:_files' \
+'--tls-cert=[PEM certificate chain to serve wss\:// instead of ws\:// (clients must trust it, e.g. with SSL_CERT_FILE)]:PEM:_files' \
+'--tls-key=[PEM private key for --tls-cert]:PEM:_files' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0

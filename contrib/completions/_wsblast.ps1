@@ -103,6 +103,8 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--stall-every', '--stall-every', [CompletionResultType]::ParameterName, 'Stop replying on every connection at each multiple of this period (needs --stall-for)')
             [CompletionResult]::new('--stall-for', '--stall-for', [CompletionResultType]::ParameterName, 'How long each stall lasts; shorter than --stall-every')
             [CompletionResult]::new('--replay', '--replay', [CompletionResultType]::ParameterName, 'Instead of echoing, send each connection the frames a --capture file recorded as received, with their timing')
+            [CompletionResult]::new('--tls-cert', '--tls-cert', [CompletionResultType]::ParameterName, 'PEM certificate chain to serve wss:// instead of ws:// (clients must trust it, e.g. with SSL_CERT_FILE)')
+            [CompletionResult]::new('--tls-key', '--tls-key', [CompletionResultType]::ParameterName, 'PEM private key for --tls-cert')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

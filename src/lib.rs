@@ -92,9 +92,10 @@
 //!   [`capture`] and [`capture_limit`] builder setters, which record every
 //!   frame of a run to a JSONL file. Their totals are in
 //!   [`AggregatedMetrics::capture`].
-//! - `mock`: the `wsblast mock` test server and the [`mock`] module, to run
-//!   it in-process: echo with delays, jitter, stalls, rejected upgrades and
-//!   server closes, or replay of a capture file.
+//! - `mock`: the `wsblast mock` test server, over `ws://` or `wss://`, and
+//!   the [`mock`] module, to run it in-process: echo with delays, jitter,
+//!   stalls, rejected upgrades and server closes, or replay of a capture
+//!   file.
 //! - `distributed`: the `wsblast agent` command, the `--agents` options
 //!   and the [`distributed`] module, to generate one run's load from several
 //!   machines and merge their results exactly.
@@ -162,6 +163,8 @@ mod runner;
 #[cfg(feature = "compare")]
 mod series_compare;
 mod timeseries;
+#[cfg(any(feature = "mock", feature = "distributed"))]
+mod tls;
 mod tui;
 mod worker;
 

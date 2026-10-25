@@ -1,7 +1,8 @@
 //! A WebSocket test target with controllable failure modes, behind the
 //! `wsblast mock` command.
 //!
-//! The server listens on plain `ws://` and, by default, echoes every text and
+//! The server listens on plain `ws://`, or on `wss://` with a PEM certificate
+//! and key ([`MockConfigBuilder::tls`]), and by default echoes every text and
 //! binary frame. Its behaviours combine:
 //!
 //! - a fixed reply delay plus a uniformly distributed jitter,
@@ -53,7 +54,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -70,6 +73,9 @@ const CLOSE_GRACE: Duration = Duration::from_secs(2);
 /// How long [`MockServer::run`] waits for connections to close on shutdown.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
+/// Time allowed for a client's TLS handshake.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A validated mock server configuration, built with
 /// [`MockConfig::builder`].
 #[derive(Debug, Clone)]
@@ -82,6 +88,7 @@ pub struct MockConfig {
     stall: Option<Stall>,
     replay: Option<Arc<ReplayScript>>,
     seed: Option<u64>,
+    tls: Option<Arc<rustls::ServerConfig>>,
 }
 
 /// A server-wide stall of `length` at every multiple of `every`.
@@ -101,6 +108,12 @@ impl MockConfig {
     /// The address to listen on, as given.
     pub fn listen(&self) -> &str {
         &self.listen
+    }
+
+    /// Whether the server serves `wss://` (a certificate and key were set
+    /// with [`MockConfigBuilder::tls`]).
+    pub fn is_tls(&self) -> bool {
+        self.tls.is_some()
     }
 
     /// A one-line summary of the active behaviours, as `wsblast mock`
@@ -151,6 +164,7 @@ pub struct MockConfigBuilder {
     stall_for: Option<Duration>,
     replay: Option<PathBuf>,
     seed: Option<u64>,
+    tls: Option<(PathBuf, PathBuf)>,
 }
 
 impl Default for MockConfigBuilder {
@@ -165,6 +179,7 @@ impl Default for MockConfigBuilder {
             stall_for: None,
             replay: None,
             seed: None,
+            tls: None,
         }
     }
 }
@@ -227,14 +242,27 @@ impl MockConfigBuilder {
         self
     }
 
-    /// Validates the settings and, for replay, reads the capture file.
+    /// Serves `wss://` with the PEM certificate chain in `cert` and the PEM
+    /// private key in `key` (PKCS#8, PKCS#1 or SEC1), which
+    /// [`build`](Self::build) reads. Clients must trust the certificate:
+    /// for wsblast, through `SSL_CERT_FILE` or the platform's store.
+    pub fn tls(mut self, cert: impl Into<PathBuf>, key: impl Into<PathBuf>) -> Self {
+        self.tls = Some((cert.into(), key.into()));
+        self
+    }
+
+    /// Validates the settings and reads the capture file for replay and the
+    /// certificate and key for TLS.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError::InvalidOption`] for an empty listen address, a
     /// reject ratio outside 0.0 to 1.0, a close-after of 0, a stall that is
-    /// zero or not shorter than its period, or a replay file that cannot be
-    /// read, is not a capture file or holds no received data frames.
+    /// zero or not shorter than its period, a replay file that cannot be
+    /// read, is not a capture file or holds no received data frames, or a
+    /// certificate or key that is not valid PEM or does not match, and
+    /// [`ConfigError::PayloadFile`] for a certificate or key file that
+    /// cannot be read.
     pub fn build(self) -> Result<MockConfig> {
         if self.listen.trim().is_empty() {
             return Err(invalid("--listen must be a host:port address"));
@@ -275,6 +303,11 @@ impl MockConfigBuilder {
             .map(ReplayScript::load)
             .transpose()?
             .map(Arc::new);
+        let tls = self
+            .tls
+            .as_ref()
+            .map(|(cert, key)| crate::tls::server_config(cert, key))
+            .transpose()?;
         Ok(MockConfig {
             listen: self.listen,
             delay: self.delay,
@@ -284,6 +317,7 @@ impl MockConfigBuilder {
             stall,
             replay,
             seed: self.seed,
+            tls,
         })
     }
 }
@@ -374,9 +408,13 @@ impl MockServer {
         self.local_addr
     }
 
-    /// `ws://` URL of the server.
+    /// URL of the server: `ws://`, or `wss://` with TLS. With TLS, connect
+    /// with a host name the certificate is valid for (often `localhost`)
+    /// rather than the IP address in this URL, unless the certificate lists
+    /// that address.
     pub fn url(&self) -> String {
-        format!("ws://{}", self.local_addr)
+        let scheme = if self.config.is_tls() { "wss" } else { "ws" };
+        format!("{scheme}://{}", self.local_addr)
     }
 
     /// A handle to read the server's counters while it runs.
@@ -399,6 +437,7 @@ impl MockServer {
             counters: Arc::clone(&self.counters),
             epoch: Instant::now(),
         });
+        let acceptor = self.config.tls.clone().map(TlsAcceptor::from);
         let mut rng = XorShift64::new(self.config.seed.unwrap_or_else(time_seed));
         let mut connections = tokio::task::JoinSet::new();
         let mut next_index = 0u64;
@@ -425,8 +464,9 @@ impl MockServer {
             if !plan.reject {
                 next_index += 1;
             }
-            connections.spawn(serve_connection(
+            connections.spawn(accept_connection(
                 tcp,
+                acceptor.clone(),
                 Arc::clone(&shared),
                 plan,
                 cancel.child_token(),
@@ -505,12 +545,37 @@ impl Drop for ActiveGuard {
     }
 }
 
-async fn serve_connection(
+/// Completes the TLS handshake when the server has a certificate, then
+/// serves the WebSocket connection.
+async fn accept_connection(
     tcp: TcpStream,
+    tls: Option<TlsAcceptor>,
     shared: Arc<Shared>,
     plan: ConnectionPlan,
     cancel: CancellationToken,
 ) {
+    let Some(acceptor) = tls else {
+        return serve_connection(tcp, shared, plan, cancel).await;
+    };
+    let accepted = tokio::select! {
+        accepted = tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(tcp)) => accepted,
+        () = cancel.cancelled() => return,
+    };
+    // A failed or timed-out TLS handshake is the client's problem, like a
+    // failed WebSocket handshake: the connection is dropped and not counted.
+    if let Ok(Ok(stream)) = accepted {
+        serve_connection(stream, shared, plan, cancel).await;
+    }
+}
+
+async fn serve_connection<S>(
+    tcp: S,
+    shared: Arc<Shared>,
+    plan: ConnectionPlan,
+    cancel: CancellationToken,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     if plan.reject {
         let counters = Arc::clone(&shared.counters);
         // The error type is fixed by tungstenite's handshake callback.
@@ -543,8 +608,8 @@ async fn serve_connection(
     run_session(ws, &shared, plan, &cancel).await;
 }
 
-type WsSink = SplitSink<WebSocketStream<TcpStream>, Message>;
-type WsStream = SplitStream<WebSocketStream<TcpStream>>;
+type WsSink<S> = SplitSink<WebSocketStream<S>, Message>;
+type WsStream<S> = SplitStream<WebSocketStream<S>>;
 
 /// What a session sends next.
 enum Outgoing<'a> {
@@ -591,12 +656,14 @@ impl Outgoing<'_> {
     }
 }
 
-async fn run_session(
-    ws: WebSocketStream<TcpStream>,
+async fn run_session<S>(
+    ws: WebSocketStream<S>,
     shared: &Shared,
     plan: ConnectionPlan,
     cancel: &CancellationToken,
-) {
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let (mut sink, mut stream) = ws.split();
     let mut rng = XorShift64::new(plan.seed);
     let mut outgoing = match &shared.config.replay {
@@ -666,7 +733,11 @@ async fn sleep_until(due: Option<Instant>) {
     }
 }
 
-async fn close(sink: &mut WsSink, code: CloseCode, reason: &'static str) {
+async fn close<S: AsyncRead + AsyncWrite + Unpin>(
+    sink: &mut WsSink<S>,
+    code: CloseCode,
+    reason: &'static str,
+) {
     let frame = CloseFrame {
         code,
         reason: Utf8Bytes::from_static(reason),
@@ -676,7 +747,7 @@ async fn close(sink: &mut WsSink, code: CloseCode, reason: &'static str) {
 
 /// Reads until the client finishes the close handshake or `CLOSE_GRACE`
 /// passes, discarding what arrives.
-async fn drain(stream: &mut WsStream) {
+async fn drain<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut WsStream<S>) {
     let _ = tokio::time::timeout(CLOSE_GRACE, async {
         while let Some(Ok(_)) = stream.next().await {}
     })
@@ -872,6 +943,9 @@ pub(crate) async fn run_command(args: &crate::cli::MockArgs) -> Result<()> {
     }
     if let Some(path) = &args.replay {
         builder = builder.replay(path);
+    }
+    if let (Some(cert), Some(key)) = (&args.tls_cert, &args.tls_key) {
+        builder = builder.tls(cert, key);
     }
     let config = builder.build()?;
 

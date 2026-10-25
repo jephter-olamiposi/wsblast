@@ -1,6 +1,6 @@
 # Mock server
 
-`wsblast mock` runs a plain `ws://` test target on your machine. By default it echoes every text and binary frame back. Flags add the failure modes a real server has, so you can see what each one does to a wsblast report, and test a CI gate against a server whose behaviour you know in advance. With `--replay` it plays back the traffic of a real server recorded with `--capture`.
+`wsblast mock` runs a `ws://` test target on your machine, or a `wss://` one with a certificate. By default it echoes every text and binary frame back. Flags add the failure modes a real server has, so you can see what each one does to a wsblast report, and test a CI gate against a server whose behaviour you know in advance. With `--replay` it plays back the traffic of a real server recorded with `--capture`.
 
 It is part of the default build (Cargo feature `mock`). The same server is available to Rust tests as [`wsblast::mock`](https://docs.rs/wsblast/latest/wsblast/mock/index.html).
 
@@ -13,6 +13,7 @@ Contents:
 5. [Recording and replaying a real server](#5-recording-and-replaying-a-real-server)
 6. [Testing a CI gate against the mock](#6-testing-a-ci-gate-against-the-mock)
 7. [Using the mock from Rust tests](#7-using-the-mock-from-rust-tests)
+8. [Serving wss:// (TLS)](#8-serving-wss-tls)
 
 ## 1. Flags
 
@@ -26,8 +27,10 @@ Contents:
 | `--stall-every DURATION` | off | Stop replying on every connection at each multiple of this period. Needs `--stall-for`. |
 | `--stall-for DURATION` | off | How long each stall lasts. Must be shorter than `--stall-every`. |
 | `--replay FILE` | off | Instead of echoing, send each connection the frames a `--capture` file recorded as received. |
+| `--tls-cert PEM` | off | Serve `wss://` with this PEM certificate chain. Needs `--tls-key`. See [section 8](#8-serving-wss-tls). |
+| `--tls-key PEM` | off | PEM private key (PKCS#8, PKCS#1 or SEC1) for `--tls-cert`. |
 
-Durations take the same units as wsblast's other duration flags: `ns`, `us`, `ms`, `s`, `m`, `h`, fractions allowed (`1.5ms`), or a bare integer number of seconds. All behaviours combine. An invalid value (a ratio outside 0 to 1, `--close-after 0`, a stall that is not shorter than its period, a file that is not a capture) prints an error and exits with code 1 before the server starts.
+Durations take the same units as wsblast's other duration flags: `ns`, `us`, `ms`, `s`, `m`, `h`, fractions allowed (`1.5ms`), or a bare integer number of seconds. All behaviours combine. An invalid value (a ratio outside 0 to 1, `--close-after 0`, a stall that is not shorter than its period, a file that is not a capture, a certificate or key that cannot be read, is not PEM or does not match) prints an error and exits with code 1 before the server starts.
 
 ## 2. How each behaviour works
 
@@ -191,3 +194,35 @@ async fn gate_catches_a_slow_server() {
 ```
 
 `MockConfigBuilder::seed` fixes the jitter and rejection draws for repeatable tests; the command line always seeds from the clock. `wsblast::mock::serve(config, cancel)` binds and runs in one call when the address is fixed.
+
+`MockConfigBuilder::tls(cert, key)` is the library equivalent of `--tls-cert` and `--tls-key`; `MockServer::url` then returns a `wss://` URL.
+
+## 8. Serving wss:// (TLS)
+
+With `--tls-cert` and `--tls-key` the mock completes a TLS handshake (rustls, TLS 1.2 and 1.3, the same server code as `wsblast agent --tls-cert`) before the WebSocket upgrade, and the startup line shows a `wss://` URL. Every behaviour works the same over TLS. A client whose TLS handshake fails or does not finish within 10 s is disconnected and not counted as accepted or rejected.
+
+The mock does not generate certificates. Create one for `localhost` with either tool:
+
+```bash
+# mkcert: a certificate signed by a local CA that mkcert adds to the system
+# and browser trust stores (run `mkcert -install` once).
+mkcert -cert-file mock-cert.pem -key-file mock-key.pem localhost 127.0.0.1 ::1
+
+# OpenSSL 3: a self-signed certificate, trusted by nothing until you say so.
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -keyout mock-key.pem -out mock-cert.pem -days 30 -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1" \
+  -addext "basicConstraints=critical,CA:FALSE"
+```
+
+Keep the `basicConstraints=critical,CA:FALSE` line: `openssl req -x509` marks its certificates as CAs by default, and rustls refuses a CA certificate as a server certificate, so without it every handshake fails with `tls_handshake` errors even when the certificate is trusted.
+
+Then serve and test, pointing wsblast at the certificate it should trust. wsblast reads its roots from the platform's store, and `SSL_CERT_FILE` replaces that store with a PEM file (`SSL_CERT_DIR` with a directory), so the self-signed certificate itself can be the only trusted root:
+
+```bash
+wsblast mock --tls-cert mock-cert.pem --tls-key mock-key.pem
+SSL_CERT_FILE=mock-cert.pem wsblast wss://localhost:9001 -c 10 -d 10s
+```
+
+Connect with a name the certificate lists. The mock's startup line shows the address it bound (`wss://127.0.0.1:9001`). Both commands above list `127.0.0.1` and `::1` as well as `localhost`; a certificate issued only for `localhost` fails verification at an IP address, which wsblast reports as `tls_handshake` errors. With mkcert's CA installed, `SSL_CERT_FILE` is not needed.
+
