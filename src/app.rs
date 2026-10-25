@@ -183,12 +183,25 @@ fn run_compare(cli: &Cli) -> Result<()> {
         )));
     }
 
+    let window = cli
+        .compare_window
+        .as_deref()
+        .map(crate::series_compare::CompareWindow::parse)
+        .transpose()?;
+
     let baseline =
         report::parse_report_metrics(&baseline_json).map_err(WsBlastError::Serialization)?;
     let current =
         report::parse_report_metrics(&current_json).map_err(WsBlastError::Serialization)?;
 
-    let comparison = report::compare_metrics(&baseline, &current, cli.compare_threshold);
+    if let Some(window) = &window {
+        for (path, metrics) in [(baseline_path, &baseline), (current_path, &current)] {
+            check_window_covers(window, path, metrics)?;
+        }
+    }
+
+    let comparison =
+        report::compare_metrics_in(&baseline, &current, cli.compare_threshold, window.as_ref());
     let rendered = report::render_comparison_report(&comparison, cli.format, cli.compare_threshold);
 
     println!("{rendered}");
@@ -202,6 +215,36 @@ fn run_compare(cli: &Cli) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// A window can only be applied to a report with a time series, and must
+/// hold at least one of its intervals: otherwise the time-series metrics
+/// would silently drop out of the comparison and a gate on them would pass.
+#[cfg(feature = "compare")]
+fn check_window_covers(
+    window: &crate::series_compare::CompareWindow,
+    path: &std::path::Path,
+    metrics: &crate::metrics::AggregatedMetrics,
+) -> Result<()> {
+    let series = &metrics.time_series;
+    let reason = if series.points.is_empty() {
+        "has no time series (reports from wsblast 0.2.0 and earlier have none)".to_string()
+    } else if crate::series_compare::window_points(series, Some(window))
+        .next()
+        .is_none()
+    {
+        let end = series
+            .points
+            .last()
+            .map_or(0.0, |point| point.start_secs + point.duration_secs);
+        format!("has no interval inside the window (its time series covers 0s..{end:.3}s)")
+    } else {
+        return Ok(());
+    };
+    Err(WsBlastError::Config(ConfigError::InvalidOption(format!(
+        "--compare-window {window}: {} {reason}",
+        path.display()
+    ))))
 }
 
 /// `wsblast render`: reads a saved JSON report and renders it without

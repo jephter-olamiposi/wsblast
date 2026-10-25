@@ -62,6 +62,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --format 'Output report format'
             cand --compare 'Compare two JSON reports for regression detection'
             cand --compare-threshold 'Regression threshold percentage (default: 10%)'
+            cand --compare-window 'Restrict the time-series metrics of --compare to START..END of each run (e.g., ''10s..50s'', ''10s..'', ''..50s'')'
             cand --capture 'Record every data frame and connection event to FILE as JSON lines (see METHODOLOGY.md)'
             cand --capture-limit 'Maximum records --capture writes; later ones are dropped and counted (0 = unlimited)'
             cand -o 'Write output report to the specified file path'

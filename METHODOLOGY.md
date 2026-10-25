@@ -208,6 +208,32 @@ Percentiles cannot be added up, so a monitoring system cannot compute a percenti
 
 **OTLP export.** With `--otel-endpoint URL`, wsblast posts OTLP protobuf to `URL/v1/metrics` (a URL that already ends in `/v1/metrics` is used as given) every `--otel-interval` (default 10 s), and once more when the run ends, so a run shorter than the interval still exports. Counters are cumulative observable counters and the other values observable gauges. Every point carries the attributes `server.address` (the target URL's host) and `wsblast.mode` (the `--mode` value), and the resource carries `service.name` from `--otel-service-name`, else `OTEL_SERVICE_NAME`, else `wsblast`. `OTEL_EXPORTER_OTLP_HEADERS` (or `OTEL_EXPORTER_OTLP_METRICS_HEADERS`) adds request headers and `OTEL_RESOURCE_ATTRIBUTES` adds resource attributes. The endpoint, protocol, timeout and temporality are set by wsblast and their environment variables are ignored; in particular `OTEL_EXPORTER_OTLP_ENDPOINT` does not turn export on, so an environment set up for other programs does not start exporting. Compression is not supported. Exports run on a thread of their own: a slow or unreachable collector never delays a worker. Each export gets at most the export interval or 5 seconds, whichever is shorter, and is not retried, since the next export carries the cumulative values again. The first failed export prints one warning to stderr (after the run with `--tui`) and the run continues; it does not change the report or the exit code. The final export can delay the end of the process by up to that timeout when the collector does not answer.
 
+### 6.5 Time-series metrics in comparisons
+
+`--compare` adds six metrics derived from the time series ([section 6.3](#63-time-series)) when both reports have one. Reports from wsblast 0.2.0 and earlier have no time series, and a comparison with such a report leaves these metrics out, as it does `response_time.*` when one report has no response time. Each metric summarises one report on its own, so two reports with different interval lengths can be compared; points are never paired across reports.
+
+**Window.** `--compare-window START..END` restricts these metrics to the points whose whole interval lies inside the window: `start_secs >= START` and `start_secs + duration_secs <= END`, in seconds since the run started. Either side may be left out (`10s..` skips the warm-up, `..50s` drops the tail) and both take the duration format of `--duration`. START must be before END. Interval boundaries are sampled by a timer and a point usually starts a moment after its nominal boundary, so both edges allow a twentieth of the interval length of slack: with 1-second intervals, `10s..50s` keeps the 40 points that start at 10 s to 49 s. Without the flag every point is used. Whole-run metrics (totals, rates and percentiles) ignore the window. With a window, `--compare` exits with 1 when a report has no time series or no point inside the window, so a gate on these metrics never passes because they were left out.
+
+In the definitions below, *W* is the set of points inside the window. A *full-length* point of *W* is one whose `duration_secs` is at least 95% of `interval_secs`: this leaves out the shorter last interval of a run or of a scenario phase, which covers too little time for a comparable rate. For a full-length point *i*, *r_i* is its `throughput_msg_per_sec` and *d_i* its `duration_secs`.
+
+| Metric | Better | Definition | Undefined (left out) when |
+| :--- | :--- | :--- | :--- |
+| `series.throughput_mean` | higher | Mean throughput weighted by duration: *m* = Σ *r_i d_i* / Σ *d_i* over the full-length points. | *W* has no full-length point. |
+| `series.throughput_cv` | lower | Coefficient of variation of the per-interval throughput: sqrt(Σ *d_i* (*r_i* - *m*)² / Σ *d_i*) / *m*. 0 for perfectly steady throughput; a sawtooth between 50% and 150% of the mean gives 0.5. | Fewer than two full-length points, or *m* = 0. |
+| `series.p99_median_us` | lower | Median of `latency.p99_us` over the points of *W* with at least one latency sample (`latency.count > 0`); for an even number of points, the mean of the two middle values. | No point of *W* has a latency sample. |
+| `series.p99_worst_us` | lower | Largest `latency.p99_us` of those points: the p99 of the worst interval. | No point of *W* has a latency sample. |
+| `series.error_intervals` | lower | Number of points of *W* with `errors > 0`. | *W* is empty. |
+| `series.max_interval_errors` | lower | Largest `errors` of any point of *W*. | *W* is empty. |
+
+A metric that is undefined for one report is not compared. The comparison rules for every other metric apply ([docs/ci.md section 7](docs/ci.md#7-baseline-comparison-rules)): a change counts when its relative size is strictly greater than `--compare-threshold`, a metric that is 0 in both reports is skipped, and one that is 0 in the baseline and not in the current report is a 100% change.
+
+How to read them:
+
+- A stall of the server shows up in `series.p99_worst_us` (the interval in which the late replies arrive) and in `series.throughput_cv` (the interval in which replies stopped), even when it changes the run's totals and whole-run p99 by less than the threshold.
+- `series.p99_median_us` is the typical interval's p99, which a single bad interval does not move; compare it with `series.p99_worst_us` to tell a general slowdown from an isolated one.
+- `series.throughput_cv` and the error metrics are often 0 or close to 0 in a healthy run, so a small absolute change is a large relative one: a baseline CV of 0.01 against 0.02 is a 100% regression. Gate on them only when the baseline is clearly above 0, or choose the metrics a gate fails on as shown in [docs/ci.md section 4.3](docs/ci.md#43-baseline-comparison-against-the-last-run-on-main).
+- Interval percentiles have 1% precision ([section 6.3](#63-time-series)), so changes of `series.p99_*` below about 2% are within rounding.
+
 ### 6.1 What counts as an error
 
 `error_breakdown` counts errors per category: `dns_resolution`, `tcp_connect`, `tls_handshake`, `http_upgrade_rejected`, `protocol_error`, `write_error`, `read_error`, `timeout`, `unexpected_close`, `other`.

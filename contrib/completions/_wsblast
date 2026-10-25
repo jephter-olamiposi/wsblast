@@ -67,6 +67,7 @@ markdown\:"GitHub Flavored Markdown table for PR comments and job summaries"
 html\:"A self-contained HTML page with charts of the time series, to open in a browser or attach to a CI run"))' \
 '*--compare=[Compare two JSON reports for regression detection]:FILE:_files:FILE:_files' \
 '--compare-threshold=[Regression threshold percentage (default\: 10%)]:PERCENT:_default' \
+'--compare-window=[Restrict the time-series metrics of --compare to START..END of each run (e.g., '\''10s..50s'\'', '\''10s..'\'', '\''..50s'\'')]:START..END:_default' \
 '--capture=[Record every data frame and connection event to FILE as JSON lines (see METHODOLOGY.md)]:FILE:_files' \
 '--capture-limit=[Maximum records --capture writes; later ones are dropped and counted (0 = unlimited)]:N:_default' \
 '-o+[Write output report to the specified file path]:FILE:_files' \

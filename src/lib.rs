@@ -159,6 +159,8 @@ mod metrics;
 pub mod mock;
 mod report;
 mod runner;
+#[cfg(feature = "compare")]
+mod series_compare;
 mod timeseries;
 mod tui;
 mod worker;

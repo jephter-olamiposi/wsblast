@@ -65,6 +65,7 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output report format')
             [CompletionResult]::new('--compare', '--compare', [CompletionResultType]::ParameterName, 'Compare two JSON reports for regression detection')
             [CompletionResult]::new('--compare-threshold', '--compare-threshold', [CompletionResultType]::ParameterName, 'Regression threshold percentage (default: 10%)')
+            [CompletionResult]::new('--compare-window', '--compare-window', [CompletionResultType]::ParameterName, 'Restrict the time-series metrics of --compare to START..END of each run (e.g., ''10s..50s'', ''10s..'', ''..50s'')')
             [CompletionResult]::new('--capture', '--capture', [CompletionResultType]::ParameterName, 'Record every data frame and connection event to FILE as JSON lines (see METHODOLOGY.md)')
             [CompletionResult]::new('--capture-limit', '--capture-limit', [CompletionResultType]::ParameterName, 'Maximum records --capture writes; later ones are dropped and counted (0 = unlimited)')
             [CompletionResult]::new('-o', '-o', [CompletionResultType]::ParameterName, 'Write output report to the specified file path')

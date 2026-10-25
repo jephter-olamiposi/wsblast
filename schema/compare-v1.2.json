@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/jephter-olamiposi/wsblast/main/schema/compare-v1.2.json",
+  "title": "wsblast baseline comparison (schema 1.2.x)",
+  "description": "Output of `wsblast --compare BASELINE CURRENT --format json` (also written by `-o FILE`). Derived from `JsonComparison`, `Regression` and `Improvement` in src/report.rs. The baseline and current metrics themselves are not included. Readers must ignore properties they do not know. Schema 1.2 adds the time-series metrics (`series.*`) and `window`, and every 1.1 document is a valid 1.2 document. wsblast writes \"1.2.0\" when both reports have a time series or --compare-window is set, and otherwise \"1.1.0\", byte for byte the output of 0.2.0.",
+  "type": "object",
+  "required": ["schema_version", "threshold", "regressions", "improvements"],
+  "properties": {
+    "schema_version": {
+      "description": "Comparison schema version. wsblast 0.1.x and 0.2.0 write \"1.1.0\". Later releases write \"1.2.0\" when the comparison includes the time-series metrics (both reports have a time series) or a --compare-window, and \"1.1.0\" otherwise.",
+      "type": "string",
+      "pattern": "^1\\.[0-9]+\\.[0-9]+$",
+      "examples": ["1.2.0", "1.1.0"]
+    },
+    "threshold": {
+      "description": "The --compare-threshold value in percent (default 10). A metric is listed only when the absolute relative change is strictly greater than this value.",
+      "type": "number",
+      "minimum": 0
+    },
+    "window": {
+      "description": "The --compare-window the time-series metrics were computed over, in seconds since each run started. Present only when --compare-window was set (schema 1.2). Whole-run metrics ignore it.",
+      "type": "object",
+      "required": ["start_secs"],
+      "properties": {
+        "start_secs": {
+          "description": "Start of the window; 0 when the window was given as ..END.",
+          "type": "number",
+          "minimum": 0
+        },
+        "end_secs": {
+          "description": "End of the window; absent when the window was given as START.. (open-ended).",
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "regressions": {
+      "description": "Metrics that moved in the bad direction by more than the threshold, sorted by metric name. A non-empty list makes --fail-on-regression exit with code 2.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/change" }
+    },
+    "improvements": {
+      "description": "Metrics that moved in the good direction by more than the threshold, sorted by metric name.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/change" }
+    }
+  },
+  "$defs": {
+    "change": {
+      "type": "object",
+      "required": ["metric", "baseline", "current", "pct_change"],
+      "properties": {
+        "metric": {
+          "description": "Compared metric. Higher is better for total_connections_established, total_messages_sent, total_messages_recv, total_bytes_sent, total_bytes_recv, throughput_msg_per_sec, throughput_bytes_per_sec and series.throughput_mean. Lower is better for total_connections_failed, error_rate, errors.<category> (one per error_breakdown key, such as errors.timeout), handshake_latency.{p50,p95,p99,p999}_us, message_rtt.{p50,p95,p99,p999}_us, response_time.{p50,p95,p99,p999}_us, series.throughput_cv, series.p99_median_us, series.p99_worst_us, series.error_intervals and series.max_interval_errors. response_time.* and series.* are compared only when both reports have the metric; series.* (schema 1.2) needs a time series in both reports and is defined in METHODOLOGY.md section 6.5. total_connections_attempted is never compared.",
+          "type": "string",
+          "minLength": 1,
+          "examples": [
+            "throughput_msg_per_sec",
+            "message_rtt.p99_us",
+            "errors.timeout",
+            "series.p99_worst_us"
+          ]
+        },
+        "baseline": {
+          "description": "Value in the baseline report (0 when the metric is absent there, for example a new error category).",
+          "type": "number"
+        },
+        "current": {
+          "description": "Value in the current report (0 when absent).",
+          "type": "number"
+        },
+        "pct_change": {
+          "description": "Signed relative change in percent: (current - baseline) / baseline * 100. When the baseline is 0 and the current value is not, this is exactly 100.",
+          "type": "number"
+        }
+      }
+    }
+  }
+}

@@ -261,6 +261,15 @@ pub(crate) struct Cli {
     )]
     pub compare_threshold: f64,
 
+    /// Restrict the time-series metrics of --compare to START..END of each run (e.g., '10s..50s', '10s..', '..50s')
+    #[cfg(feature = "compare")]
+    #[arg(
+        long = "compare-window",
+        value_name = "START..END",
+        requires = "compare"
+    )]
+    pub compare_window: Option<String>,
+
     /// Fail on regression (exit code 2)
     #[cfg(feature = "compare")]
     #[arg(long = "fail-on-regression", default_value_t = false)]

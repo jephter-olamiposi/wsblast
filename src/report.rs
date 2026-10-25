@@ -4,6 +4,8 @@
 use crate::cli::OutputFormat;
 use crate::config::{LoadTestConfig, SloThresholds};
 use crate::metrics::{AggregatedMetrics, CaptureSummary, DistributedSummary, LatencyStats};
+#[cfg(feature = "compare")]
+use crate::series_compare::{CompareWindow, SERIES_PREFIX, SeriesSummary};
 use colored::Colorize;
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, Color, Row, Table};
@@ -189,6 +191,11 @@ pub(crate) struct BaselineComparison {
     pub(crate) current: AggregatedMetrics,
     pub(crate) regressions: Vec<Regression>,
     pub(crate) improvements: Vec<Improvement>,
+    /// The `--compare-window` the time-series metrics were computed over.
+    pub(crate) window: Option<CompareWindow>,
+    /// Whether both reports had a time series, so `series.*` metrics were
+    /// compared.
+    pub(crate) series_compared: bool,
 }
 
 /// `pct_change` is the signed relative change from baseline to current, in percent.
@@ -250,6 +257,13 @@ fn metric_direction(metric: &str) -> MetricDirection {
         "total_connections_attempted" => MetricDirection::Neutral,
         "total_connections_failed" | "error_rate" => MetricDirection::LowerIsBetter,
         _ if metric.starts_with("errors.") => MetricDirection::LowerIsBetter,
+        _ if metric.starts_with(SERIES_PREFIX) => {
+            if crate::series_compare::higher_is_better(metric) {
+                MetricDirection::HigherIsBetter
+            } else {
+                MetricDirection::LowerIsBetter
+            }
+        }
         _ if metric.starts_with("handshake_latency.")
             || metric.starts_with("message_rtt.")
             || metric.starts_with("response_time.") =>
@@ -260,23 +274,44 @@ fn metric_direction(metric: &str) -> MetricDirection {
     }
 }
 
+/// [`compare_metrics_in`] over the whole run.
+#[cfg(all(feature = "compare", test))]
+pub(crate) fn compare_metrics(
+    baseline: &AggregatedMetrics,
+    current: &AggregatedMetrics,
+    threshold: f64,
+) -> BaselineComparison {
+    compare_metrics_in(baseline, current, threshold, None)
+}
+
 /// Compares two metric snapshots and detects regressions/improvements.
 ///
 /// Each metric is scored by its own direction: throughput and delivery counts
 /// higher is better, while errors and latency percentiles lower is better. A
 /// metric that appears from a zero baseline is reported as a full 100% move so
 /// new error categories cannot be silently skipped.
+///
+/// When both reports have a time series, the `series.*` metrics of
+/// [`SeriesSummary`] are compared too, computed over the points inside
+/// `window` (every point when it is `None`). Whole-run metrics ignore the
+/// window.
 #[cfg(feature = "compare")]
-pub(crate) fn compare_metrics(
+pub(crate) fn compare_metrics_in(
     baseline: &AggregatedMetrics,
     current: &AggregatedMetrics,
     threshold: f64,
+    window: Option<&CompareWindow>,
 ) -> BaselineComparison {
     let mut regressions = Vec::new();
     let mut improvements = Vec::new();
 
-    let baseline_map = metrics_to_map(baseline);
-    let current_map = metrics_to_map(current);
+    let mut baseline_map = metrics_to_map(baseline);
+    let mut current_map = metrics_to_map(current);
+    SeriesSummary::of(&baseline.time_series, window).insert_into(&mut baseline_map);
+    SeriesSummary::of(&current.time_series, window).insert_into(&mut current_map);
+    let has_series =
+        |map: &BTreeMap<String, f64>| map.keys().any(|name| name.starts_with(SERIES_PREFIX));
+    let series_compared = has_series(&baseline_map) && has_series(&current_map);
     let metric_names: std::collections::BTreeSet<&String> =
         baseline_map.keys().chain(current_map.keys()).collect();
 
@@ -287,9 +322,11 @@ pub(crate) fn compare_metrics(
         }
 
         // Response time exists only for paced runs and in reports from 0.3
-        // on; comparing it against a report without it would read as a
-        // regression from zero.
-        if metric_name.starts_with("response_time.")
+        // on, and the time series only in reports from 0.3 on; comparing
+        // either against a report without it would read as a regression
+        // from zero. A time-series metric can also be undefined for one
+        // report, such as the throughput CV of a single interval.
+        if (metric_name.starts_with("response_time.") || metric_name.starts_with(SERIES_PREFIX))
             && !(baseline_map.contains_key(metric_name) && current_map.contains_key(metric_name))
         {
             continue;
@@ -337,6 +374,8 @@ pub(crate) fn compare_metrics(
         current: current.clone(),
         regressions,
         improvements,
+        window: window.copied(),
+        series_compared,
     }
 }
 
@@ -454,7 +493,11 @@ fn render_text_comparison(comparison: &BaselineComparison, threshold: f64) -> St
         "Baseline Comparison Report".bold()
     ));
 
-    out.push_str(&format!("Threshold: ±{:.1}%\n\n", threshold));
+    out.push_str(&format!("Threshold: ±{:.1}%\n", threshold));
+    if let Some(window) = &comparison.window {
+        out.push_str(&format!("Window: {window} (time-series metrics only)\n"));
+    }
+    out.push('\n');
 
     if !comparison.regressions.is_empty() {
         let mut reg_table = Table::new();
@@ -505,13 +548,34 @@ fn render_json_comparison(comparison: &BaselineComparison, threshold: f64) -> St
     struct JsonComparison<'a> {
         schema_version: &'static str,
         threshold: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        window: Option<JsonWindow>,
         regressions: &'a Vec<Regression>,
         improvements: &'a Vec<Improvement>,
     }
 
+    #[derive(serde::Serialize)]
+    struct JsonWindow {
+        start_secs: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        end_secs: Option<f64>,
+    }
+
+    // 1.2.0 adds the `series.*` metrics and `window`. A comparison that
+    // uses neither, such as one of two 0.2.0 reports, is written exactly as
+    // before, as 1.1.0.
+    let schema_version = if comparison.series_compared || comparison.window.is_some() {
+        "1.2.0"
+    } else {
+        "1.1.0"
+    };
     let report = JsonComparison {
-        schema_version: "1.1.0",
+        schema_version,
         threshold,
+        window: comparison.window.map(|window| JsonWindow {
+            start_secs: window.start.map_or(0.0, |start| start.as_secs_f64()),
+            end_secs: window.end.map(|end| end.as_secs_f64()),
+        }),
         regressions: &comparison.regressions,
         improvements: &comparison.improvements,
     };
@@ -523,7 +587,13 @@ fn render_json_comparison(comparison: &BaselineComparison, threshold: f64) -> St
 fn render_markdown_comparison(comparison: &BaselineComparison, threshold: f64) -> String {
     let mut md = String::new();
     md.push_str("# `wsblast` Baseline Comparison Report\n\n");
-    md.push_str(&format!("- **Threshold:** `±{:.1}%`\n\n", threshold));
+    md.push_str(&format!("- **Threshold:** `±{:.1}%`\n", threshold));
+    if let Some(window) = &comparison.window {
+        md.push_str(&format!(
+            "- **Window:** `{window}` (time-series metrics only)\n"
+        ));
+    }
+    md.push('\n');
 
     if !comparison.regressions.is_empty() {
         md.push_str("## ⚠ Regressions Detected\n\n");
@@ -1919,6 +1989,201 @@ mod tests {
             "{:?}",
             comparison.regressions
         );
+    }
+
+    /// `sample_metrics` with a 10-point series at 100 msg/s and a 250 us
+    /// p99, where `stall` makes interval 5 the one whose late replies came
+    /// in with a p99 of `stall` microseconds.
+    #[cfg(feature = "compare")]
+    fn metrics_with_series(stall: Option<u64>) -> AggregatedMetrics {
+        use crate::timeseries::{IntervalLatency, TimeSeries, TimeSeriesPoint};
+        let points = (0..10)
+            .map(|i| TimeSeriesPoint {
+                start_secs: f64::from(i),
+                duration_secs: 1.0,
+                messages_sent: 100,
+                messages_recv: 100,
+                throughput_msg_per_sec: 100.0,
+                latency: IntervalLatency {
+                    count: 100,
+                    p99_us: match stall {
+                        Some(stall) if i == 5 => stall,
+                        _ => 250,
+                    },
+                    ..IntervalLatency::default()
+                },
+                ..TimeSeriesPoint::default()
+            })
+            .collect();
+        let mut metrics = sample_metrics();
+        metrics.time_series = TimeSeries {
+            interval_secs: 1.0,
+            latency_basis: "rtt".into(),
+            points,
+        };
+        metrics
+    }
+
+    #[cfg(feature = "compare")]
+    fn changed_metrics(comparison: &BaselineComparison) -> Vec<&str> {
+        comparison
+            .regressions
+            .iter()
+            .map(|item| item.metric.as_str())
+            .chain(
+                comparison
+                    .improvements
+                    .iter()
+                    .map(|item| item.metric.as_str()),
+            )
+            .collect()
+    }
+
+    #[cfg(feature = "compare")]
+    #[test]
+    fn series_metrics_are_compared_only_when_both_reports_have_a_series() {
+        let stalled = metrics_with_series(Some(2_000_000));
+        for (baseline, current) in [
+            (sample_metrics(), stalled.clone()),
+            (stalled.clone(), sample_metrics()),
+        ] {
+            let comparison = compare_metrics(&baseline, &current, 5.0);
+            assert!(!comparison.series_compared);
+            assert!(
+                changed_metrics(&comparison).is_empty(),
+                "{:?}",
+                changed_metrics(&comparison)
+            );
+        }
+
+        let comparison = compare_metrics(&metrics_with_series(None), &stalled, 5.0);
+        assert!(comparison.series_compared);
+        let regressed: Vec<&str> = comparison
+            .regressions
+            .iter()
+            .map(|item| item.metric.as_str())
+            .collect();
+        assert_eq!(regressed, ["series.p99_worst_us"]);
+        assert!(comparison.improvements.is_empty());
+        let worst = &comparison.regressions[0];
+        assert_eq!((worst.baseline, worst.current), (250.0, 2_000_000.0));
+    }
+
+    #[cfg(feature = "compare")]
+    #[test]
+    fn series_metrics_follow_their_direction() {
+        let baseline = metrics_with_series(None);
+        let mut current = metrics_with_series(None);
+        for point in &mut current.time_series.points {
+            point.throughput_msg_per_sec = 150.0;
+            point.errors = 1;
+        }
+        let comparison = compare_metrics(&baseline, &current, 5.0);
+        let improved: Vec<&str> = comparison
+            .improvements
+            .iter()
+            .map(|item| item.metric.as_str())
+            .collect();
+        assert_eq!(improved, ["series.throughput_mean"]);
+        let regressed: Vec<&str> = comparison
+            .regressions
+            .iter()
+            .map(|item| item.metric.as_str())
+            .collect();
+        assert_eq!(
+            regressed,
+            ["series.error_intervals", "series.max_interval_errors"]
+        );
+
+        // A series with one interval has no throughput CV; the other
+        // report's CV is not compared against a missing value.
+        let mut single = metrics_with_series(None);
+        single.time_series.points.truncate(1);
+        let mut sawtooth = metrics_with_series(None);
+        for (i, point) in sawtooth.time_series.points.iter_mut().enumerate() {
+            point.throughput_msg_per_sec = if i % 2 == 0 { 50.0 } else { 150.0 };
+        }
+        let comparison = compare_metrics(&single, &sawtooth, 5.0);
+        assert!(
+            !changed_metrics(&comparison).contains(&"series.throughput_cv"),
+            "{:?}",
+            changed_metrics(&comparison)
+        );
+        let comparison = compare_metrics(&metrics_with_series(None), &sawtooth, 5.0);
+        assert!(
+            comparison
+                .regressions
+                .iter()
+                .any(|item| item.metric == "series.throughput_cv")
+        );
+    }
+
+    #[cfg(feature = "compare")]
+    #[test]
+    fn the_window_restricts_only_series_metrics() {
+        let baseline = metrics_with_series(None);
+        let current = metrics_with_series(Some(2_000_000));
+        let window = CompareWindow::parse("6s..").unwrap();
+        let comparison = compare_metrics_in(&baseline, &current, 5.0, Some(&window));
+        assert!(comparison.series_compared);
+        assert!(
+            changed_metrics(&comparison).is_empty(),
+            "{:?}",
+            changed_metrics(&comparison)
+        );
+
+        let mut slower = current.clone();
+        slower.message_rtt = latency(1_000);
+        let comparison = compare_metrics_in(&baseline, &slower, 5.0, Some(&window));
+        assert!(
+            comparison
+                .regressions
+                .iter()
+                .any(|item| item.metric == "message_rtt.p99_us")
+        );
+    }
+
+    #[cfg(feature = "compare")]
+    #[test]
+    fn comparison_schema_version_moves_to_1_2_only_with_series_or_window() {
+        let version = |comparison: &BaselineComparison| {
+            let rendered = render_comparison_report(comparison, OutputFormat::Json, 10.0);
+            let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+            (
+                parsed["schema_version"].clone(),
+                parsed.get("window").cloned(),
+            )
+        };
+        let legacy = compare_metrics(&sample_metrics(), &sample_metrics(), 10.0);
+        assert_eq!(version(&legacy), (serde_json::json!("1.1.0"), None));
+
+        let series = metrics_with_series(None);
+        let both = compare_metrics(&series, &series, 10.0);
+        assert_eq!(version(&both), (serde_json::json!("1.2.0"), None));
+
+        let window = CompareWindow::parse("2s..8s").unwrap();
+        let windowed = compare_metrics_in(&series, &series, 10.0, Some(&window));
+        assert_eq!(
+            version(&windowed),
+            (
+                serde_json::json!("1.2.0"),
+                Some(serde_json::json!({ "start_secs": 2.0, "end_secs": 8.0 }))
+            )
+        );
+        let open = CompareWindow::parse("..8s").unwrap();
+        let open_start = compare_metrics_in(&series, &series, 10.0, Some(&open));
+        assert_eq!(
+            version(&open_start).1,
+            Some(serde_json::json!({ "start_secs": 0.0, "end_secs": 8.0 }))
+        );
+
+        for format in [OutputFormat::Text, OutputFormat::Markdown] {
+            let rendered = strip_ansi(&render_comparison_report(&windowed, format, 10.0));
+            assert!(rendered.contains("Window:"), "{rendered}");
+            assert!(rendered.contains("2s..8s"), "{rendered}");
+            let rendered = render_comparison_report(&both, format, 10.0);
+            assert!(!rendered.contains("Window"), "{rendered}");
+        }
     }
 
     #[test]

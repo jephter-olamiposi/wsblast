@@ -1,6 +1,6 @@
 # Print an optspec for argparse to handle cmd's options that are independent of any subcommand.
 function __fish_wsblast_global_optspecs
-    string join \n u/url= c/connections= ramp-rate= d/duration= stages= n/requests= r/rate= p/payload= payload-file= binary H/header= subprotocol= mode= connect-timeout= message-timeout= match= ping-interval= max-p50= max-p95= max-p99= max-p999= max-error-rate= min-throughput= auth-type= auth-token= auth-token-cmd= auth-token-cmd-timeout= auth-token-refresh= auth-header= auth-apikey= auth-apikey-header= graphql-ws-operation-name= graphql-ws-operation= graphql-ws-variables= graphql-ws-extensions= format= compare= compare-threshold= fail-on-regression capture= capture-limit= o/output= tui no-progress no-reconnect prometheus-listen= otel-endpoint= otel-interval= otel-service-name= scenario= phase= agents= agent-token= agent-timeout= agent-ca= h/help V/version
+    string join \n u/url= c/connections= ramp-rate= d/duration= stages= n/requests= r/rate= p/payload= payload-file= binary H/header= subprotocol= mode= connect-timeout= message-timeout= match= ping-interval= max-p50= max-p95= max-p99= max-p999= max-error-rate= min-throughput= auth-type= auth-token= auth-token-cmd= auth-token-cmd-timeout= auth-token-refresh= auth-header= auth-apikey= auth-apikey-header= graphql-ws-operation-name= graphql-ws-operation= graphql-ws-variables= graphql-ws-extensions= format= compare= compare-threshold= compare-window= fail-on-regression capture= capture-limit= o/output= tui no-progress no-reconnect prometheus-listen= otel-endpoint= otel-interval= otel-service-name= scenario= phase= agents= agent-token= agent-timeout= agent-ca= h/help V/version
 end
 
 function __fish_wsblast_needs_command
@@ -69,6 +69,7 @@ markdown\t'GitHub Flavored Markdown table for PR comments and job summaries'
 html\t'A self-contained HTML page with charts of the time series, to open in a browser or attach to a CI run'"
 complete -c wsblast -n "__fish_wsblast_needs_command" -l compare -d 'Compare two JSON reports for regression detection' -r -F
 complete -c wsblast -n "__fish_wsblast_needs_command" -l compare-threshold -d 'Regression threshold percentage (default: 10%)' -r
+complete -c wsblast -n "__fish_wsblast_needs_command" -l compare-window -d 'Restrict the time-series metrics of --compare to START..END of each run (e.g., \'10s..50s\', \'10s..\', \'..50s\')' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l capture -d 'Record every data frame and connection event to FILE as JSON lines (see METHODOLOGY.md)' -r -F
 complete -c wsblast -n "__fish_wsblast_needs_command" -l capture-limit -d 'Maximum records --capture writes; later ones are dropped and counted (0 = unlimited)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -s o -l output -d 'Write output report to the specified file path' -r -F

@@ -1,6 +1,6 @@
 # Running wsblast in CI
 
-This guide covers SLO gates, report artifacts and baseline comparison in GitHub Actions, GitLab CI and plain shell. For how each number is measured, see [METHODOLOGY.md](../METHODOLOGY.md). The JSON formats are described by [schema/report-v1.json](../schema/report-v1.json) and [schema/compare-v1.1.json](../schema/compare-v1.1.json).
+This guide covers SLO gates, report artifacts and baseline comparison in GitHub Actions, GitLab CI and plain shell. For how each number is measured, see [METHODOLOGY.md](../METHODOLOGY.md). The JSON formats are described by [schema/report-v1.json](../schema/report-v1.json) and [schema/compare-v1.2.json](../schema/compare-v1.2.json) (which also covers the 1.1 documents of wsblast 0.2.0).
 
 Contents:
 
@@ -271,6 +271,22 @@ jobs:
 
 `--fail-on-regression` fails on any regressed metric, including counters and every percentile. The last step instead reads the comparison JSON and fails only on a chosen set of metrics: `jq -e` exits with 1 when the expression is false. Metric names are listed in [section 7](#7-baseline-comparison-rules).
 
+To gate on the steady state of the run instead, and catch a stall or an error burst that the totals average away, compare the time-series metrics over a window that leaves out the ramp and the ramp-down. This step fails only when the worst interval's p99 or the mean steady-state throughput regressed; both reports need a time series, so the baseline must come from wsblast 0.3 or later:
+
+```yaml
+      - name: Compare steady state with baseline
+        if: steps.baseline.outputs.found == 'true'
+        run: |
+          wsblast --compare baseline/current.json current.json \
+            --compare-window 10s..50s --compare-threshold 15 \
+            --format json -o compare-steady.json > /dev/null
+          jq -e '[.regressions[].metric]
+                 | map(select(. == "series.p99_worst_us" or . == "series.throughput_mean"))
+                 | length == 0' compare-steady.json
+```
+
+With `-d 60s`, `10s..50s` skips the first 10 seconds and the last 10. The window applies only to the `series.*` metrics; the whole-run metrics in the same JSON are unchanged by it.
+
 The `--workflow` value must match this workflow's file name under `.github/workflows/`.
 
 ## 5. GitLab CI
@@ -377,13 +393,34 @@ exit "$status"
 
 `wsblast --compare BASELINE CURRENT` reads two JSON reports. Each may be a full report (`--format json` output) or a bare metrics object.
 
+| Flag | Default | Effect |
+| :--- | :--- | :--- |
+| `--compare-threshold PERCENT` | 10 | A metric is reported when its relative change is strictly greater than this. |
+| `--fail-on-regression` | off | Exit with 2 when any metric regressed. |
+| `--compare-window START..END` | whole run | Compute the `series.*` metrics only over the intervals that lie fully inside START..END of each run, for example `10s..50s`; either side may be left out (`10s..` skips the warm-up, `..50s` drops the tail). START must be before END. With a window, a report without a time series or without an interval inside the window is an error (exit 1). Whole-run metrics ignore it. |
+
 For each metric it computes `pct_change = (current - baseline) / baseline * 100` and reports the metric only when `|pct_change|` is strictly greater than `--compare-threshold` (default 10):
 
 | Direction | Metrics |
 | :--- | :--- |
 | Higher is better | `total_connections_established`, `total_messages_sent`, `total_messages_recv`, `total_bytes_sent`, `total_bytes_recv`, `throughput_msg_per_sec`, `throughput_bytes_per_sec` |
 | Lower is better | `total_connections_failed`, `error_rate`, `errors.<category>` (one per error category, for example `errors.timeout`), `handshake_latency.p50_us`, `.p95_us`, `.p99_us`, `.p999_us`, `message_rtt.p50_us`, `.p95_us`, `.p99_us`, `.p999_us`, and for paced runs `response_time.p50_us`, `.p95_us`, `.p99_us`, `.p999_us` (compared only when both reports have them) |
+| Higher is better, from the time series | `series.throughput_mean` |
+| Lower is better, from the time series | `series.throughput_cv`, `series.p99_median_us`, `series.p99_worst_us`, `series.error_intervals`, `series.max_interval_errors` |
 | Not compared | `total_connections_attempted`, `total_reconnects`, mean, min, max, p75, p90, p99.99 |
+
+The `series.*` metrics summarise each report's time series (one point per interval, see [METHODOLOGY.md section 6.3](../METHODOLOGY.md#63-time-series)) over the `--compare-window`, or the whole run without one:
+
+| Metric | Definition |
+| :--- | :--- |
+| `series.throughput_mean` | Mean of the per-interval `throughput_msg_per_sec`, weighted by interval duration, over the full-length intervals (the shorter last interval of a run or scenario phase is left out). |
+| `series.throughput_cv` | Coefficient of variation (standard deviation divided by mean, duration-weighted) of the same per-interval throughput: 0 when it is steady. Left out with fewer than two full-length intervals or a mean of 0. |
+| `series.p99_median_us` | Median of the interval p99 latencies, over the intervals with latency samples. |
+| `series.p99_worst_us` | Highest interval p99 latency. |
+| `series.error_intervals` | Number of intervals with at least one error. |
+| `series.max_interval_errors` | Most errors in one interval. |
+
+They are compared only when both reports have a time series. A comparison with a report from wsblast 0.2.0 or earlier, which has none, leaves them out and prints exactly what 0.2.0 printed. A metric that is undefined for one report (see the table) is also left out. Each metric summarises one report, so reports with different interval lengths can be compared. [METHODOLOGY.md section 6.5](../METHODOLOGY.md#65-time-series-metrics-in-comparisons) has the exact definitions.
 
 Edge cases:
 
@@ -393,6 +430,8 @@ Edge cases:
 - The comparison does not check that both runs used the same settings. Counters such as `total_messages_sent` scale with `-c`, `-d` and `-r`, so a shorter run shows up as a regression. Compare runs made with the same command line.
 - Compare runs of the same mode. A stream or listen report has an empty RTT histogram (all percentiles 0), so comparing it with an echo report flags every RTT percentile.
 - The comparison JSON (`--format json`) lists only the regressions and improvements, not the two reports. Archive the reports themselves if you need the raw values later.
+- `series.throughput_cv` and the error metrics are 0 or close to it in a healthy run, so a tiny absolute change is a large relative one, and a first error interval is a 100% change. Gate on them with care, or select the metrics a gate fails on with `jq` as in [section 4.3](#43-baseline-comparison-against-the-last-run-on-main).
+- Schema version: the comparison JSON says `"schema_version": "1.2.0"` and includes a `window` object when `--compare-window` is set, and says 1.2.0 when both reports have a time series. A comparison of two reports without a time series and without a window is written as `"1.1.0"`, byte for byte as wsblast 0.2.0 wrote it. Readers of 1.1 keep working: 1.2 only adds metric names and the optional `window` property. See [schema/compare-v1.2.json](../schema/compare-v1.2.json).
 
 A local check: comparing a clean echo report with one from a run where every request timed out listed `error_rate` (0 to 1) and `errors.timeout` (0 to 51) as regressions with `pct_change` 100; `--fail-on-regression` made the same command exit with 2, and without it the exit code was 0.
 
