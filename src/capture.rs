@@ -466,6 +466,309 @@ fn write_line(out: &mut impl Write, value: &impl serde::Serialize) -> std::io::R
     out.write_all(b"\n")
 }
 
+/// Records an agent formats and sends to its coordinator at a time.
+#[cfg(feature = "distributed")]
+const FORWARD_BATCH: usize = 1_024;
+
+#[cfg(feature = "distributed")]
+use crate::distributed::WireRecord;
+
+/// The record as it travels to a distributed coordinator.
+#[cfg(feature = "distributed")]
+fn wire_record(record: &Record) -> WireRecord {
+    let line = Line::new(record);
+    WireRecord {
+        t_us: line.t_us,
+        worker: line.worker,
+        dir: line.dir.to_string(),
+        kind: line.kind.to_string(),
+        len: line.len,
+        code: line.code,
+        data: line.data.map(Cow::into_owned),
+    }
+}
+
+/// A distributed agent's capture: the same bounded queue, limit and drop
+/// counting as a capture file, with a thread that formats the records and
+/// hands them in batches to the control channel instead of a file.
+///
+/// The thread waits when the control channel is behind, never the workers:
+/// the queue then fills and further records are dropped and counted, as
+/// they are when a disk is too slow.
+#[cfg(feature = "distributed")]
+#[derive(Debug)]
+pub(crate) struct ForwardingCapture {
+    handle: CaptureHandle,
+    thread: std::thread::JoinHandle<u64>,
+}
+
+#[cfg(feature = "distributed")]
+impl ForwardingCapture {
+    /// Starts forwarding. Record timestamps count from `start`; `limit` is
+    /// the number of records this agent may still queue, `None` for no
+    /// limit.
+    pub(crate) fn start(
+        start: Instant,
+        limit: Option<u64>,
+        out: tokio::sync::mpsc::Sender<Vec<WireRecord>>,
+    ) -> std::io::Result<Self> {
+        let (sender, receiver) = sync_channel(QUEUE_CAPACITY);
+        let thread = std::thread::Builder::new()
+            .name("wsblast-capture-forward".into())
+            .spawn(move || forward_records(&receiver, &out))?;
+        Ok(Self {
+            handle: CaptureHandle(Arc::new(Shared {
+                sender,
+                start,
+                limit: limit.unwrap_or(u64::MAX),
+                claimed: AtomicU64::new(0),
+                dropped: AtomicU64::new(0),
+            })),
+            thread,
+        })
+    }
+
+    pub(crate) fn handle(&self) -> CaptureHandle {
+        self.handle.clone()
+    }
+
+    /// Forwards every queued record and returns the number of records
+    /// dropped. Call it once every worker has stopped, while the batches are
+    /// still being read.
+    pub(crate) async fn finish(self) -> u64 {
+        let Self { handle, thread } = self;
+        tokio::task::spawn_blocking(move || {
+            let _ = handle.0.sender.send(Command::Finish);
+            let lost = thread.join().unwrap_or(0);
+            handle.0.dropped.load(Ordering::Relaxed) + lost
+        })
+        .await
+        .unwrap_or(0)
+    }
+}
+
+/// The forwarding thread: batches of formatted records until
+/// [`Command::Finish`] arrives or every sender is gone. Returns the records
+/// it could not hand over because the control channel was closed.
+#[cfg(feature = "distributed")]
+fn forward_records(
+    receiver: &Receiver<Command>,
+    out: &tokio::sync::mpsc::Sender<Vec<WireRecord>>,
+) -> u64 {
+    let mut lost = 0u64;
+    let mut batch: Vec<WireRecord> = Vec::with_capacity(FORWARD_BATCH);
+    let mut send = |batch: &mut Vec<WireRecord>| {
+        if batch.is_empty() {
+            return;
+        }
+        let records = std::mem::replace(batch, Vec::with_capacity(FORWARD_BATCH));
+        let count = records.len() as u64;
+        if out.blocking_send(records).is_err() {
+            lost += count;
+        }
+    };
+    loop {
+        match receiver.try_recv() {
+            Ok(Command::Record(record)) => {
+                batch.push(wire_record(&record));
+                if batch.len() >= FORWARD_BATCH {
+                    send(&mut batch);
+                }
+            }
+            Ok(Command::Finish) | Err(TryRecvError::Disconnected) => break,
+            Err(TryRecvError::Empty) => {
+                send(&mut batch);
+                std::thread::sleep(WRITER_POLL_INTERVAL);
+            }
+        }
+    }
+    send(&mut batch);
+    lost
+}
+
+/// Records of one agent for the coordinator's capture file.
+#[cfg(feature = "distributed")]
+#[derive(Debug)]
+pub(crate) struct MergedBatch {
+    /// The agent's position in `--agents`, from 0.
+    pub(crate) agent: usize,
+    /// Added to every record's `t_us`: when the phase started on the
+    /// coordinator, counted from the start of the capture.
+    pub(crate) offset_us: u64,
+    pub(crate) records: Vec<WireRecord>,
+}
+
+/// One line of a distributed capture file.
+#[cfg(feature = "distributed")]
+#[derive(serde::Serialize)]
+struct MergedLine<'a> {
+    t_us: u64,
+    agent: usize,
+    worker: usize,
+    dir: &'a str,
+    kind: &'a str,
+    len: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<&'a str>,
+}
+
+/// What the coordinator's writer did.
+#[cfg(feature = "distributed")]
+#[derive(Debug)]
+struct MergedOutcome {
+    writer: WriterOutcome,
+    /// Records that arrived after the limit was reached.
+    over_limit: u64,
+}
+
+/// A distributed coordinator's capture file: one writer thread writes the
+/// records every agent sends, with the agent added to each line, and keeps
+/// the limit for the whole run.
+#[cfg(feature = "distributed")]
+#[derive(Debug)]
+pub(crate) struct MergedCapture {
+    sender: tokio::sync::mpsc::Sender<MergedBatch>,
+    thread: std::thread::JoinHandle<MergedOutcome>,
+    path: PathBuf,
+    limit: u64,
+    /// Records handed to the writer so far.
+    queued: Arc<AtomicU64>,
+}
+
+#[cfg(feature = "distributed")]
+impl CaptureFile {
+    /// Starts the coordinator's writer thread. The header line names the
+    /// agents, in `--agents` order, which the `agent` field of every record
+    /// indexes.
+    pub(crate) fn start_merged(self, agents: &[String]) -> std::io::Result<MergedCapture> {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<MergedBatch>(64);
+        let header = serde_json::json!({
+            "wsblast_capture": FORMAT_VERSION,
+            "target": self.target,
+            "started": crate::clock::rfc3339_utc(SystemTime::now()),
+            "agents": agents,
+        });
+        let file = self.file;
+        let limit = if self.limit == 0 {
+            u64::MAX
+        } else {
+            self.limit
+        };
+        let thread = std::thread::Builder::new()
+            .name("wsblast-capture".into())
+            .spawn(move || {
+                let mut out = BufWriter::with_capacity(256 * 1024, file);
+                let mut writer = WriterOutcome {
+                    written: 0,
+                    lost: 0,
+                    error: write_line(&mut out, &header).err(),
+                };
+                let mut over_limit = 0u64;
+                while let Some(batch) = receiver.blocking_recv() {
+                    for record in &batch.records {
+                        if writer.written + writer.lost >= limit {
+                            over_limit += 1;
+                            continue;
+                        }
+                        if writer.error.is_some() {
+                            writer.lost += 1;
+                            continue;
+                        }
+                        let line = MergedLine {
+                            t_us: record.t_us.saturating_add(batch.offset_us),
+                            agent: batch.agent,
+                            worker: record.worker,
+                            dir: &record.dir,
+                            kind: &record.kind,
+                            len: record.len,
+                            code: record.code,
+                            data: record.data.as_deref(),
+                        };
+                        match write_line(&mut out, &line) {
+                            Ok(()) => writer.written += 1,
+                            Err(err) => {
+                                writer.lost += 1;
+                                writer.error = Some(err);
+                            }
+                        }
+                    }
+                }
+                if writer.error.is_none()
+                    && let Err(err) = out.flush()
+                {
+                    writer.error = Some(err);
+                }
+                MergedOutcome { writer, over_limit }
+            })?;
+        Ok(MergedCapture {
+            sender,
+            thread,
+            path: self.path,
+            limit: self.limit,
+            queued: Arc::new(AtomicU64::new(0)),
+        })
+    }
+}
+
+#[cfg(feature = "distributed")]
+impl MergedCapture {
+    /// Where the agents' records go, and the count of records sent there.
+    pub(crate) fn sink(&self) -> (tokio::sync::mpsc::Sender<MergedBatch>, Arc<AtomicU64>) {
+        (self.sender.clone(), Arc::clone(&self.queued))
+    }
+
+    /// Records the agents may still send before the limit is reached;
+    /// `None` without a limit.
+    pub(crate) fn remaining(&self) -> Option<u64> {
+        (self.limit != 0).then(|| {
+            self.limit
+                .saturating_sub(self.queued.load(Ordering::Relaxed))
+        })
+    }
+
+    /// Writes out every record received, closes the file and returns the
+    /// totals; `agents_dropped` is what the agents reported dropping. Call
+    /// it once every agent's control task has ended.
+    pub(crate) async fn finish(self, agents_dropped: u64) -> CaptureSummary {
+        let Self {
+            sender,
+            thread,
+            path,
+            limit,
+            ..
+        } = self;
+        drop(sender);
+        let outcome = tokio::task::spawn_blocking(move || thread.join())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_else(|| MergedOutcome {
+                writer: WriterOutcome {
+                    written: 0,
+                    lost: 0,
+                    error: Some(std::io::Error::other("capture writer thread panicked")),
+                },
+                over_limit: 0,
+            });
+        if let Some(err) = &outcome.writer.error {
+            eprintln!(
+                "{} writing capture file '{}' failed after {} records: {err}",
+                colored::Colorize::yellow(colored::Colorize::bold("Warning:")),
+                path.display(),
+                outcome.writer.written
+            );
+        }
+        CaptureSummary {
+            path: path.display().to_string(),
+            frames_written: outcome.writer.written,
+            frames_dropped: agents_dropped + outcome.writer.lost + outcome.over_limit,
+            limit,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

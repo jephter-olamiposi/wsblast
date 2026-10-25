@@ -538,11 +538,7 @@ async fn cli_reports_a_lost_agent_and_exits_with_1() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cli_rejects_unsupported_combinations_and_missing_tokens() {
-    for extra in [
-        &["--tui"][..],
-        &["--prometheus-listen", "127.0.0.1:0"],
-        &["--capture", "never-written.jsonl"],
-    ] {
+    for extra in [&["--tui"][..], &["--prometheus-listen", "127.0.0.1:0"]] {
         let mut args = vec!["ws://127.0.0.1:9/", "--agents", "127.0.0.1:9"];
         args.extend_from_slice(extra);
         let finished = wsblast(&args, Some(TOKEN)).await;
@@ -951,6 +947,122 @@ phases:
         .to_string();
     assert!(err.contains("phase 'tiny'"), "{err}");
     assert!(err.contains("3 agents cannot share 2 connections"), "{err}");
+}
+
+fn read_capture(path: &std::path::Path) -> (serde_json::Value, Vec<serde_json::Value>) {
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut lines = text.lines().map(|line| serde_json::from_str(line).unwrap());
+    let header = lines.next().expect("a header line");
+    (header, lines.collect())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agents_stream_their_capture_into_one_file() {
+    let harness = harness(3, None).await;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("distributed-capture");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("all.jsonl");
+    let outcome = run(&harness, |b| {
+        b.connections(6)
+            .duration(Duration::from_millis(1_200))
+            .rate_per_connection(20)
+            .capture(&path)
+            .capture_limit(0)
+    })
+    .await
+    .unwrap();
+
+    let (header, records) = read_capture(&path);
+    assert_eq!(header["wsblast_capture"], 1);
+    assert_eq!(header["target"], format!("{}/", harness.target));
+    assert_eq!(header["agents"], serde_json::json!(harness.agents));
+    let summary = outcome.metrics.capture.as_ref().expect("a capture summary");
+    assert_eq!(summary.frames_written, records.len() as u64);
+    assert_eq!(summary.frames_dropped, 0);
+    assert_eq!(summary.limit, 0);
+    for agent in 0..3u64 {
+        let opens = records
+            .iter()
+            .filter(|r| r["agent"] == agent && r["kind"] == "open")
+            .count();
+        assert_eq!(opens, 2, "agent {agent} opened its 2 connections");
+    }
+    let count = |dir: &str| {
+        records
+            .iter()
+            .filter(|r| r["dir"] == dir && r["kind"] == "text")
+            .count() as u64
+    };
+    assert_eq!(count("sent"), outcome.metrics.total_messages_sent);
+    assert_eq!(count("recv"), outcome.metrics.total_messages_recv);
+    // Every agent's records are timed from the start of the run.
+    assert!(
+        records
+            .iter()
+            .all(|r| r["t_us"].as_u64().unwrap() < 5_000_000)
+    );
+
+    // `wsblast mock --replay` reads the merged file, and keeps the agents'
+    // connections apart.
+    MockConfig::builder()
+        .listen("127.0.0.1:0")
+        .replay(&path)
+        .build()
+        .unwrap();
+
+    // The limit holds for the whole run, across agents.
+    let limited = dir.join("limited.jsonl");
+    let outcome = run(&harness, |b| {
+        b.connections(3)
+            .duration(Duration::from_millis(800))
+            .rate_per_connection(50)
+            .capture(&limited)
+            .capture_limit(25)
+    })
+    .await
+    .unwrap();
+    let (_, records) = read_capture(&limited);
+    let summary = outcome.metrics.capture.unwrap();
+    assert_eq!(records.len(), 25);
+    assert_eq!(summary.frames_written, 25);
+    assert_eq!(summary.limit, 25);
+    let produced = outcome.metrics.total_messages_sent + outcome.metrics.total_messages_recv;
+    assert!(
+        summary.frames_written + summary.frames_dropped >= produced,
+        "{summary:?} for {produced} frames"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_scenario_capture_spans_every_phase() {
+    let harness = harness(2, None).await;
+    let dir =
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("distributed-capture-scenario");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("scenario.jsonl");
+    let scenario = two_phase_scenario(&harness.target, "600ms", "300ms");
+    let base = LoadTestConfig::builder(&harness.target)
+        .capture(&path)
+        .capture_limit(0)
+        .build()
+        .unwrap();
+    let outcome = Coordinator::scenario(&scenario, base, None, None, &harness.agents, TOKEN)
+        .unwrap()
+        .with_signal_handling(false)
+        .run_scenario()
+        .await
+        .unwrap();
+    let (_, records) = read_capture(&path);
+    let metrics = &outcome.scenario.metrics;
+    let summary = metrics.capture.as_ref().unwrap();
+    assert_eq!(summary.frames_written, records.len() as u64);
+    let opens = records.iter().filter(|r| r["kind"] == "open").count() as u64;
+    assert_eq!(opens, metrics.total_connections_established);
+    // Records of the second phase come after the first phase's run time.
+    let first = outcome.scenario.phases[0].metrics.elapsed.as_micros() as u64;
+    assert!(records.iter().any(|r| r["t_us"].as_u64().unwrap() > first));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

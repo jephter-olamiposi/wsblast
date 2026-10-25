@@ -767,13 +767,20 @@ struct ReplayFrame {
 struct ReplayScript {
     source: String,
     /// One entry per recorded worker that received at least one data
-    /// frame, in worker order.
+    /// frame, in agent and worker order.
     workers: Vec<Vec<ReplayFrame>>,
 }
+
+/// A recorded worker's first record time and its received frames.
+type RecordedWorker = (u64, Vec<(u64, Message)>);
 
 #[derive(serde::Deserialize)]
 struct CaptureLine {
     t_us: u64,
+    /// The agent of a distributed capture; connection slots are numbered
+    /// per agent.
+    #[serde(default)]
+    agent: u64,
     worker: u64,
     dir: String,
     kind: String,
@@ -819,12 +826,12 @@ impl ReplayScript {
         }
 
         // Per recorded worker: its first record's time and its frames.
-        let mut workers: BTreeMap<u64, (u64, Vec<(u64, Message)>)> = BTreeMap::new();
+        let mut workers: BTreeMap<(u64, u64), RecordedWorker> = BTreeMap::new();
         for (number, line) in lines {
             let record: CaptureLine = serde_json::from_str(line)
                 .map_err(|err| fail(number, &format!("invalid record: {err}")))?;
             let entry = workers
-                .entry(record.worker)
+                .entry((record.agent, record.worker))
                 .or_insert((record.t_us, Vec::new()));
             entry.0 = entry.0.min(record.t_us);
             if record.dir != "recv" {
@@ -1125,6 +1132,20 @@ mod tests {
             Message::Binary(bytes::Bytes::from_static(&[0, 255]))
         );
         assert_eq!(script.frames_for(2).len(), 1, "round robin wraps");
+    }
+
+    #[test]
+    fn replay_keeps_the_agents_of_a_distributed_capture_apart() {
+        let capture = r#"{"wsblast_capture":1,"target":"ws://127.0.0.1:9001/","started":"2026-10-25T00:00:00.000Z","agents":["a:1","b:1"]}
+{"t_us":100,"agent":0,"worker":0,"dir":"recv","kind":"text","len":1,"data":"a"}
+{"t_us":150,"agent":1,"worker":0,"dir":"recv","kind":"text","len":1,"data":"b"}
+{"t_us":300,"agent":1,"worker":0,"dir":"recv","kind":"text","len":1,"data":"c"}
+"#;
+        let script = ReplayScript::parse(capture, "test".into()).unwrap();
+        assert_eq!(script.workers.len(), 2);
+        assert_eq!(script.frames_for(0).len(), 1);
+        assert_eq!(script.frames_for(1).len(), 2);
+        assert_eq!(script.frames_for(1)[1].offset, Duration::from_micros(150));
     }
 
     #[test]

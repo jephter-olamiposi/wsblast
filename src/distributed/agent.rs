@@ -435,6 +435,11 @@ fn unexpected(message: &Message, expected: &str) -> String {
     format!("expected a {expected} message, received {}", message.kind())
 }
 
+/// Batches of capture records a phase may hold before its forwarding
+/// thread waits for the control channel.
+#[cfg(feature = "capture")]
+const CAPTURE_BATCHES: usize = 16;
+
 /// How a phase of a test ended.
 enum PhaseEnd {
     /// The result was sent; the coordinator may send another phase.
@@ -523,8 +528,24 @@ fn phase_runner(
     }
 }
 
+#[cfg(feature = "capture")]
+type CaptureBatches = Option<tokio::sync::mpsc::Receiver<Vec<super::WireRecord>>>;
+#[cfg(not(feature = "capture"))]
+type CaptureBatches = Option<std::convert::Infallible>;
+
+/// The next batch of capture records; pending forever without capture.
+async fn next_batch(batches: &mut CaptureBatches) -> Option<Vec<super::WireRecord>> {
+    match batches {
+        #[cfg(feature = "capture")]
+        Some(receiver) => receiver.recv().await,
+        #[cfg(not(feature = "capture"))]
+        Some(never) => match *never {},
+        None => std::future::pending().await,
+    }
+}
+
 /// Runs one phase: validate and answer `ready`, wait for `start`, run while
-/// sending snapshots, and send the result.
+/// sending snapshots and capture records, and send the result.
 #[allow(clippy::too_many_arguments)]
 async fn run_phase<S>(
     sink: &mut Sink<S>,
@@ -541,6 +562,14 @@ where
 {
     let closed = |_| String::new();
     let phase = wire.phase.take();
+    let capture = wire.capture.take();
+    #[cfg(not(feature = "capture"))]
+    if capture.is_some() {
+        return Err(
+            "invalid configuration: --capture needs the 'capture' feature, which this agent's build of wsblast does not include"
+                .to_string(),
+        );
+    }
     let config = wire
         .into_config()
         .map_err(|e| format!("invalid configuration: {e}"))?;
@@ -563,15 +592,14 @@ where
         config.target_url
     );
 
-    let runner = Arc::new(
-        phase_runner(config, phase)?
-            .with_live_metrics(Arc::clone(live))
-            .with_signal_handling(false),
-    );
+    // The runner is built once `start` arrives, so a capture counts from the
+    // same instant as the run; this one only resolves the target.
+    let probe = phase_runner(config.clone(), phase.clone())?;
     let target = tokio::select! {
-        target = runner.prepare_target() => target,
+        target = probe.prepare_target() => target,
         () = cancel.cancelled() => return Err("the agent is shutting down".to_string()),
     };
+    drop(probe);
     if !shared.ready_delay.is_zero() {
         tokio::time::sleep(shared.ready_delay).await;
     }
@@ -592,6 +620,33 @@ where
             u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
         });
     let started = Instant::now();
+    #[cfg(feature = "capture")]
+    let (forwarding, mut batches): (Option<crate::capture::ForwardingCapture>, CaptureBatches) =
+        match capture {
+            Some(capture) => {
+                let (tx, rx) = tokio::sync::mpsc::channel(CAPTURE_BATCHES);
+                let forwarding =
+                    crate::capture::ForwardingCapture::start(started, capture.limit, tx)
+                        .map_err(|e| format!("cannot start the capture: {e}"))?;
+                (Some(forwarding), Some(rx))
+            }
+            None => (None, None),
+        };
+    #[cfg(not(feature = "capture"))]
+    let mut batches: CaptureBatches = None;
+    #[cfg(not(feature = "capture"))]
+    let _ = capture;
+
+    let runner = phase_runner(config, phase)?
+        .with_live_metrics(Arc::clone(live))
+        .with_signal_handling(false);
+    #[cfg(feature = "capture")]
+    let runner = runner.with_capture(
+        forwarding
+            .as_ref()
+            .map(crate::capture::ForwardingCapture::handle),
+    );
+    let runner = Arc::new(runner);
     let run_cancel = runner.cancel_token();
     let mut task = tokio::spawn({
         let runner = Arc::clone(&runner);
@@ -616,6 +671,12 @@ where
                     run_cancel.cancel();
                 }
             }
+            Some(records) = next_batch(&mut batches), if !coordinator_gone => {
+                if send(sink, &Message::Capture { records }).await.is_err() {
+                    coordinator_gone = true;
+                    run_cancel.cancel();
+                }
+            }
             received = recv(stream), if !coordinator_gone => match received {
                 Ok(Message::Stop) => run_cancel.cancel(),
                 Ok(_) | Err(RecvError::Invalid(_)) => {}
@@ -635,7 +696,33 @@ where
         .map_err(|e| format!("the run failed: {e}"))?
         .map_err(|e| format!("the run failed: {e}"))?;
 
-    // Every worker has stopped: the final counters, then the result.
+    // Every worker has stopped: forward the rest of the capture, then the
+    // final counters, then the result.
+    #[cfg(feature = "capture")]
+    let capture_dropped = match forwarding {
+        Some(forwarding) => {
+            let mut finish = std::pin::pin!(forwarding.finish());
+            let dropped = loop {
+                tokio::select! {
+                    dropped = &mut finish => break dropped,
+                    Some(records) = next_batch(&mut batches) => {
+                        send(sink, &Message::Capture { records }).await.map_err(closed)?;
+                    }
+                }
+            };
+            if let Some(receiver) = batches.as_mut() {
+                while let Ok(records) = receiver.try_recv() {
+                    send(sink, &Message::Capture { records })
+                        .await
+                        .map_err(closed)?;
+                }
+            }
+            Some(dropped)
+        }
+        None => None,
+    };
+    #[cfg(not(feature = "capture"))]
+    let capture_dropped = None;
     send(
         sink,
         &Message::Snapshot {
@@ -657,6 +744,7 @@ where
             started_at_unix_ms,
             connections: outcome.connections,
             not_started: outcome.not_started,
+            capture_dropped,
         },
         outcome.time_series,
         &outcome.interval_store.buckets(),

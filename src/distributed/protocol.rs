@@ -22,8 +22,8 @@ use std::time::Duration;
 /// Version of the control protocol. Raised on any incompatible change to a
 /// message after `hello`.
 ///
-/// Version 2 added scenario phases: several `prepare` to `result` rounds on
-/// one connection.
+/// Version 2 added scenario phases (several `prepare` to `result` rounds on
+/// one connection) and capture records.
 pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The shortest agent token accepted.
@@ -58,6 +58,8 @@ pub(crate) enum Message {
         elapsed: Duration,
         live: WireSnapshot,
     },
+    /// Agent to coordinator: capture records of the phase in progress.
+    Capture { records: Vec<WireRecord> },
     /// Coordinator to agent: end the run early (Ctrl+C on the coordinator).
     /// Before `start` it cancels the test.
     Stop,
@@ -90,6 +92,7 @@ impl Message {
             Self::Ready { .. } => "ready",
             Self::Start => "start",
             Self::Snapshot { .. } => "snapshot",
+            Self::Capture { .. } => "capture",
             Self::Stop => "stop",
             Self::Result { .. } => "result",
             Self::Error { .. } => "error",
@@ -199,6 +202,22 @@ pub(crate) enum WirePayload {
     Binary { base64: String },
 }
 
+/// One capture record as it travels from an agent to its coordinator: the
+/// fields of a capture line, formatted on the agent, so the coordinator only
+/// adds the agent and shifts the time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireRecord {
+    pub(crate) t_us: u64,
+    pub(crate) worker: usize,
+    pub(crate) dir: String,
+    pub(crate) kind: String,
+    pub(crate) len: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) code: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) data: Option<String>,
+}
+
 /// An action of a scenario phase on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -227,6 +246,14 @@ pub(crate) struct WirePhase {
     pub(crate) name: String,
     pub(crate) think_time: Duration,
     pub(crate) actions: Vec<WireAction>,
+}
+
+/// Capture settings of an agent's share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireCapture {
+    /// Records this agent may still queue in this phase; `None` for no
+    /// limit. The coordinator keeps the limit of the whole run exactly.
+    pub(crate) limit: Option<u64>,
 }
 
 /// GraphQL WS settings on the wire.
@@ -273,6 +300,9 @@ pub(crate) struct WireConfig {
     /// The scenario phase this share runs, if any.
     #[serde(default)]
     pub(crate) phase: Option<WirePhase>,
+    /// Set when the coordinator captures frames.
+    #[serde(default)]
+    pub(crate) capture: Option<WireCapture>,
 }
 
 fn unsupported(message: impl Into<String>) -> WsBlastError {
@@ -281,12 +311,6 @@ fn unsupported(message: impl Into<String>) -> WsBlastError {
 
 /// Rejects settings a distributed run does not support in this version.
 pub(crate) fn check_supported(config: &LoadTestConfig) -> Result<()> {
-    #[cfg(feature = "capture")]
-    if config.capture.is_some() {
-        return Err(unsupported(
-            "--capture is not supported with --agents; capture on a single machine instead",
-        ));
-    }
     #[cfg(feature = "auth")]
     if config.live_auth.is_some() {
         return Err(unsupported(
@@ -430,6 +454,7 @@ impl WireConfig {
             reconnect: !config.no_reconnect,
             graphql,
             phase: None,
+            capture: None,
         })
     }
 
@@ -811,6 +836,10 @@ pub(crate) struct WireResult {
     pub(crate) totals: WireTotals,
     pub(crate) time_series: TimeSeries,
     pub(crate) intervals: Vec<WireInterval>,
+    /// Capture records the agent dropped: at its limit, on a full queue or
+    /// because the control channel was gone. `None` without capture.
+    #[serde(default)]
+    pub(crate) capture_dropped: Option<u64>,
 }
 
 /// A decoded result, ready to merge.
@@ -821,6 +850,7 @@ pub(crate) struct AgentResult {
     pub(crate) not_started: u64,
     pub(crate) totals: MetricsTotals,
     pub(crate) series: SeriesPart,
+    pub(crate) capture_dropped: Option<u64>,
 }
 
 impl WireResult {
@@ -845,6 +875,7 @@ impl WireResult {
                     values: to_sparse(hist),
                 })
                 .collect(),
+            capture_dropped: outcome_meta.capture_dropped,
         }
     }
 
@@ -865,6 +896,7 @@ impl WireResult {
                 series: self.time_series,
                 buckets,
             },
+            capture_dropped: self.capture_dropped,
         })
     }
 }
@@ -875,6 +907,7 @@ pub(crate) struct ResultMeta {
     pub(crate) started_at_unix_ms: u64,
     pub(crate) connections: u64,
     pub(crate) not_started: u64,
+    pub(crate) capture_dropped: Option<u64>,
 }
 
 #[cfg(test)]
@@ -1212,6 +1245,28 @@ phases:
             reason: String::new(),
         }];
         assert!(bad.into_phase(&agent).is_err());
+    }
+
+    #[test]
+    fn version_2_messages_round_trip() {
+        let record = WireRecord {
+            t_us: 5,
+            worker: 1,
+            dir: "recv".to_string(),
+            kind: "text".to_string(),
+            len: 2,
+            code: None,
+            data: Some("hi".to_string()),
+        };
+        let capture = Message::Capture {
+            records: vec![record.clone()],
+        };
+        let encoded = capture.encode();
+        assert!(!encoded.contains("code"), "{encoded}");
+        assert!(matches!(
+            Message::decode(&encoded).unwrap(),
+            Message::Capture { records } if records == [record]
+        ));
     }
 
     #[test]

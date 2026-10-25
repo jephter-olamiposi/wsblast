@@ -487,10 +487,6 @@ fn otel_settings(
 #[cfg(feature = "distributed")]
 fn check_distributed_options(cli: &Cli) -> Result<()> {
     let mut unsupported: Vec<&str> = Vec::new();
-    #[cfg(feature = "capture")]
-    if cli.capture.is_some() {
-        unsupported.push("--capture");
-    }
     if cli.tui {
         unsupported.push("--tui");
     }

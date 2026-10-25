@@ -10,7 +10,7 @@ use super::ws_config;
 use crate::config::LoadTestConfig;
 use crate::error::{ConfigError, Result, WsBlastError};
 use crate::metrics::{
-    AggregatedMetrics, DistributedSummary, LiveMetrics, LiveSnapshot, MetricsTotals,
+    AggregatedMetrics, CaptureSummary, DistributedSummary, LiveMetrics, LiveSnapshot, MetricsTotals,
 };
 use crate::timeseries::TimeSeries;
 use futures_util::stream::{SplitSink, SplitStream};
@@ -198,6 +198,15 @@ struct AgentLive {
     snapshot: WireSnapshot,
 }
 
+/// Where a phase's capture records go.
+#[cfg(feature = "capture")]
+#[derive(Clone)]
+struct CaptureSink {
+    sender: tokio::sync::mpsc::Sender<crate::capture::MergedBatch>,
+    queued: Arc<std::sync::atomic::AtomicU64>,
+    offset_us: u64,
+}
+
 /// What one agent's control task needs during a phase.
 struct Follow {
     index: usize,
@@ -205,6 +214,8 @@ struct Follow {
     stop: watch::Receiver<bool>,
     deadline: tokio::time::Instant,
     agent_timeout: Duration,
+    #[cfg(feature = "capture")]
+    capture: Option<CaptureSink>,
 }
 
 /// One phase as it is run: the cluster's configuration of it and what the
@@ -249,6 +260,21 @@ struct Session {
     /// Why each agent was lost, once it was.
     lost: Vec<Option<String>>,
     live: Arc<Mutex<Vec<AgentLive>>>,
+    #[cfg(feature = "capture")]
+    capture: CaptureState,
+    /// Capture records the agents reported dropping.
+    capture_dropped: u64,
+}
+
+#[cfg(feature = "capture")]
+enum CaptureState {
+    Off,
+    /// Created before the run, started with the first phase.
+    Pending(crate::capture::CaptureFile),
+    Running {
+        capture: crate::capture::MergedCapture,
+        start: Instant,
+    },
 }
 
 impl Coordinator {
@@ -259,9 +285,9 @@ impl Coordinator {
     ///
     /// Returns a configuration error for an invalid or repeated agent
     /// address, a token shorter than 16 characters, a setting distributed
-    /// runs do not support in this version (capture, a refreshed auth
-    /// token, the TUI), or a configuration that cannot be split, such as
-    /// fewer connections than agents.
+    /// runs do not support in this version (a refreshed auth token, the
+    /// TUI), or a configuration that cannot be split, such as fewer
+    /// connections than agents.
     pub fn new<I, S>(config: LoadTestConfig, agents: I, token: impl Into<String>) -> Result<Self>
     where
         I: IntoIterator<Item = S>,
@@ -439,7 +465,7 @@ impl Coordinator {
                 return Err(err);
             }
         };
-        session.close().await;
+        let capture = self.close(session).await;
         let Some(phase) = phase else {
             return Err(WsBlastError::Distributed(
                 "interrupted before the agents started; nothing was run".to_string(),
@@ -448,7 +474,7 @@ impl Coordinator {
         let (metrics, agents) = self.merge_phase(&phase)?;
         let summary = self.summary(&agents);
         Ok(DistributedOutcome {
-            metrics: metrics.with_distributed(summary),
+            metrics: metrics.with_distributed(summary).with_capture(capture),
             agents,
         })
     }
@@ -548,7 +574,7 @@ impl Coordinator {
             }
         }
         let lost = session.lost.clone();
-        session.close().await;
+        let capture = self.close(session).await;
         if runs.is_empty() {
             if lost.iter().all(Option::is_none) {
                 return Err(WsBlastError::Distributed(
@@ -572,7 +598,7 @@ impl Coordinator {
                 reasons.join("; ")
             )));
         }
-        self.merge_scenario(scenario, &runs, &lost)
+        self.merge_scenario(scenario, &runs, &lost, capture)
     }
 
     fn signals(&self) -> Option<crate::runner::SignalListener> {
@@ -584,7 +610,26 @@ impl Coordinator {
     }
 
     /// Connects to every agent and exchanges hellos, within `deadline`.
+    /// Creates the capture file, so a bad path fails before anything runs.
     async fn open(&self, deadline: tokio::time::Instant) -> Result<Session> {
+        #[cfg(feature = "capture")]
+        let capture = match &self.config.capture {
+            Some(capture) => {
+                #[cfg(feature = "scenario")]
+                let target = self
+                    .scenario
+                    .as_ref()
+                    .and_then(|plan| plan.targets.first())
+                    .unwrap_or(&self.config.target_url);
+                #[cfg(not(feature = "scenario"))]
+                let target = &self.config.target_url;
+                CaptureState::Pending(crate::capture::CaptureFile::create(
+                    capture,
+                    target.as_str(),
+                )?)
+            }
+            None => CaptureState::Off,
+        };
         let tls = if self.agents.iter().any(|agent| agent.url.scheme() == "wss") {
             Some(super::tls::client_config(self.agent_ca.as_deref())?)
         } else {
@@ -621,6 +666,9 @@ impl Coordinator {
                 (0..links.len()).map(|_| AgentLive::default()).collect(),
             )),
             links,
+            #[cfg(feature = "capture")]
+            capture,
+            capture_dropped: 0,
         })
     }
 
@@ -642,6 +690,31 @@ impl Coordinator {
             .collect()
     }
 
+    /// Closes every control connection and the capture file.
+    async fn close(&self, session: Session) -> Option<CaptureSummary> {
+        #[cfg(feature = "capture")]
+        let capture = match session.capture {
+            CaptureState::Running { capture, .. } => {
+                Some(capture.finish(session.capture_dropped).await)
+            }
+            CaptureState::Pending(file) => {
+                // No phase started: the file holds only what was created.
+                let capture = file.start_merged(&self.agent_names()).ok()?.finish(0).await;
+                Some(capture)
+            }
+            CaptureState::Off => None,
+        };
+        #[cfg(not(feature = "capture"))]
+        let capture = None;
+        release(session.links).await;
+        capture
+    }
+
+    #[cfg(feature = "capture")]
+    fn agent_names(&self) -> Vec<String> {
+        self.agents.iter().map(|agent| agent.name.clone()).collect()
+    }
+
     /// Prepares the phase on every agent still in the run, starts them
     /// together, follows them and collects their results.
     ///
@@ -657,10 +730,26 @@ impl Coordinator {
         first: bool,
     ) -> Result<Option<PhaseRun>> {
         let mut shares = plan(&spec.config, self.agents.len())?;
+        // Every agent may queue what is left of the limit; the coordinator
+        // keeps the limit of the whole run exactly.
+        #[cfg(feature = "capture")]
+        let capture_limit: Option<Option<u64>> = match &session.capture {
+            CaptureState::Off => None,
+            CaptureState::Pending(_) => Some(
+                self.config
+                    .capture
+                    .as_ref()
+                    .and_then(|capture| (capture.limit != 0).then_some(capture.limit)),
+            ),
+            CaptureState::Running { capture, .. } => Some(capture.remaining()),
+        };
         for share in &mut shares {
             share.phase.clone_from(&spec.wire_phase);
+            #[cfg(feature = "capture")]
+            if let Some(limit) = capture_limit {
+                share.capture = Some(super::protocol::WireCapture { limit });
+            }
         }
-
         // The barrier: every agent still in the run prepares this phase.
         let prepares = futures_util::future::join_all(session.links.iter_mut().zip(shares).map(
             |(link, share)| async move {
@@ -743,6 +832,8 @@ impl Coordinator {
                 skew_bound.as_secs_f64() * 1_000.0
             );
         }
+        #[cfg(feature = "capture")]
+        let capture_sink = session.start_capture(start, &self.agent_names())?;
 
         let (stop_tx, stop_rx) = watch::channel(false);
         let result_deadline =
@@ -759,6 +850,8 @@ impl Coordinator {
                 stop: stop_rx.clone(),
                 deadline: result_deadline,
                 agent_timeout: self.agent_timeout,
+                #[cfg(feature = "capture")]
+                capture: capture_sink.clone(),
             };
             tasks.push(Some(tokio::spawn(async move {
                 match start_sent {
@@ -768,6 +861,8 @@ impl Coordinator {
             })));
         }
         drop(stop_rx);
+        #[cfg(feature = "capture")]
+        drop(capture_sink);
 
         let progress = self.progress_bar(spec);
         let all = futures_util::future::join_all(tasks.into_iter().map(|task| async move {
@@ -824,6 +919,7 @@ impl Coordinator {
             match decoded {
                 Ok((result, at)) => {
                     last_result = Some(last_result.map_or(at, |last| last.max(at)));
+                    session.capture_dropped += result.capture_dropped.unwrap_or(0);
                     session.links[index] = link;
                     parts[index] = Part::Finished(Box::new(result));
                 }
@@ -983,6 +1079,7 @@ impl Coordinator {
         scenario: &ScenarioPlan,
         runs: &[(usize, PhaseRun)],
         lost: &[Option<String>],
+        capture: Option<CaptureSummary>,
     ) -> Result<DistributedScenarioOutcome> {
         let scenario_start = runs.first().map_or_else(Instant::now, |(_, run)| run.start);
         let mut totals = MetricsTotals::new()?;
@@ -1077,6 +1174,7 @@ impl Coordinator {
             .finish(total_elapsed, total_connections)
             .with_not_started(total_not_started)
             .with_time_series(time_series)
+            .with_capture(capture)
             .with_distributed(self.summary(&agents));
         let overall =
             crate::report::evaluate_slos(&self.config.slo.or_from(&scenario.slo), &metrics);
@@ -1095,6 +1193,46 @@ impl Coordinator {
             },
             agents,
             phases: phase_agents,
+        })
+    }
+}
+
+#[cfg(feature = "capture")]
+impl Session {
+    /// Starts the capture file with the first phase, and returns where this
+    /// phase's records go.
+    fn start_capture(
+        &mut self,
+        start: Instant,
+        agents: &[String],
+    ) -> std::io::Result<Option<CaptureSink>> {
+        if let CaptureState::Pending(_) = &self.capture {
+            let CaptureState::Pending(file) =
+                std::mem::replace(&mut self.capture, CaptureState::Off)
+            else {
+                return Ok(None);
+            };
+            self.capture = CaptureState::Running {
+                capture: file.start_merged(agents)?,
+                start,
+            };
+        }
+        Ok(match &self.capture {
+            CaptureState::Running {
+                capture,
+                start: capture_start,
+            } => {
+                let (sender, queued) = capture.sink();
+                Some(CaptureSink {
+                    sender,
+                    queued,
+                    offset_us: u64::try_from(
+                        start.saturating_duration_since(*capture_start).as_micros(),
+                    )
+                    .unwrap_or(u64::MAX),
+                })
+            }
+            _ => None,
         })
     }
 }
@@ -1268,6 +1406,8 @@ async fn follow_agent(
         mut stop,
         mut deadline,
         agent_timeout,
+        #[cfg(feature = "capture")]
+        capture,
     } = follow;
     let mut stopped = false;
     loop {
@@ -1278,6 +1418,24 @@ async fn follow_agent(
                     if let Some(agent) = agents.get_mut(index) {
                         agent.snapshot = live;
                     }
+                }
+                Ok(Message::Capture { records }) => {
+                    #[cfg(feature = "capture")]
+                    if let Some(capture) = &capture {
+                        capture
+                            .queued
+                            .fetch_add(records.len() as u64, Ordering::Relaxed);
+                        let batch = crate::capture::MergedBatch {
+                            agent: index,
+                            offset_us: capture.offset_us,
+                            records,
+                        };
+                        // Waiting here slows this control channel down, and
+                        // with it the agent's forwarding, never its load.
+                        let _ = capture.sender.send(batch).await;
+                    }
+                    #[cfg(not(feature = "capture"))]
+                    let _ = records;
                 }
                 Ok(Message::Result { result }) => {
                     return (Some(link), Ok((*result, Instant::now())));

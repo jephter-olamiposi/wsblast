@@ -175,7 +175,10 @@ impl Runner {
 
     /// Records this runner's frames into a capture the caller owns and
     /// finishes, instead of one opened from the configuration.
-    #[cfg(all(feature = "capture", feature = "scenario"))]
+    #[cfg(all(
+        feature = "capture",
+        any(feature = "scenario", feature = "distributed")
+    ))]
     pub(crate) fn with_capture(mut self, capture: Option<crate::capture::CaptureHandle>) -> Self {
         self.capture = capture;
         self
