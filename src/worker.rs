@@ -35,6 +35,9 @@ pub(crate) struct WorkerSession {
     metrics: WorkerMetrics,
     #[cfg(feature = "scenario")]
     scenario: Option<Arc<ScenarioPhase>>,
+    /// Records this worker's frames when the run captures.
+    #[cfg(feature = "capture")]
+    capture: Option<crate::capture::CaptureHandle>,
 }
 
 impl WorkerSession {
@@ -53,7 +56,16 @@ impl WorkerSession {
             metrics,
             #[cfg(feature = "scenario")]
             scenario: None,
+            #[cfg(feature = "capture")]
+            capture: None,
         }
+    }
+
+    /// Records every frame of this worker's sessions through `capture`.
+    #[cfg(feature = "capture")]
+    pub(crate) fn with_capture(mut self, capture: Option<crate::capture::CaptureHandle>) -> Self {
+        self.capture = capture;
+        self
     }
 
     /// Attaches a compiled scenario phase that drives think-time and actions.
@@ -152,12 +164,30 @@ impl WorkerSession {
     }
 
     /// Drives one established connection with the configured session loop.
+    ///
+    /// With capture on, the socket is wrapped so every frame is recorded.
+    /// Without it the loops run on the bare socket, so a run that does not
+    /// capture pays nothing for the feature.
     async fn run_session(
         &mut self,
         ws_stream: tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     ) -> SessionEnd {
+        #[cfg(feature = "capture")]
+        if let Some(capture) = self.capture.clone() {
+            let stream = crate::capture::CaptureStream::open(ws_stream, capture, self.worker_id);
+            return self.run_mode(stream).await;
+        }
+        self.run_mode(ws_stream).await
+    }
+
+    async fn run_mode<S>(&mut self, ws_stream: S) -> SessionEnd
+    where
+        S: futures_util::Sink<Message, Error = TungsteniteError>
+            + futures_util::Stream<Item = std::result::Result<Message, TungsteniteError>>
+            + Unpin,
+    {
         #[cfg(feature = "scenario")]
         if let Some(phase) = self.scenario.clone()
             && !phase.actions.is_empty()

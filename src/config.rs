@@ -67,6 +67,9 @@ pub struct LoadTestConfig {
     pub(crate) no_reconnect: bool,
     /// Decides which inbound data frame answers an echo request.
     pub(crate) reply_match: ReplyMatch,
+    /// Where `--capture` records frames, if anywhere.
+    #[cfg(feature = "capture")]
+    pub(crate) capture: Option<crate::capture::CaptureConfig>,
 }
 
 impl LoadTestConfig {
@@ -198,6 +201,13 @@ impl LoadTestConfig {
     pub fn reconnect(&self) -> bool {
         !self.no_reconnect
     }
+
+    /// File the run records its frames to, if any.
+    #[cfg(feature = "capture")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "capture")))]
+    pub fn capture_path(&self) -> Option<&std::path::Path> {
+        self.capture.as_ref().map(|capture| capture.path.as_path())
+    }
 }
 
 /// Builder for [`LoadTestConfig`], created by [`LoadTestConfig::builder`].
@@ -232,6 +242,10 @@ pub struct LoadTestConfigBuilder {
     progress: bool,
     reconnect: bool,
     reply_match: ReplyMatch,
+    #[cfg(feature = "capture")]
+    capture: Option<PathBuf>,
+    #[cfg(feature = "capture")]
+    capture_limit: u64,
 }
 
 /// GraphQL WS settings collected by the builder and checked in `build`.
@@ -269,6 +283,10 @@ impl LoadTestConfigBuilder {
             progress: false,
             reconnect: true,
             reply_match: ReplyMatch::First,
+            #[cfg(feature = "capture")]
+            capture: None,
+            #[cfg(feature = "capture")]
+            capture_limit: crate::capture::DEFAULT_LIMIT,
         }
     }
 
@@ -431,6 +449,31 @@ impl LoadTestConfigBuilder {
         self
     }
 
+    /// Records every data frame and connection event of the run to `path`
+    /// as JSON lines, one record per line after a header line. The file is
+    /// created, or truncated, when the run starts.
+    ///
+    /// Workers never wait for the disk: records past
+    /// [`capture_limit`](Self::capture_limit), or produced while the writer
+    /// is too far behind, are dropped and counted in
+    /// [`AggregatedMetrics::capture`](crate::AggregatedMetrics::capture).
+    /// The format is described in METHODOLOGY.md, section 11.
+    #[cfg(feature = "capture")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "capture")))]
+    pub fn capture(mut self, path: impl Into<PathBuf>) -> Self {
+        self.capture = Some(path.into());
+        self
+    }
+
+    /// Sets the most records [`capture`](Self::capture) writes; 0 means
+    /// unlimited. Defaults to 100 000.
+    #[cfg(feature = "capture")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "capture")))]
+    pub fn capture_limit(mut self, records: u64) -> Self {
+        self.capture_limit = records;
+        self
+    }
+
     /// Sets the GraphQL operation sent by [`TestMode::GraphQLWS`] workers.
     /// Required in that mode.
     #[cfg(feature = "graphql-ws")]
@@ -539,6 +582,11 @@ impl LoadTestConfigBuilder {
             no_progress: !self.progress,
             no_reconnect: !self.reconnect,
             reply_match: self.reply_match,
+            #[cfg(feature = "capture")]
+            capture: self.capture.map(|path| crate::capture::CaptureConfig {
+                path,
+                limit: self.capture_limit,
+            }),
         })
     }
 }
@@ -1695,6 +1743,11 @@ impl LoadTestConfig {
             .progress(!cli.no_progress)
             .reconnect(!cli.no_reconnect);
         builder.max_requests = cli.requests;
+        #[cfg(feature = "capture")]
+        {
+            builder.capture = cli.capture.take();
+            builder.capture_limit = cli.capture_limit;
+        }
         builder.payload = payload;
         builder.headers = headers;
         builder.subprotocol = cli.subprotocol.take();

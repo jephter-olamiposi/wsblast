@@ -264,6 +264,21 @@ pub(crate) struct Cli {
     #[arg(long = "fail-on-regression", default_value_t = false)]
     pub fail_on_regression: bool,
 
+    /// Record every data frame and connection event to FILE as JSON lines (see METHODOLOGY.md)
+    #[cfg(feature = "capture")]
+    #[arg(long = "capture", value_name = "FILE")]
+    pub capture: Option<PathBuf>,
+
+    /// Maximum records --capture writes; later ones are dropped and counted (0 = unlimited)
+    #[cfg(feature = "capture")]
+    #[arg(
+        long = "capture-limit",
+        value_name = "N",
+        default_value_t = crate::capture::DEFAULT_LIMIT,
+        requires = "capture"
+    )]
+    pub capture_limit: u64,
+
     /// Write output report to the specified file path
     #[arg(short = 'o', long = "output", value_name = "FILE")]
     pub output_file: Option<PathBuf>,

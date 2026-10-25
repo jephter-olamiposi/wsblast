@@ -525,6 +525,30 @@ pub struct AggregatedMetrics {
     pub time_series: TimeSeries,
     /// Error counts by category.
     pub error_breakdown: HashMap<ErrorCategory, u64>,
+    /// Totals of the `--capture` file, when the run wrote one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<CaptureSummary>,
+}
+
+/// What a run wrote to its capture file.
+///
+/// Every line after the header line is one frame record: a text, binary or
+/// Close frame, or the open event of a connection. A record is dropped
+/// instead of written when the capture limit was reached, when the writer
+/// fell so far behind that its queue was full, or after a write to the file
+/// failed, so `frames_written + frames_dropped` is every record the run
+/// produced. See METHODOLOGY.md, section 11.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct CaptureSummary {
+    /// Path of the capture file, as given.
+    pub path: String,
+    /// Records written to the file, not counting the header line.
+    pub frames_written: u64,
+    /// Records that were produced but not written.
+    pub frames_dropped: u64,
+    /// The record limit (`--capture-limit`); 0 means unlimited.
+    pub limit: u64,
 }
 
 impl AggregatedMetrics {
@@ -622,6 +646,7 @@ impl AggregatedMetrics {
             response_time: LatencyStats::from_histogram(&combined_response),
             time_series: TimeSeries::default(),
             error_breakdown,
+            capture: None,
         })
     }
 
@@ -629,6 +654,13 @@ impl AggregatedMetrics {
     #[must_use]
     pub(crate) fn with_time_series(mut self, time_series: TimeSeries) -> Self {
         self.time_series = time_series;
+        self
+    }
+
+    /// Attaches the totals of the run's capture file.
+    #[must_use]
+    pub(crate) fn with_capture(mut self, capture: Option<CaptureSummary>) -> Self {
+        self.capture = capture;
         self
     }
 

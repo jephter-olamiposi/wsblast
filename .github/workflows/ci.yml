@@ -48,6 +48,7 @@ jobs:
           - compare
           - prometheus
           - otel
+          - capture
           - full
     steps:
       - uses: actions/checkout@v5

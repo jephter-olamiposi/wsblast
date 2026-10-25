@@ -3,7 +3,7 @@
 
 use crate::cli::OutputFormat;
 use crate::config::{LoadTestConfig, SloThresholds};
-use crate::metrics::{AggregatedMetrics, LatencyStats};
+use crate::metrics::{AggregatedMetrics, CaptureSummary, LatencyStats};
 use colored::Colorize;
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, Color, Row, Table};
@@ -806,6 +806,9 @@ fn render_text_report(
     ]);
     out.push_str(&tput_table.to_string());
     out.push_str("\n\n");
+    if let Some(capture) = &metrics.capture {
+        out.push_str(&format!("{}\n\n", capture_line(capture)));
+    }
 
     let columns = latency_columns(metrics);
     let mut lat_table = Table::new();
@@ -1007,9 +1010,16 @@ fn render_markdown_report(
         metrics.throughput_msg_per_sec
     ));
     md.push_str(&format!(
-        "- **Error Rate:** `{:.2}%`\n\n",
+        "- **Error Rate:** `{:.2}%`\n",
         metrics.error_rate * 100.0
     ));
+    if let Some(capture) = &metrics.capture {
+        md.push_str(&format!(
+            "- **Capture:** {} frames written, {} dropped (`{}`)\n",
+            capture.frames_written, capture.frames_dropped, capture.path
+        ));
+    }
+    md.push('\n');
 
     md.push_str("### Latency Distribution\n\n");
     let columns = latency_columns(metrics);
@@ -1073,6 +1083,14 @@ fn render_markdown_report(
     md
 }
 
+/// The capture totals line of the text report.
+fn capture_line(capture: &CaptureSummary) -> String {
+    format!(
+        "Capture: {} frames written, {} dropped ({})",
+        capture.frames_written, capture.frames_dropped, capture.path
+    )
+}
+
 fn format_us(us: u64) -> String {
     if us < 1_000 {
         format!("{us} µs")
@@ -1130,6 +1148,7 @@ mod tests {
             response_time: LatencyStats::default(),
             time_series: crate::timeseries::TimeSeries::default(),
             error_breakdown: HashMap::new(),
+            capture: None,
         }
     }
 
@@ -1384,6 +1403,40 @@ mod tests {
         let cli =
             crate::cli::Cli::parse_from(["wsblast", "ws://127.0.0.1:9001", "--format", format]);
         LoadTestConfig::from_cli(cli).expect("valid config")
+    }
+
+    #[test]
+    fn capture_totals_are_reported_only_when_present() {
+        let slo = evaluate_slos(&SloThresholds::default(), &sample_metrics());
+        let mut metrics = sample_metrics();
+        for format in ["text", "markdown", "json"] {
+            let rendered = render_report(&report_config(format), &metrics, &slo);
+            assert!(!rendered.contains("apture"), "{format}: {rendered}");
+        }
+
+        metrics.capture = Some(CaptureSummary {
+            path: "run.jsonl".into(),
+            frames_written: 120,
+            frames_dropped: 3,
+            limit: 100_000,
+        });
+        let text = render_report(&report_config("text"), &metrics, &slo);
+        assert!(
+            text.contains("Capture: 120 frames written, 3 dropped (run.jsonl)"),
+            "{text}"
+        );
+        let markdown = render_report(&report_config("markdown"), &metrics, &slo);
+        assert!(
+            markdown.contains("- **Capture:** 120 frames written, 3 dropped (`run.jsonl`)"),
+            "{markdown}"
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&render_report(&report_config("json"), &metrics, &slo)).unwrap();
+        assert_eq!(json["metrics"]["capture"]["frames_dropped"], 3);
+
+        let parsed: AggregatedMetrics =
+            serde_json::from_value(json["metrics"].clone()).expect("report parses");
+        assert_eq!(parsed.capture, metrics.capture);
     }
 
     #[test]

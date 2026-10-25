@@ -274,6 +274,17 @@
           "description": "The run broken down by time. Absent from reports written before this field was added.",
           "$ref": "#/$defs/time_series"
         },
+        "capture": {
+          "description": "Totals of the --capture file. Present only when the run captured; absent from other reports and from reports written before this field was added. See METHODOLOGY.md section 11.",
+          "type": "object",
+          "required": ["path", "frames_written", "frames_dropped", "limit"],
+          "properties": {
+            "path": { "description": "The --capture path as given.", "type": "string" },
+            "frames_written": { "description": "Records written after the header line: text, binary and Close frames and connection open events.", "$ref": "#/$defs/count" },
+            "frames_dropped": { "description": "Records not written because the limit was reached, the writer queue was full or a write failed. frames_written + frames_dropped is every record the run produced.", "$ref": "#/$defs/count" },
+            "limit": { "description": "--capture-limit; 0 means unlimited.", "$ref": "#/$defs/count" }
+          }
+        },
         "error_breakdown": {
           "description": "Error count per category. Categories with no errors are omitted, so the object is empty on a clean run. Every failed handshake attempt, including failed reconnect attempts, adds one error.",
           "type": "object",

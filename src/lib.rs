@@ -88,6 +88,10 @@
 //!   and [`PhaseTarget`].
 //! - `graphql-ws`: [`TestMode::GraphQLWS`] and the `graphql_*` builder
 //!   setters.
+//! - `capture`: the `--capture` and `--capture-limit` options and the
+//!   [`capture`] and [`capture_limit`] builder setters, which record every
+//!   frame of a run to a JSONL file. Their totals are in
+//!   [`AggregatedMetrics::capture`].
 //! - `auth` and `compare` add the `--auth-*` and `--compare` command-line
 //!   options and have no library API. Send credentials with
 //!   [`header`](LoadTestConfigBuilder::header).
@@ -103,6 +107,16 @@
     not(feature = "graphql-ws"),
     doc = "[`TestMode::GraphQLWS`]: https://docs.rs/wsblast/latest/wsblast/enum.TestMode.html#variant.GraphQLWS"
 )]
+#![cfg_attr(
+    feature = "capture",
+    doc = "[`capture`]: LoadTestConfigBuilder::capture\n\
+           [`capture_limit`]: LoadTestConfigBuilder::capture_limit"
+)]
+#![cfg_attr(
+    not(feature = "capture"),
+    doc = "[`capture`]: https://docs.rs/wsblast/latest/wsblast/struct.LoadTestConfigBuilder.html#method.capture\n\
+           [`capture_limit`]: https://docs.rs/wsblast/latest/wsblast/struct.LoadTestConfigBuilder.html#method.capture_limit"
+)]
 #![warn(missing_docs)]
 #![deny(unsafe_code)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -110,6 +124,10 @@
 mod app;
 #[cfg(feature = "auth")]
 mod auth;
+#[cfg(feature = "capture")]
+mod base64;
+#[cfg(feature = "capture")]
+mod capture;
 mod cli;
 mod config;
 mod connect;
@@ -128,7 +146,7 @@ pub use cli::{OutputFormat, TestMode};
 pub use config::ScenarioConfig;
 pub use config::{LoadTestConfig, LoadTestConfigBuilder, ReplyMatch, SloThresholds, Stage};
 pub use error::{ConfigError, ErrorCategory, Result, WorkerError, WsBlastError};
-pub use metrics::{AggregatedMetrics, LatencyStats, LiveSnapshot};
+pub use metrics::{AggregatedMetrics, CaptureSummary, LatencyStats, LiveSnapshot};
 #[cfg(feature = "scenario")]
 pub use report::PhaseTarget;
 pub use report::{SloCheck, SloEvaluation, evaluate_slos, render_report};

@@ -9,7 +9,8 @@
     feature = "scenario",
     feature = "compare",
     feature = "auth",
-    feature = "graphql-ws"
+    feature = "graphql-ws",
+    feature = "capture"
 ))]
 
 use std::path::Path;

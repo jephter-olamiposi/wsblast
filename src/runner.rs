@@ -21,6 +21,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
+/// The capture handle a run gives its workers; nothing without the
+/// `capture` feature.
+#[cfg(feature = "capture")]
+type SessionCapture = Option<crate::capture::CaptureHandle>;
+#[cfg(not(feature = "capture"))]
+type SessionCapture = ();
+
 /// How often a staged run adjusts its connection count.
 const STAGE_TICK: Duration = Duration::from_millis(10);
 
@@ -36,6 +43,10 @@ pub struct Runner {
     /// Where the live exporters read the time series of this run.
     #[cfg(any(feature = "prometheus", feature = "otel"))]
     export: Option<Arc<ExportSource>>,
+    /// A capture owned by the caller (a scenario records every phase into
+    /// one file); otherwise the runner opens its own from the config.
+    #[cfg(feature = "capture")]
+    capture: Option<crate::capture::CaptureHandle>,
 }
 
 impl Runner {
@@ -50,6 +61,8 @@ impl Runner {
             scenario: None,
             #[cfg(any(feature = "prometheus", feature = "otel"))]
             export: None,
+            #[cfg(feature = "capture")]
+            capture: None,
         }
     }
 
@@ -76,6 +89,8 @@ impl Runner {
             scenario: Some(Arc::new(phase)),
             #[cfg(any(feature = "prometheus", feature = "otel"))]
             export: None,
+            #[cfg(feature = "capture")]
+            capture: None,
         }
     }
 
@@ -99,6 +114,7 @@ impl Runner {
         target: &Arc<ConnectTarget>,
         cancel_token: CancellationToken,
         metrics: WorkerMetrics,
+        capture: &SessionCapture,
     ) -> WorkerSession {
         let session = WorkerSession::new(
             worker_id,
@@ -107,6 +123,10 @@ impl Runner {
             cancel_token,
             metrics,
         );
+        #[cfg(feature = "capture")]
+        let session = session.with_capture(capture.clone());
+        #[cfg(not(feature = "capture"))]
+        let () = *capture;
         #[cfg(feature = "scenario")]
         if let Some(phase) = &self.scenario {
             return session.with_scenario(Arc::clone(phase));
@@ -118,6 +138,14 @@ impl Runner {
     /// [`Runner::run`] is in progress.
     pub fn live_snapshot(&self) -> LiveSnapshot {
         self.live_metrics.snapshot()
+    }
+
+    /// Records this runner's frames into a capture the caller owns and
+    /// finishes, instead of one opened from the configuration.
+    #[cfg(all(feature = "capture", feature = "scenario"))]
+    pub(crate) fn with_capture(mut self, capture: Option<crate::capture::CaptureHandle>) -> Self {
+        self.capture = capture;
+        self
     }
 
     /// Shares an existing live-metrics registry, allowing the TUI to sample
@@ -215,7 +243,8 @@ impl Runner {
         Ok(
             AggregatedMetrics::merge(outcome.worker_metrics, outcome.elapsed, outcome.connections)?
                 .with_not_started(outcome.not_started)
-                .with_time_series(outcome.time_series),
+                .with_time_series(outcome.time_series)
+                .with_capture(outcome.capture),
         )
     }
 
@@ -272,6 +301,7 @@ impl Runner {
         target: &Arc<ConnectTarget>,
         interval_store: &Arc<IntervalStore>,
         start_time: Instant,
+        capture: &SessionCapture,
     ) -> Vec<tokio::task::JoinHandle<WorkerMetrics>> {
         let mut open: Vec<(CancellationToken, tokio::task::JoinHandle<WorkerMetrics>)> = Vec::new();
         let mut closed = Vec::new();
@@ -292,7 +322,7 @@ impl Runner {
                 let metrics =
                     metrics.with_interval(IntervalRecorder::new(Arc::clone(interval_store)));
                 let token = self.cancel_token.child_token();
-                let session = self.create_session(next_id, target, token.clone(), metrics);
+                let session = self.create_session(next_id, target, token.clone(), metrics, capture);
                 open.push((token, tokio::spawn(session.run())));
                 next_id += 1;
             }
@@ -331,6 +361,16 @@ impl Runner {
             self.config.duration,
         );
 
+        // Created before the target is resolved so a bad path fails fast.
+        #[cfg(feature = "capture")]
+        let capture_file = match (&self.capture, &self.config.capture) {
+            (None, Some(capture)) => Some(crate::capture::CaptureFile::create(
+                capture,
+                self.config.target_url.as_str(),
+            )?),
+            _ => None,
+        };
+
         let spawn_delay = if self.config.ramp_rate > 0 {
             Some(Duration::from_secs_f64(1.0 / self.config.ramp_rate as f64))
         } else {
@@ -351,6 +391,7 @@ impl Runner {
                     not_started: total_connections as u64,
                     started_at: Instant::now(),
                     time_series: TimeSeries::default(),
+                    capture: None,
                 });
             }
         };
@@ -358,6 +399,18 @@ impl Runner {
         // `--duration` is total wall-clock time including the ramp, so the
         // timer shares `start_time` with elapsed, throughput, and progress.
         let start_time = Instant::now();
+        #[cfg(feature = "capture")]
+        let own_capture = capture_file
+            .map(|file| file.start(start_time))
+            .transpose()?;
+        #[cfg(feature = "capture")]
+        let capture: SessionCapture = self.capture.clone().or_else(|| {
+            own_capture
+                .as_ref()
+                .map(crate::capture::RunningCapture::handle)
+        });
+        #[cfg(not(feature = "capture"))]
+        let capture: SessionCapture = ();
         let interval = interval_for(self.config.duration);
         let interval_store = IntervalStore::new(start_time, interval);
         #[cfg(any(feature = "prometheus", feature = "otel"))]
@@ -401,8 +454,14 @@ impl Runner {
                 let metrics = WorkerMetrics::new(Arc::clone(&self.live_metrics))?
                     .with_interval(IntervalRecorder::new(Arc::clone(&interval_store)));
                 handles.push(tokio::spawn(
-                    self.create_session(worker_id, &target, self.cancel_token.clone(), metrics)
-                        .run(),
+                    self.create_session(
+                        worker_id,
+                        &target,
+                        self.cancel_token.clone(),
+                        metrics,
+                        &capture,
+                    )
+                    .run(),
                 ));
 
                 if let Some(delay) = spawn_delay {
@@ -419,7 +478,7 @@ impl Runner {
             // Every slot a staged run opens is one it tried, so none is
             // reported as not started.
             let (handles, ()) = tokio::join!(
-                self.run_stages(&target, &interval_store, start_time),
+                self.run_stages(&target, &interval_store, start_time, &capture),
                 self.wait_until_done(start_time)
             );
             let opened = handles.len() as u64;
@@ -442,6 +501,19 @@ impl Runner {
         let samples = sampler.finish().await;
         let time_series = TimeSeries::build(&samples, &interval_store, self.latency_basis());
 
+        // Every worker has stopped, so the capture is complete; it is
+        // flushed and closed before the report is rendered.
+        #[cfg(feature = "capture")]
+        let capture = match own_capture {
+            Some(own) => {
+                drop(capture);
+                Some(own.finish().await)
+            }
+            None => None,
+        };
+        #[cfg(not(feature = "capture"))]
+        let capture = None;
+
         Ok(RunOutcome {
             worker_metrics,
             elapsed,
@@ -449,6 +521,7 @@ impl Runner {
             not_started,
             started_at: start_time,
             time_series,
+            capture,
         })
     }
 }
@@ -468,6 +541,8 @@ pub(crate) struct RunOutcome {
     #[cfg_attr(not(feature = "scenario"), allow(dead_code))]
     pub(crate) started_at: Instant,
     pub(crate) time_series: TimeSeries,
+    /// Totals of the capture this runner opened itself, if any.
+    pub(crate) capture: Option<crate::metrics::CaptureSummary>,
 }
 
 /// Stops the signal listener task when the owning run ends.
@@ -726,6 +801,16 @@ impl ScenarioExecutor {
             None
         };
 
+        // One capture file covers every phase, timed from the scenario start.
+        #[cfg(feature = "capture")]
+        let capture = match (&self.base_config.capture, self.targets.first()) {
+            (Some(capture), Some(target)) => Some(
+                crate::capture::CaptureFile::create(capture, target.as_str())?
+                    .start(scenario_start)?,
+            ),
+            _ => None,
+        };
+
         for (phase_idx, (phase, target)) in self.phases.iter().zip(&self.targets).enumerate() {
             if self.cancel_token.is_cancelled() {
                 break;
@@ -754,6 +839,9 @@ impl ScenarioExecutor {
                 .with_signal_handling(false);
             #[cfg(any(feature = "prometheus", feature = "otel"))]
             let runner = runner.with_export(self.export.clone());
+            #[cfg(feature = "capture")]
+            let runner =
+                runner.with_capture(capture.as_ref().map(crate::capture::RunningCapture::handle));
             let outcome = runner.run_and_collect().await?;
 
             total_elapsed += outcome.elapsed;
@@ -773,10 +861,19 @@ impl ScenarioExecutor {
             }
         }
 
+        #[cfg(feature = "capture")]
+        let capture = match capture {
+            Some(capture) => Some(capture.finish().await),
+            None => None,
+        };
+        #[cfg(not(feature = "capture"))]
+        let capture = None;
+
         let metrics =
             AggregatedMetrics::merge(all_worker_metrics, total_elapsed, total_connections)?
                 .with_not_started(total_not_started)
-                .with_time_series(time_series);
+                .with_time_series(time_series)
+                .with_capture(capture);
         Ok(ScenarioOutcome {
             metrics,
             phase_targets,

@@ -65,6 +65,8 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output report format')
             [CompletionResult]::new('--compare', '--compare', [CompletionResultType]::ParameterName, 'Compare two JSON reports for regression detection')
             [CompletionResult]::new('--compare-threshold', '--compare-threshold', [CompletionResultType]::ParameterName, 'Regression threshold percentage (default: 10%)')
+            [CompletionResult]::new('--capture', '--capture', [CompletionResultType]::ParameterName, 'Record every data frame and connection event to FILE as JSON lines (see METHODOLOGY.md)')
+            [CompletionResult]::new('--capture-limit', '--capture-limit', [CompletionResultType]::ParameterName, 'Maximum records --capture writes; later ones are dropped and counted (0 = unlimited)')
             [CompletionResult]::new('-o', '-o', [CompletionResultType]::ParameterName, 'Write output report to the specified file path')
             [CompletionResult]::new('--output', '--output', [CompletionResultType]::ParameterName, 'Write output report to the specified file path')
             [CompletionResult]::new('--prometheus-listen', '--prometheus-listen', [CompletionResultType]::ParameterName, 'Serve live metrics at http://ADDR/metrics in the Prometheus text format while the run lasts (e.g. ''127.0.0.1:9464''; port 0 picks a free port)')

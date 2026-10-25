@@ -62,6 +62,8 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --format 'Output report format'
             cand --compare 'Compare two JSON reports for regression detection'
             cand --compare-threshold 'Regression threshold percentage (default: 10%)'
+            cand --capture 'Record every data frame and connection event to FILE as JSON lines (see METHODOLOGY.md)'
+            cand --capture-limit 'Maximum records --capture writes; later ones are dropped and counted (0 = unlimited)'
             cand -o 'Write output report to the specified file path'
             cand --output 'Write output report to the specified file path'
             cand --prometheus-listen 'Serve live metrics at http://ADDR/metrics in the Prometheus text format while the run lasts (e.g. ''127.0.0.1:9464''; port 0 picks a free port)'

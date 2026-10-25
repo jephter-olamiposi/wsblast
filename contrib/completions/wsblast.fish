@@ -42,6 +42,8 @@ json\t'Schema-versioned JSON for CI parsing and metric archiving'
 markdown\t'GitHub Flavored Markdown table for PR comments and job summaries'"
 complete -c wsblast -l compare -d 'Compare two JSON reports for regression detection' -r -F
 complete -c wsblast -l compare-threshold -d 'Regression threshold percentage (default: 10%)' -r
+complete -c wsblast -l capture -d 'Record every data frame and connection event to FILE as JSON lines (see METHODOLOGY.md)' -r -F
+complete -c wsblast -l capture-limit -d 'Maximum records --capture writes; later ones are dropped and counted (0 = unlimited)' -r
 complete -c wsblast -s o -l output -d 'Write output report to the specified file path' -r -F
 complete -c wsblast -l prometheus-listen -d 'Serve live metrics at http://ADDR/metrics in the Prometheus text format while the run lasts (e.g. \'127.0.0.1:9464\'; port 0 picks a free port)' -r
 complete -c wsblast -l otel-endpoint -d 'Export live metrics over OTLP/HTTP with protobuf bodies to this base URL, e.g. \'http://localhost:4318\' (needs the otel feature)' -r

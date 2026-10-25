@@ -14,6 +14,7 @@ Contents:
 8. [Run duration and shutdown](#8-run-duration-and-shutdown)
 9. [SLO evaluation and exit codes](#9-slo-evaluation-and-exit-codes)
 10. [Known limitations](#10-known-limitations)
+11. [Frame capture](#11-frame-capture)
 
 ## 1. Execution model
 
@@ -343,3 +344,62 @@ SLOs are checked before the "all connections failed" condition. A run where ever
 - **Payload bytes only.** Byte counts exclude framing, TLS and handshake traffic, so they understate wire bandwidth.
 - **Request cap overshoot.** `--requests` can be exceeded by up to about one message per connection.
 - **Scenario report header.** In a scenario, the JSON report's `target_url` is the first executed phase's target. `phase_targets` lists the target of every executed phase.
+
+## 11. Frame capture
+
+`--capture FILE` (feature `capture`) writes a JSON Lines record of the run. The first line is a header:
+
+```json
+{"wsblast_capture":1,"target":"ws://127.0.0.1:9001/","started":"2026-10-25T09:30:00.123Z"}
+```
+
+`wsblast_capture` is the format version, `target` the parsed target URL (the first phase's for a scenario) and `started` the wall-clock start in RFC 3339 UTC. Every following line is one record:
+
+```json
+{"t_us":1532,"worker":0,"dir":"recv","kind":"open","len":0}
+{"t_us":1611,"worker":0,"dir":"sent","kind":"text","len":42,"data":"{\"source\":\"wsblast\",\"ts\":\"1761384600123\",\"seq\":0}"}
+{"t_us":1702,"worker":0,"dir":"recv","kind":"binary","len":3,"data":"AP8B"}
+{"t_us":2001544,"worker":0,"dir":"sent","kind":"close","len":0}
+```
+
+| Field | Meaning |
+| :--- | :--- |
+| `t_us` | Microseconds from the start of the run (the clock of [section 8.1](#81-duration); for a scenario, the scenario start) to the moment the record was taken. |
+| `worker` | The connection slot, from 0. A slot keeps its number across reconnects. Every scenario phase numbers its slots from 0 again, and all phases write to the same file. |
+| `dir` | `sent` or `recv`, from the client's side. `open` is always `recv`. |
+| `kind` | `text`, `binary`, `close` or `open`. |
+| `len` | Payload bytes: the text's UTF-8 length, the binary length, 2 plus the reason's length for a Close frame with a code, and 0 for a code-less Close frame and for `open`. |
+| `code` | Close frames with a code only: the close code. |
+| `data` | The text as is, the binary payload as padded standard base64 (RFC 4648), or a Close frame's reason. Absent for `open` and code-less Close frames. |
+
+What is recorded:
+
+- An `open` record when a handshake completes, first connection or reconnect.
+- Every text, binary and Close frame the session loop hands to the socket (`sent`, taken when the socket accepts the frame, before it is flushed) or reads from it (`recv`, taken when the frame is read). That includes frames the report does not count: unsolicited frames skipped by `--match`, GraphQL protocol messages and the Close frames of the shutdown in [section 8.2](#82-shutdown-semantics). A frame whose write is accepted but then fails, and a reply read in the same instant the run is cancelled, can therefore appear in the capture but not in the report's counters.
+- Not recorded: pings, pongs, the Close reply the WebSocket library sends on its own, and a connection that ends without a Close frame.
+
+On a clean echo run, the `sent`/`text` (or `binary`) records equal `total_messages_sent` and the `recv` ones equal `total_messages_recv`.
+
+### 11.1 Cost and drops
+
+Workers do not write the file. A session with capture on wraps its socket in an adapter that, for each frame, reads the clock, takes a reference to the frame's payload (the payload bytes are not copied) and offers the record to a bounded queue of 65,536 records with a non-blocking `try_send`. One writer thread drains the queue, formats the JSON (base64 for binary frames happens there, not in the worker), and owns a 256 KiB buffered file. The writer polls the queue every 2 ms when it finds it empty instead of sleeping until a record arrives, so a worker never has to wake it with a system call. A run without `--capture` creates no queue and no thread, and its sessions run on the bare socket.
+
+Measured with release builds on a 2-core Linux VM, against `examples/echo_server.rs` on the same machine, 4 connections for 3 s, three runs each:
+
+| Run | Without capture | With `--capture --capture-limit 0` |
+| :--- | :--- | :--- |
+| Unpaced echo, throughput | 54,400 to 57,700 msg/s | 59,000 to 63,200 msg/s, 354,000 to 380,000 records written, 0 dropped |
+| Unpaced echo, RTT p50 / p99 | 54 to 60 µs / 222 to 387 µs | 48 to 53 µs / 230 to 278 µs |
+| `--rate 1000`, RTT p50 | 98 to 116 µs | 100 to 105 µs |
+
+The differences are within the run-to-run spread. A first version whose writer blocked on the queue cost about a third of the unpaced throughput and raised the paced RTT p50 by about 60 µs, from the wake-ups alone.
+
+A record is dropped, and counted, when:
+
+- `--capture-limit` records (default 100,000; 0 means unlimited) have already been queued: the limit is exact, so the file holds at most that many records after the header;
+- the queue is full because the writer is behind the workers;
+- or a write to the file failed: the error is printed on stderr and every later record is counted as dropped.
+
+The workers never wait, so capture cannot slow the load down by more than the per-frame cost above, but a run that produces frames faster than the disk takes them loses records rather than slowing down. `frames_written + frames_dropped` is every record the run produced. The writer is flushed and the file closed after every worker has stopped and before the report is printed. The report prints `Capture: N frames written, M dropped (FILE)`, and the JSON report carries `metrics.capture` with `path`, `frames_written`, `frames_dropped` and `limit` (absent when the run did not capture).
+
+A capture is meant for debugging, not for high-rate runs: keep the default limit, or expect drops, when a run sends more than a few hundred thousand frames per second.
