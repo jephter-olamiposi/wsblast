@@ -4,7 +4,9 @@
 
 use crate::cli::OutputFormat;
 use crate::config::{LoadTestConfig, SloThresholds};
-use crate::metrics::{AggregatedMetrics, CaptureSummary, DistributedSummary, LatencyStats};
+use crate::metrics::{
+    AggregatedMetrics, CaptureSummary, ChaosSummary, DistributedSummary, LatencyStats,
+};
 #[cfg(feature = "compare")]
 use crate::series_compare::{CompareWindow, SERIES_PREFIX, SeriesSummary};
 use colored::Colorize;
@@ -1362,6 +1364,9 @@ fn render_text_report(view: &ReportView<'_>) -> String {
     if let Some(capture) = &metrics.capture {
         out.push_str(&format!("{}\n\n", capture_line(capture)));
     }
+    if let Some(chaos) = &metrics.chaos {
+        out.push_str(&format!("Chaos: {}\n\n", chaos_label(chaos)));
+    }
 
     let columns = latency_columns(metrics);
     let mut lat_table = Table::new();
@@ -1608,6 +1613,9 @@ fn render_markdown_report(view: &ReportView<'_>) -> String {
             capture.frames_written, capture.frames_dropped, capture.path
         ));
     }
+    if let Some(chaos) = &metrics.chaos {
+        md.push_str(&format!("- **Chaos:** {}\n", chaos_label(chaos)));
+    }
     md.push('\n');
 
     md.push_str("### Latency Distribution\n\n");
@@ -1714,6 +1722,15 @@ pub(crate) fn agents_label(
     format!("{count} (lost: {})", lost.join(", "))
 }
 
+/// The injected faults of a run, as the text, Markdown and HTML reports
+/// show them.
+pub(crate) fn chaos_label(chaos: &ChaosSummary) -> String {
+    format!(
+        "{} delayed, {} dropped, {} corrupted, {} closes (seed {}; not counted as errors)",
+        chaos.delayed, chaos.dropped, chaos.corrupted, chaos.closes, chaos.seed
+    )
+}
+
 /// The capture totals line of the text report.
 fn capture_line(capture: &CaptureSummary) -> String {
     format!(
@@ -1781,6 +1798,7 @@ mod tests {
             error_breakdown: HashMap::new(),
             capture: None,
             distributed: None,
+            chaos: None,
         }
     }
 
@@ -2069,6 +2087,42 @@ mod tests {
         let parsed: AggregatedMetrics =
             serde_json::from_value(json["metrics"].clone()).expect("report parses");
         assert_eq!(parsed.capture, metrics.capture);
+    }
+
+    #[test]
+    fn chaos_counts_are_reported_only_when_present() {
+        let slo = evaluate_slos(&SloThresholds::default(), &sample_metrics());
+        let mut metrics = sample_metrics();
+        for format in ["text", "markdown", "json", "html"] {
+            let rendered = render_report(&report_config(format), &metrics, &slo);
+            assert!(!rendered.contains("haos"), "{format}");
+        }
+
+        metrics.chaos = Some(ChaosSummary {
+            seed: 42,
+            delayed: 7,
+            dropped: 3,
+            corrupted: 2,
+            closes: 1,
+        });
+        let line = "7 delayed, 3 dropped, 2 corrupted, 1 closes (seed 42; not counted as errors)";
+        let text = render_report(&report_config("text"), &metrics, &slo);
+        assert!(text.contains(&format!("Chaos: {line}")), "{text}");
+        let markdown = render_report(&report_config("markdown"), &metrics, &slo);
+        assert!(
+            markdown.contains(&format!("- **Chaos:** {line}")),
+            "{markdown}"
+        );
+        let html = render_report(&report_config("html"), &metrics, &slo);
+        assert!(html.contains(line), "html");
+        let json: serde_json::Value =
+            serde_json::from_str(&render_report(&report_config("json"), &metrics, &slo)).unwrap();
+        assert_eq!(json["metrics"]["chaos"]["dropped"], 3);
+        assert_eq!(json["metrics"]["chaos"]["seed"], 42);
+
+        let parsed: AggregatedMetrics =
+            serde_json::from_value(json["metrics"].clone()).expect("report parses");
+        assert_eq!(parsed.chaos, metrics.chaos);
     }
 
     #[test]

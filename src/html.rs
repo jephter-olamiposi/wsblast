@@ -552,6 +552,9 @@ fn render_traffic(html: &mut String, view: &ReportView<'_>) {
             ),
         ));
     }
+    if let Some(chaos) = &m.chaos {
+        rows.push(("Chaos", crate::report::chaos_label(chaos)));
+    }
     html.push_str(
         "<section>\n<h2>Connections and traffic</h2>\n<div class=\"scroll\"><table>\n<tbody>\n",
     );

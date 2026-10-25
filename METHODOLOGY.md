@@ -16,6 +16,7 @@ Contents:
 10. [Known limitations](#10-known-limitations)
 11. [Frame capture](#11-frame-capture)
 12. [Distributed runs](#12-distributed-runs)
+13. [Chaos injection](#13-chaos-injection)
 
 ## 1. Execution model
 
@@ -492,3 +493,44 @@ An agent is lost when, after the start, it disconnects, reports an error, or sen
 **Refreshed tokens.** With `--auth-token-refresh`, the token command runs on the coordinator; every new header value reaches each agent in a control message, checked every 100 ms, and applies to that agent's handshakes from then on, as a refresh does on one machine. A handshake on an agent can therefore carry the previous value for up to about 100 ms plus one control-channel latency after the refresh.
 
 **Live values.** The coordinator keeps the cluster's live counters as the sum of each agent's latest snapshot, sent every second during a phase and once more at its end. With an exporter ([section 6.4](#64-live-export)), the exported latency is read from the sum of the agents' interval histograms for the last interval that ended at least one second ago on the coordinator's clock: each snapshot carries the agent's two most recently completed intervals, so that interval has been sent by every agent at its next tick, including the samples workers handed over after the interval ended. When a phase ends, the last interval that ended before it is exported from the agents' results. These values are never used for the report.
+
+## 13. Chaos injection
+
+The `--chaos-*` options (feature `chaos`, on by default) inject faults on the client side, to test how a server, and the clients it serves, cope with slow, lossy, malformed and vanishing clients. The injected events are counted apart from the measurements: none of them is an error, none adds a latency sample by itself, and section 13.2 defines what each one does to every metric.
+
+| Option | Event |
+| :--- | :--- |
+| `--chaos-delay DURATION[:JITTER]` | Before every data send, wait `DURATION` plus a value drawn uniformly from 0 to `JITTER` (default 0). |
+| `--chaos-drop PERCENT` | Skip this share of data sends: the message is not sent. |
+| `--chaos-corrupt PERCENT` | Change one byte of this share of data sends before they are sent. |
+| `--chaos-close PERCENT` | After this share of replies (echo mode) or sends (stream mode), the client closes the connection. |
+| `--chaos-close-mode abrupt\|graceful` | How `--chaos-close` closes: `abrupt` (default) shuts the TCP connection without a WebSocket Close frame; `graceful` sends a Close frame with code 1001 (going away) and reason `wsblast chaos close`, then shuts the TCP connection without waiting for the server's Close frame. Either way the socket is closed normally (FIN), not reset. |
+| `--chaos-seed N` | Seed of every decision. |
+
+Percentages are between 0 and 100. A send is either dropped or corrupted, never both, so `--chaos-drop` and `--chaos-corrupt` may add up to at most 100. The options act on data frames, so they are rejected with `--mode listen` and `--mode graphql-ws`, which send none (exit code 1); a scenario phase in those modes may use `chaos:` only with an action script, which sends. They are also rejected with `--agents`. In a scenario, a phase's `chaos:` mapping (keys `delay`, `drop`, `corrupt`, `close`, `close_mode`, `seed`, with the values of the flags) replaces the command-line options for that phase, `chaos: {}` turns them off, and a phase without a `seed` uses `--chaos-seed` when it is given ([docs/scenarios.md](docs/scenarios.md)). Keepalive pings, pongs and Close frames are never delayed, dropped or corrupted.
+
+### 13.1 Decisions and seeds
+
+Every connection slot draws its decisions from its own xorshift64 generator, seeded from the run's seed and the slot number. Without `--chaos-seed` the run picks a seed when the configuration is built. The seed is reported as `metrics.chaos.seed`, so any run can be repeated with `--chaos-seed`. A slot keeps its generator across reconnects.
+
+For each data send, in this order: the send waits for its pacing slot, claims one message of `--requests`, draws the jitter (when `JITTER` is set), then draws one number that decides drop or corrupt (when either is set), waits the delay, and sends. A dropped send ends there, without a delay. After the reply (echo mode) or the send (stream mode) it draws the close decision (when `--chaos-close` is set). A knob that is not set draws nothing. So a seeded run makes the same decisions in the same order on every slot; the counts of a whole run repeat exactly when the number of sends does, as with `-n` and one connection, and vary with the number of sends that fit in `--duration` otherwise.
+
+### 13.2 Effect on every metric
+
+| Event | Messages and bytes sent | Messages received | RTT and response time | Errors and error rate | Connections | `--requests` |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Delay | Counted as usual. | Unchanged. | RTT starts after the delay. In paced echo the delay moves the request's due time and every later one by its length, so it is never response time; a slow reply still makes the requests after it late. | None. | Unchanged. | One claim, as usual. |
+| Drop | Not counted: the message is never written. | No reply is awaited. | No sample. | None, and a dropped send is not an attempted operation, so it is not in the error-rate denominator. | Unchanged. | Uses one claim. In paced echo the slot is used up; `{{seq}}` moves on. |
+| Corrupt | Counted, with the corrupted payload, which has the length of the original. | The reply is matched and counted as usual. | Recorded as usual. | None from the corruption itself. A server that answers a corrupted request with an error frame, no reply or a close produces whatever the run records for that answer (for example a `timeout`): that is the behaviour under test. | Unchanged. | One claim. |
+| Close | Unchanged. | In echo mode nothing is in flight, since the close follows a reply. In stream mode frames the server sends after the close are lost. | No sample. | None. | The session ends as lost: the slot reconnects after the 100 ms backoff ([section 7.1](#71-reconnect-policy)), adding to `total_reconnects` and `handshake_latency`, and stays idle with `--no-reconnect`. | Unchanged. |
+
+Corruption keeps every frame the same length. In a text frame, one randomly chosen ASCII character is replaced with a different printable ASCII character, so the frame stays valid UTF-8; a text frame with no ASCII character is sent as a binary frame of the same bytes with one bit flipped. In a binary frame, one bit of a randomly chosen byte is flipped. An empty frame cannot be corrupted: it is sent unchanged and not counted. With `--match exact` the reply of a corrupted request must equal the corrupted frame; with `--match json:POINTER` the first data frame after a corrupted request is its reply, since the corruption may have changed the value at the pointer.
+
+The other numbers follow from these. Throughput reflects what was sent and received: dropped sends and the pauses of delays and reconnects lower it. A paced connection with `--rate R` and a delay `D` sends at most `1 / (1/R + D)` messages per second, since the schedule moves by every delay; an unpaced one waits `D` before every request. The time series counts the same events as the totals. A capture ([section 11](#11-frame-capture)) records corrupted frames as sent and records nothing for dropped ones.
+
+The JSON report carries `metrics.chaos` with `seed`, `delayed` (sends held back by a delay), `dropped`, `corrupted` and `closes`, also per scenario phase; the text and Markdown reports print one `Chaos:` line, and the HTML report a row. It is absent when the run injected nothing.
+
+### 13.3 Cost
+
+A run without chaos options creates no generator and no chaos state: each data send checks one empty option and moves on, and the injection code is compiled out without the `chaos` feature. Measured as in [section 11.1](#111-cost-and-drops), unpaced echo throughput with chaos off is within the run-to-run spread of the build before chaos existed.
+

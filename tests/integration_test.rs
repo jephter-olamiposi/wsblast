@@ -2784,3 +2784,303 @@ async fn test_time_series_counts_messages_sent_while_the_run_is_cancelled() {
     }
     cancel_server.cancel();
 }
+
+/// How each connection to [`spawn_close_recording_echo_server`] ended: the
+/// code of the client's Close frame, or `None` when the TCP connection
+/// ended without one.
+#[cfg(feature = "chaos")]
+type CloseLog = std::sync::Arc<std::sync::Mutex<Vec<Option<u16>>>>;
+
+/// Echoes data frames and logs how every connection ended.
+#[cfg(feature = "chaos")]
+async fn spawn_close_recording_echo_server() -> (Url, tokio_util::sync::CancellationToken, CloseLog)
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("ws://{}", listener.local_addr().unwrap())).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_server = cancel.clone();
+    let log = CloseLog::default();
+    let server_log = std::sync::Arc::clone(&log);
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Ok((stream, _)) = listener.accept() => {
+                    let log = std::sync::Arc::clone(&server_log);
+                    tokio::spawn(async move {
+                        let Ok(ws) = tokio_tungstenite::accept_async(stream).await else {
+                            return;
+                        };
+                        let (mut sink, mut reader) = ws.split();
+                        let mut code = None;
+                        while let Some(Ok(msg)) = reader.next().await {
+                            match msg {
+                                Message::Text(_) | Message::Binary(_) => {
+                                    if sink.send(msg).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Message::Close(frame) => {
+                                    code = Some(frame.map_or(1005, |f| u16::from(f.code)));
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                        log.lock().unwrap().push(code);
+                    });
+                }
+                _ = cancel_server.cancelled() => break,
+            }
+        }
+    });
+    (url, cancel, log)
+}
+
+/// The chaos counts of a run, which must be present.
+#[cfg(feature = "chaos")]
+fn chaos_of(metrics: &AggregatedMetrics) -> &wsblast::ChaosSummary {
+    metrics
+        .chaos
+        .as_ref()
+        .unwrap_or_else(|| panic!("no chaos summary: {metrics:?}"))
+}
+
+/// Asserts that a run recorded no error of any kind.
+#[cfg(feature = "chaos")]
+fn assert_no_errors(metrics: &AggregatedMetrics) {
+    assert!(metrics.error_breakdown.is_empty(), "{metrics:?}");
+    assert_eq!(metrics.error_rate, 0.0, "{metrics:?}");
+}
+
+#[cfg(feature = "chaos")]
+#[tokio::test]
+async fn test_chaos_off_reports_no_chaos() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+    let metrics = run(echo_test_config(&target_url)
+        .duration(Duration::from_millis(200))
+        .chaos(wsblast::ChaosConfig::new().with_seed(3)))
+    .await;
+    assert!(metrics.chaos.is_none(), "{metrics:?}");
+    assert!(metrics.total_messages_recv > 0);
+    cancel_server.cancel();
+}
+
+#[cfg(feature = "chaos")]
+#[tokio::test]
+async fn test_chaos_drop_skips_sends_without_counting_them_or_errors() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+    let metrics = run(echo_test_config(&target_url)
+        .duration(Duration::from_secs(10))
+        .max_requests(400)
+        .chaos(wsblast::ChaosConfig::new().with_drop(25.0).with_seed(11)))
+    .await;
+
+    let chaos = chaos_of(&metrics);
+    assert_eq!(chaos.seed, 11);
+    assert!((50..150).contains(&chaos.dropped), "{metrics:?}");
+    assert_eq!((chaos.delayed, chaos.corrupted, chaos.closes), (0, 0, 0));
+    // Every claim against -n was either sent or dropped; the last send may
+    // be cut off by the end of the run.
+    let claims = metrics.total_messages_sent + chaos.dropped;
+    assert!((399..=400).contains(&claims), "{metrics:?}");
+    assert_in_flight_at_most(&metrics, 1);
+    assert_eq!(metrics.message_rtt.count, metrics.total_messages_recv);
+    assert_eq!(metrics.total_unsolicited_frames, 0);
+    assert_no_errors(&metrics);
+    cancel_server.cancel();
+}
+
+#[cfg(feature = "chaos")]
+#[tokio::test]
+async fn test_chaos_corrupt_sends_counted_messages_whose_replies_are_matched() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+    for reply_match in [
+        ReplyMatch::First,
+        ReplyMatch::Exact,
+        "json:/seq".parse().unwrap(),
+    ] {
+        let metrics = run(echo_test_config(&target_url)
+            .duration(Duration::from_secs(10))
+            .max_requests(300)
+            .payload_text(r#"{"seq":{{seq}},"pad":"abcdefgh"}"#)
+            .reply_match(reply_match.clone())
+            .chaos(wsblast::ChaosConfig::new().with_corrupt(50.0).with_seed(5)))
+        .await;
+
+        let chaos = chaos_of(&metrics);
+        assert!(
+            (100..200).contains(&chaos.corrupted),
+            "{reply_match:?}: {metrics:?}"
+        );
+        assert_eq!(chaos.dropped, 0);
+        assert!(metrics.total_messages_sent >= 299, "{metrics:?}");
+        assert_in_flight_at_most(&metrics, 1);
+        assert_eq!(metrics.message_rtt.count, metrics.total_messages_recv);
+        assert_eq!(
+            metrics.total_unsolicited_frames, 0,
+            "{reply_match:?}: {metrics:?}"
+        );
+        assert_no_errors(&metrics);
+    }
+    cancel_server.cancel();
+}
+
+#[cfg(feature = "chaos")]
+#[tokio::test]
+async fn test_chaos_delay_is_kept_out_of_rtt_and_response_time() {
+    // Requests are due every 20 ms and each one is held back 30 ms: the
+    // schedule moves with the delay, so no request is late because of it.
+    let (target_url, cancel_server) = spawn_echo_server().await;
+    let metrics = run(echo_test_config(&target_url)
+        .rate_per_connection(50)
+        .duration(Duration::from_millis(1200))
+        .chaos(
+            wsblast::ChaosConfig::new()
+                .with_delay(Duration::from_millis(30), Duration::ZERO)
+                .with_seed(1),
+        ))
+    .await;
+
+    let chaos = chaos_of(&metrics);
+    assert!(metrics.total_messages_sent >= 10, "{metrics:?}");
+    // Every send was delayed; the one in progress at the end may not have
+    // been sent.
+    assert!(
+        (metrics.total_messages_sent..=metrics.total_messages_sent + 1).contains(&chaos.delayed),
+        "{metrics:?}"
+    );
+    // At most one send per 50 ms instead of one per 20 ms.
+    assert!(metrics.total_messages_sent <= 30, "{metrics:?}");
+    assert_eq!(metrics.response_time.count, metrics.message_rtt.count);
+    assert!(metrics.message_rtt.p99_us < 25_000, "{metrics:?}");
+    assert!(metrics.response_time.p99_us < 25_000, "{metrics:?}");
+    assert_no_errors(&metrics);
+    cancel_server.cancel();
+}
+
+#[cfg(feature = "chaos")]
+#[tokio::test]
+async fn test_chaos_close_reconnects_without_errors_in_both_modes() {
+    for (mode, expected) in [
+        (wsblast::ChaosCloseMode::Abrupt, None),
+        (wsblast::ChaosCloseMode::Graceful, Some(1001)),
+    ] {
+        let (target_url, cancel_server, log) = spawn_close_recording_echo_server().await;
+        let metrics = run(echo_test_config(&target_url)
+            .connections(2)
+            .duration(Duration::from_millis(1500))
+            .chaos(
+                wsblast::ChaosConfig::new()
+                    .with_close(20.0, mode)
+                    .with_seed(9),
+            ))
+        .await;
+
+        let chaos = chaos_of(&metrics);
+        assert!(chaos.closes >= 2, "{mode:?}: {metrics:?}");
+        // Each close is followed by a reconnect after the 100 ms backoff,
+        // unless the run ended first.
+        assert!(
+            metrics.total_reconnects + 2 >= chaos.closes
+                && metrics.total_reconnects <= chaos.closes,
+            "{mode:?}: {metrics:?}"
+        );
+        assert_eq!(metrics.total_connections_established, 2);
+        assert_in_flight_at_most(&metrics, 2);
+        assert_no_errors(&metrics);
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let ends = log.lock().unwrap().clone();
+        let chaos_ends = ends.iter().filter(|end| **end == expected).count() as u64;
+        assert!(chaos_ends >= chaos.closes, "{mode:?}: {ends:?} {metrics:?}");
+        cancel_server.cancel();
+    }
+}
+
+#[cfg(feature = "chaos")]
+#[tokio::test]
+async fn test_chaos_close_in_stream_mode_follows_sends() {
+    let (target_url, cancel_server, _log) = spawn_close_recording_echo_server().await;
+    let metrics = run(echo_test_config(&target_url)
+        .mode(TestMode::Stream)
+        .rate_per_connection(200)
+        .duration(Duration::from_millis(800))
+        .chaos(
+            wsblast::ChaosConfig::new()
+                .with_close(10.0, wsblast::ChaosCloseMode::Abrupt)
+                .with_seed(2),
+        ))
+    .await;
+    let chaos = chaos_of(&metrics);
+    assert!(chaos.closes >= 2, "{metrics:?}");
+    assert!(metrics.total_reconnects >= 1, "{metrics:?}");
+    assert_no_errors(&metrics);
+    cancel_server.cancel();
+}
+
+#[cfg(feature = "chaos")]
+#[tokio::test]
+async fn test_chaos_seed_repeats_the_same_faults() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+    let faults = |seed: u64| {
+        let target_url = target_url.clone();
+        async move {
+            let metrics = run(echo_test_config(&target_url)
+                .duration(Duration::from_secs(10))
+                .max_requests(300)
+                .chaos(
+                    wsblast::ChaosConfig::new()
+                        .with_delay(Duration::ZERO, Duration::from_micros(200))
+                        .with_drop(20.0)
+                        .with_corrupt(20.0)
+                        .with_seed(seed),
+                ))
+            .await;
+            let chaos = chaos_of(&metrics).clone();
+            (chaos.dropped, chaos.corrupted)
+        }
+    };
+    let first = faults(7).await;
+    assert_eq!(first, faults(7).await);
+    assert_ne!(first, faults(8).await);
+    cancel_server.cancel();
+}
+
+#[cfg(all(feature = "chaos", feature = "scenario"))]
+#[tokio::test]
+async fn test_scenario_phase_chaos_replaces_the_base_chaos() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+    let scenario = scenario(
+        &target_url,
+        r#"  - name: "faulty"
+    duration: "300ms"
+    connections: 1
+    chaos:
+      drop: 50
+      seed: 4
+  - name: "clean"
+    duration: "300ms"
+    connections: 1
+    chaos: {}
+"#,
+    );
+    let base = scenario_base_config(&target_url).chaos(
+        wsblast::ChaosConfig::new()
+            .with_corrupt(100.0)
+            .with_seed(99),
+    );
+    let outcome = ScenarioExecutor::new(&scenario, base.build().unwrap(), None, None)
+        .unwrap()
+        .with_signal_handling(false)
+        .run()
+        .await
+        .unwrap();
+
+    let faulty = chaos_of(&outcome.phases[0].metrics);
+    assert_eq!(faulty.seed, 4);
+    assert!(faulty.dropped > 0 && faulty.corrupted == 0, "{faulty:?}");
+    assert!(outcome.phases[1].metrics.chaos.is_none());
+    assert_eq!(chaos_of(&outcome.metrics).dropped, faulty.dropped);
+    assert_no_errors(&outcome.metrics);
+    cancel_server.cancel();
+}

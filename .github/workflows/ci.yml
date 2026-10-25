@@ -51,6 +51,7 @@ jobs:
           - capture
           - mock
           - distributed
+          - chaos
           - full
     steps:
       - uses: actions/checkout@v5

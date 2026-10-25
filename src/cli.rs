@@ -290,6 +290,42 @@ pub(crate) struct Cli {
     )]
     pub capture_limit: u64,
 
+    /// Chaos: pause DURATION, plus up to JITTER drawn uniformly, before every data send (e.g. '5ms' or '5ms:20ms')
+    #[cfg(feature = "chaos")]
+    #[arg(long = "chaos-delay", value_name = "DURATION[:JITTER]")]
+    pub chaos_delay: Option<String>,
+
+    /// Chaos: skip this percentage (0 to 100) of data sends; they are counted as dropped, not as sent
+    #[cfg(feature = "chaos")]
+    #[arg(long = "chaos-drop", value_name = "PERCENT")]
+    pub chaos_drop: Option<f64>,
+
+    /// Chaos: change one byte of the payload of this percentage (0 to 100) of data sends; echo replies are still matched and timed
+    #[cfg(feature = "chaos")]
+    #[arg(long = "chaos-corrupt", value_name = "PERCENT")]
+    pub chaos_corrupt: Option<f64>,
+
+    /// Chaos: close the connection after this percentage (0 to 100) of replies, or of sends in stream mode; the worker reconnects, and closes are not errors
+    #[cfg(feature = "chaos")]
+    #[arg(long = "chaos-close", value_name = "PERCENT")]
+    pub chaos_close: Option<f64>,
+
+    /// How --chaos-close ends a connection
+    #[cfg(feature = "chaos")]
+    #[arg(
+        long = "chaos-close-mode",
+        value_enum,
+        value_name = "MODE",
+        default_value_t = crate::chaos::ChaosCloseMode::Abrupt,
+        requires = "chaos_close"
+    )]
+    pub chaos_close_mode: crate::chaos::ChaosCloseMode,
+
+    /// Chaos: seed of every chaos decision, to repeat a run's faults [default: picked per run and shown in the report]
+    #[cfg(feature = "chaos")]
+    #[arg(long = "chaos-seed", value_name = "N")]
+    pub chaos_seed: Option<u64>,
+
     /// Write output report to the specified file path
     #[arg(short = 'o', long = "output", value_name = "FILE")]
     pub output_file: Option<PathBuf>,

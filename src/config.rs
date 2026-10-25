@@ -74,6 +74,10 @@ pub struct LoadTestConfig {
     /// machine opens; `stages` keeps the targets of the whole run.
     #[cfg(feature = "distributed")]
     pub(crate) stage_share: Option<crate::distributed::Share>,
+    /// The faults workers inject, with a resolved seed; `None` when no
+    /// knob is set.
+    #[cfg(feature = "chaos")]
+    pub(crate) chaos: Option<crate::chaos::ChaosConfig>,
 }
 
 impl LoadTestConfig {
@@ -223,6 +227,14 @@ impl LoadTestConfig {
     pub fn capture_path(&self) -> Option<&std::path::Path> {
         self.capture.as_ref().map(|capture| capture.path.as_path())
     }
+
+    /// The faults the run injects, with the seed it uses; `None` when it
+    /// injects none.
+    #[cfg(feature = "chaos")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "chaos")))]
+    pub fn chaos(&self) -> Option<&crate::chaos::ChaosConfig> {
+        self.chaos.as_ref()
+    }
 }
 
 /// Builder for [`LoadTestConfig`], created by [`LoadTestConfig::builder`].
@@ -261,6 +273,8 @@ pub struct LoadTestConfigBuilder {
     capture: Option<PathBuf>,
     #[cfg(feature = "capture")]
     capture_limit: u64,
+    #[cfg(feature = "chaos")]
+    chaos: Option<crate::chaos::ChaosConfig>,
 }
 
 /// GraphQL WS settings collected by the builder and checked in `build`.
@@ -302,6 +316,8 @@ impl LoadTestConfigBuilder {
             capture: None,
             #[cfg(feature = "capture")]
             capture_limit: crate::capture::DEFAULT_LIMIT,
+            #[cfg(feature = "chaos")]
+            chaos: None,
         }
     }
 
@@ -489,6 +505,39 @@ impl LoadTestConfigBuilder {
         self
     }
 
+    /// Injects client-side faults: delayed, dropped and corrupted data sends
+    /// and connections closed by the client. A configuration whose knobs are
+    /// all off injects nothing.
+    ///
+    /// Injected events are counted in
+    /// [`AggregatedMetrics::chaos`](crate::AggregatedMetrics::chaos), never as
+    /// errors, and add no latency sample by themselves; METHODOLOGY.md,
+    /// section 13, defines their effect on every metric. Without a seed the
+    /// run picks one, which [`LoadTestConfig::chaos`] and the report show.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use wsblast::{ChaosCloseMode, ChaosConfig, LoadTestConfig};
+    ///
+    /// let config = LoadTestConfig::builder("ws://127.0.0.1:9001")
+    ///     .chaos(
+    ///         ChaosConfig::new()
+    ///             .with_delay(Duration::from_millis(5), Duration::from_millis(10))
+    ///             .with_drop(1.0)
+    ///             .with_close(0.5, ChaosCloseMode::Graceful)
+    ///             .with_seed(42),
+    ///     )
+    ///     .build()?;
+    /// assert_eq!(config.chaos().and_then(|chaos| chaos.seed), Some(42));
+    /// # Ok::<(), wsblast::WsBlastError>(())
+    /// ```
+    #[cfg(feature = "chaos")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "chaos")))]
+    pub fn chaos(mut self, chaos: crate::chaos::ChaosConfig) -> Self {
+        self.chaos = Some(chaos);
+        self
+    }
+
     /// Sets the GraphQL operation sent by [`TestMode::GraphQLWS`] workers.
     /// Required in that mode.
     #[cfg(feature = "graphql-ws")]
@@ -547,6 +596,10 @@ impl LoadTestConfigBuilder {
     ///   non-default [`ReplyMatch`] outside [`TestMode::Echo`], a JSON reply
     ///   match whose pointer is invalid or whose payload lacks `{{seq}}`, or
     ///   GraphQL settings outside GraphQL mode.
+    /// - [`ConfigError::InvalidOption`] for a chaos percentage outside 0 to
+    ///   100, or drop and corrupt percentages adding up to more than 100,
+    ///   and [`ConfigError::UnsupportedOption`] for chaos in listen or
+    ///   GraphQL mode, which send no data frames to act on.
     pub fn build(mut self) -> Result<LoadTestConfig> {
         let target_url = parse_target_url(&self.target)?;
         if !self.stages.is_empty() {
@@ -568,6 +621,19 @@ impl LoadTestConfigBuilder {
             return Err(ConfigError::InvalidHeader(message).into());
         }
         validate_slo(&self.slo, self.mode)?;
+        #[cfg(feature = "chaos")]
+        let chaos = match self.chaos {
+            Some(chaos) => {
+                chaos.validate()?;
+                if chaos.is_active() {
+                    validate_chaos_mode(self.mode, false, "")?;
+                    Some(chaos.seeded())
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
 
         Ok(LoadTestConfig {
             target_url,
@@ -604,8 +670,25 @@ impl LoadTestConfigBuilder {
             }),
             #[cfg(feature = "distributed")]
             stage_share: None,
+            #[cfg(feature = "chaos")]
+            chaos,
         })
     }
+}
+
+/// Rejects chaos in a mode that sends no data frames: listen and GraphQL
+/// mode, unless an action script sends them. `prefix` names where the
+/// chaos comes from, such as a scenario phase.
+#[cfg(feature = "chaos")]
+fn validate_chaos_mode(mode: TestMode, has_actions: bool, prefix: &str) -> Result<()> {
+    let sends_data = has_actions || matches!(mode, TestMode::Echo | TestMode::Stream);
+    if !sends_data {
+        return Err(ConfigError::UnsupportedOption(format!(
+            "{prefix}chaos injection needs data sends to act on; {mode:?} mode sends none, use --mode echo or stream, or an action script"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 fn validate_stages(stages: &[Stage], ramp_rate: u64) -> Result<()> {
@@ -1231,6 +1314,62 @@ pub(crate) struct PhaseConfig {
     /// SLOs checked on this phase's own metrics.
     #[serde(default)]
     pub(crate) slo: Option<SloConfig>,
+    /// Faults this phase injects instead of those of the command line.
+    #[cfg(feature = "chaos")]
+    #[serde(default)]
+    pub(crate) chaos: Option<ChaosYaml>,
+}
+
+/// The `chaos:` mapping of a phase, with the values of the `--chaos-*`
+/// flags of the same names.
+#[cfg(all(feature = "scenario", feature = "chaos"))]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChaosYaml {
+    #[serde(default)]
+    pub(crate) delay: Option<String>,
+    #[serde(default)]
+    pub(crate) drop: Option<f64>,
+    #[serde(default)]
+    pub(crate) corrupt: Option<f64>,
+    #[serde(default)]
+    pub(crate) close: Option<f64>,
+    #[serde(default)]
+    pub(crate) close_mode: Option<crate::chaos::ChaosCloseMode>,
+    #[serde(default)]
+    pub(crate) seed: Option<u64>,
+}
+
+#[cfg(all(feature = "scenario", feature = "chaos"))]
+impl ChaosYaml {
+    /// Parses and checks the mapping of phase `phase`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidScenario`] for a delay that does not
+    /// parse and for percentages the `--chaos-*` flags would reject.
+    fn compile(&self, phase: &str) -> Result<crate::chaos::ChaosConfig> {
+        let invalid =
+            |e: WsBlastError| ConfigError::InvalidScenario(format!("phase '{phase}': chaos: {e}"));
+        let (delay, jitter) = self
+            .delay
+            .as_deref()
+            .map(crate::chaos::parse_delay)
+            .transpose()
+            .map_err(invalid)?
+            .unwrap_or_default();
+        let chaos = crate::chaos::ChaosConfig {
+            delay,
+            jitter,
+            drop_percent: self.drop.unwrap_or(0.0),
+            corrupt_percent: self.corrupt.unwrap_or(0.0),
+            close_percent: self.close.unwrap_or(0.0),
+            close_mode: self.close_mode.unwrap_or_default(),
+            seed: self.seed,
+        };
+        chaos.validate().map_err(invalid)?;
+        Ok(chaos)
+    }
 }
 
 /// The `stages:` of a phase: a list of `{duration, target}` mappings, or one
@@ -1451,6 +1590,10 @@ pub(crate) struct ScenarioPhase {
     /// count. With stages, `connections` is the highest target, `duration`
     /// the sum of the stage durations and `ramp_rate` 0.
     pub(crate) stages: Vec<Stage>,
+    /// Faults this phase injects in place of the command line's; a mapping
+    /// whose knobs are all off turns them off for the phase.
+    #[cfg(feature = "chaos")]
+    pub(crate) chaos: Option<crate::chaos::ChaosConfig>,
 }
 
 /// Execution-ready action with parsed durations and payload templates.
@@ -1613,6 +1756,14 @@ impl ScenarioConfig {
                 &format!("phase '{}': slo: ", phase.name),
                 SLO_LATENCY_KEYS,
             )?;
+            #[cfg(feature = "chaos")]
+            if phase.chaos.as_ref().is_some_and(|chaos| chaos.is_active()) {
+                validate_chaos_mode(
+                    mode,
+                    !phase.actions.is_empty(),
+                    &format!("phase '{}': ", phase.name),
+                )?;
+            }
         }
         Ok(())
     }
@@ -1794,6 +1945,12 @@ impl ScenarioPhase {
             actions,
             slo: compile_slo(phase.slo.as_ref(), &format!("phase '{}': slo", phase.name))?,
             stages,
+            #[cfg(feature = "chaos")]
+            chaos: phase
+                .chaos
+                .as_ref()
+                .map(|chaos| chaos.compile(&phase.name))
+                .transpose()?,
         })
     }
 }
@@ -2082,6 +2239,10 @@ impl LoadTestConfig {
             builder.capture = cli.capture.take();
             builder.capture_limit = cli.capture_limit;
         }
+        #[cfg(feature = "chaos")]
+        {
+            builder.chaos = chaos_from_cli(&cli)?;
+        }
         builder.payload = payload;
         builder.headers = headers;
         builder.subprotocol = cli.subprotocol.take();
@@ -2160,6 +2321,27 @@ impl LoadTestConfig {
 
         Ok(config)
     }
+}
+
+/// The faults the `--chaos-*` flags ask for, checked by the builder.
+#[cfg(feature = "chaos")]
+fn chaos_from_cli(cli: &Cli) -> Result<Option<crate::chaos::ChaosConfig>> {
+    let (delay, jitter) = cli
+        .chaos_delay
+        .as_deref()
+        .map(crate::chaos::parse_delay)
+        .transpose()?
+        .unwrap_or_default();
+    let chaos = crate::chaos::ChaosConfig {
+        delay,
+        jitter,
+        drop_percent: cli.chaos_drop.unwrap_or(0.0),
+        corrupt_percent: cli.chaos_corrupt.unwrap_or(0.0),
+        close_percent: cli.chaos_close.unwrap_or(0.0),
+        close_mode: cli.chaos_close_mode,
+        seed: cli.chaos_seed,
+    };
+    Ok(Some(chaos))
 }
 
 /// Validates the authentication flags and returns the configured method.
@@ -2773,6 +2955,8 @@ mod tests {
             think_time: None,
             actions: Vec::new(),
             slo: None,
+            #[cfg(feature = "chaos")]
+            chaos: None,
         }
     }
 
@@ -3536,5 +3720,136 @@ phases:
                 .to_string();
             assert!(message.contains(expected), "{fields}: {message}");
         }
+    }
+
+    #[cfg(feature = "chaos")]
+    #[test]
+    fn chaos_flags_build_a_seeded_configuration() {
+        let config = match_config(&[
+            "--chaos-delay",
+            "5ms:10ms",
+            "--chaos-drop",
+            "2.5",
+            "--chaos-corrupt",
+            "1",
+            "--chaos-close",
+            "0.5",
+            "--chaos-close-mode",
+            "graceful",
+            "--chaos-seed",
+            "42",
+        ])
+        .unwrap();
+        let chaos = config.chaos().expect("chaos");
+        assert_eq!(chaos.delay, Duration::from_millis(5));
+        assert_eq!(chaos.jitter, Duration::from_millis(10));
+        assert_eq!(
+            (
+                chaos.drop_percent,
+                chaos.corrupt_percent,
+                chaos.close_percent
+            ),
+            (2.5, 1.0, 0.5)
+        );
+        assert_eq!(chaos.close_mode, crate::chaos::ChaosCloseMode::Graceful);
+        assert_eq!(chaos.seed, Some(42));
+
+        // Without a seed the configuration picks one; without a knob there
+        // is no chaos at all.
+        let picked = match_config(&["--chaos-drop", "1"]).unwrap();
+        assert!(picked.chaos().and_then(|chaos| chaos.seed).is_some());
+        assert!(
+            match_config(&["--chaos-seed", "1"])
+                .unwrap()
+                .chaos()
+                .is_none()
+        );
+        assert!(match_config(&[]).unwrap().chaos().is_none());
+    }
+
+    #[cfg(feature = "chaos")]
+    #[test]
+    fn chaos_flags_are_validated() {
+        for (args, needle) in [
+            (
+                vec!["--chaos-drop", "101"],
+                "drop percentage must be between 0 and 100",
+            ),
+            (vec!["--chaos-close=-1"], "close percentage"),
+            (
+                vec!["--chaos-drop", "60", "--chaos-corrupt", "50"],
+                "add up to 110",
+            ),
+            (vec!["--chaos-delay", "soon"], "Invalid duration"),
+        ] {
+            let err = match_config(&args).unwrap_err().to_string();
+            assert!(err.contains(needle), "{args:?}: {err}");
+        }
+        assert_unsupported_option(
+            match_config(&["--mode", "listen", "--chaos-drop", "1"]),
+            "chaos injection needs data sends to act on; Listen mode",
+        );
+        assert!(match_config(&["--mode", "stream", "--chaos-close", "1"]).is_ok());
+    }
+
+    #[cfg(all(feature = "chaos", feature = "scenario"))]
+    #[test]
+    fn phase_chaos_parses_and_is_checked_by_name() {
+        let yaml = |chaos: &str| {
+            format!(
+                "version: \"1.0\"\ntarget: \"ws://127.0.0.1:9001\"\nmetadata:\n  name: \"c\"\n\
+                 phases:\n  - name: \"flaky\"\n    duration: \"1s\"\n    connections: 1\n{chaos}"
+            )
+        };
+        let scenario = ScenarioConfig::from_yaml(&yaml(
+            "    chaos:\n      delay: \"5ms:2ms\"\n      drop: 1\n      close: 2\n      close_mode: graceful\n      seed: 9\n",
+        ))
+        .unwrap();
+        let phase = &scenario.compile(None).unwrap()[0];
+        let chaos = phase.chaos.as_ref().expect("chaos");
+        assert_eq!(
+            (chaos.delay, chaos.jitter),
+            (Duration::from_millis(5), Duration::from_millis(2))
+        );
+        assert_eq!((chaos.drop_percent, chaos.close_percent), (1.0, 2.0));
+        assert_eq!(chaos.close_mode, crate::chaos::ChaosCloseMode::Graceful);
+        assert_eq!(chaos.seed, Some(9));
+
+        let empty = ScenarioConfig::from_yaml(&yaml("    chaos: {}\n")).unwrap();
+        assert!(
+            !empty.compile(None).unwrap()[0]
+                .chaos
+                .as_ref()
+                .unwrap()
+                .is_active()
+        );
+
+        for (chaos, needle) in [
+            (
+                "    chaos:\n      drop: 150\n",
+                "phase 'flaky': chaos: Configuration error: Invalid option: chaos drop percentage must be between 0 and 100, received 150",
+            ),
+            (
+                "    chaos:\n      delay: \"soon\"\n",
+                "phase 'flaky': chaos: Configuration error: Invalid duration 'soon'",
+            ),
+            ("    chaos:\n      dorp: 1\n", "unknown field `dorp`"),
+        ] {
+            let err = ScenarioConfig::from_yaml(&yaml(chaos))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(needle), "{chaos}: {err}");
+        }
+
+        let listen = ScenarioConfig::from_yaml(&yaml("    chaos:\n      drop: 1\n")).unwrap();
+        let err = listen
+            .validate_slo_mode(TestMode::Listen, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("phase 'flaky': chaos injection needs data sends"),
+            "{err}"
+        );
+        assert!(listen.validate_slo_mode(TestMode::Stream, None).is_ok());
     }
 }

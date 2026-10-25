@@ -4,7 +4,7 @@
 .SH NAME
 wsblast \- High\-performance WebSocket load\-testing CLI with percentile latency & CI gating
 .SH SYNOPSIS
-\fBwsblast\fR [\fB\-u\fR|\fB\-\-url\fR] [\fB\-c\fR|\fB\-\-connections\fR] [\fB\-\-ramp\-rate\fR] [\fB\-d\fR|\fB\-\-duration\fR] [\fB\-\-stages\fR] [\fB\-n\fR|\fB\-\-requests\fR] [\fB\-r\fR|\fB\-\-rate\fR] [\fB\-p\fR|\fB\-\-payload\fR] [\fB\-\-payload\-file\fR] [\fB\-\-binary\fR] [\fB\-H\fR|\fB\-\-header\fR] [\fB\-\-subprotocol\fR] [\fB\-\-mode\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-message\-timeout\fR] [\fB\-\-match\fR] [\fB\-\-ping\-interval\fR] [\fB\-\-max\-p50\fR] [\fB\-\-max\-p95\fR] [\fB\-\-max\-p99\fR] [\fB\-\-max\-p999\fR] [\fB\-\-max\-error\-rate\fR] [\fB\-\-min\-throughput\fR] [\fB\-\-auth\-type\fR] [\fB\-\-auth\-token\fR] [\fB\-\-auth\-token\-cmd\fR] [\fB\-\-auth\-token\-cmd\-timeout\fR] [\fB\-\-auth\-token\-refresh\fR] [\fB\-\-auth\-header\fR] [\fB\-\-auth\-apikey\fR] [\fB\-\-auth\-apikey\-header\fR] [\fB\-\-graphql\-ws\-operation\-name\fR] [\fB\-\-graphql\-ws\-operation\fR] [\fB\-\-graphql\-ws\-variables\fR] [\fB\-\-graphql\-ws\-extensions\fR] [\fB\-\-format\fR] [\fB\-\-compare\fR] [\fB\-\-compare\-threshold\fR] [\fB\-\-compare\-window\fR] [\fB\-\-fail\-on\-regression\fR] [\fB\-\-capture\fR] [\fB\-\-capture\-limit\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-tui\fR] [\fB\-\-no\-progress\fR] [\fB\-\-no\-reconnect\fR] [\fB\-\-prometheus\-listen\fR] [\fB\-\-otel\-endpoint\fR] [\fB\-\-otel\-interval\fR] [\fB\-\-otel\-service\-name\fR] [\fB\-\-scenario\fR] [\fB\-\-phase\fR] [\fB\-\-agents\fR] [\fB\-\-agent\-token\fR] [\fB\-\-agent\-timeout\fR] [\fB\-\-agent\-ca\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIURL\fR] [\fIsubcommands\fR]
+\fBwsblast\fR [\fB\-u\fR|\fB\-\-url\fR] [\fB\-c\fR|\fB\-\-connections\fR] [\fB\-\-ramp\-rate\fR] [\fB\-d\fR|\fB\-\-duration\fR] [\fB\-\-stages\fR] [\fB\-n\fR|\fB\-\-requests\fR] [\fB\-r\fR|\fB\-\-rate\fR] [\fB\-p\fR|\fB\-\-payload\fR] [\fB\-\-payload\-file\fR] [\fB\-\-binary\fR] [\fB\-H\fR|\fB\-\-header\fR] [\fB\-\-subprotocol\fR] [\fB\-\-mode\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-message\-timeout\fR] [\fB\-\-match\fR] [\fB\-\-ping\-interval\fR] [\fB\-\-max\-p50\fR] [\fB\-\-max\-p95\fR] [\fB\-\-max\-p99\fR] [\fB\-\-max\-p999\fR] [\fB\-\-max\-error\-rate\fR] [\fB\-\-min\-throughput\fR] [\fB\-\-auth\-type\fR] [\fB\-\-auth\-token\fR] [\fB\-\-auth\-token\-cmd\fR] [\fB\-\-auth\-token\-cmd\-timeout\fR] [\fB\-\-auth\-token\-refresh\fR] [\fB\-\-auth\-header\fR] [\fB\-\-auth\-apikey\fR] [\fB\-\-auth\-apikey\-header\fR] [\fB\-\-graphql\-ws\-operation\-name\fR] [\fB\-\-graphql\-ws\-operation\fR] [\fB\-\-graphql\-ws\-variables\fR] [\fB\-\-graphql\-ws\-extensions\fR] [\fB\-\-format\fR] [\fB\-\-compare\fR] [\fB\-\-compare\-threshold\fR] [\fB\-\-compare\-window\fR] [\fB\-\-fail\-on\-regression\fR] [\fB\-\-capture\fR] [\fB\-\-capture\-limit\fR] [\fB\-\-chaos\-delay\fR] [\fB\-\-chaos\-drop\fR] [\fB\-\-chaos\-corrupt\fR] [\fB\-\-chaos\-close\fR] [\fB\-\-chaos\-close\-mode\fR] [\fB\-\-chaos\-seed\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-tui\fR] [\fB\-\-no\-progress\fR] [\fB\-\-no\-reconnect\fR] [\fB\-\-prometheus\-listen\fR] [\fB\-\-otel\-endpoint\fR] [\fB\-\-otel\-interval\fR] [\fB\-\-otel\-service\-name\fR] [\fB\-\-scenario\fR] [\fB\-\-phase\fR] [\fB\-\-agents\fR] [\fB\-\-agent\-token\fR] [\fB\-\-agent\-timeout\fR] [\fB\-\-agent\-ca\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIURL\fR] [\fIsubcommands\fR]
 .SH DESCRIPTION
 wsblast stresses WebSocket targets, computes high\-resolution latency percentiles (p50/p95/p99/p99.9), maps failure taxonomy, and gates CI pipelines via SLO thresholds.
 .SH OPTIONS
@@ -182,6 +182,34 @@ Record every data frame and connection event to FILE as JSON lines (see METHODOL
 .TP
 \fB\-\-capture\-limit\fR \fI<N>\fR [default: 100000]
 Maximum records \-\-capture writes; later ones are dropped and counted (0 = unlimited)
+.TP
+\fB\-\-chaos\-delay\fR \fI<DURATION[:JITTER]>\fR
+Chaos: pause DURATION, plus up to JITTER drawn uniformly, before every data send (e.g. \*(Aq5ms\*(Aq or \*(Aq5ms:20ms\*(Aq)
+.TP
+\fB\-\-chaos\-drop\fR \fI<PERCENT>\fR
+Chaos: skip this percentage (0 to 100) of data sends; they are counted as dropped, not as sent
+.TP
+\fB\-\-chaos\-corrupt\fR \fI<PERCENT>\fR
+Chaos: change one byte of the payload of this percentage (0 to 100) of data sends; echo replies are still matched and timed
+.TP
+\fB\-\-chaos\-close\fR \fI<PERCENT>\fR
+Chaos: close the connection after this percentage (0 to 100) of replies, or of sends in stream mode; the worker reconnects, and closes are not errors
+.TP
+\fB\-\-chaos\-close\-mode\fR \fI<MODE>\fR [default: abrupt]
+How \-\-chaos\-close ends a connection
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+abrupt: Closes the TCP connection without a WebSocket Close frame
+.IP \(bu 2
+graceful: Sends a Close frame with code 1001 (going away), then closes the TCP connection without waiting for the server\*(Aqs Close frame
+.RE
+.TP
+\fB\-\-chaos\-seed\fR \fI<N>\fR
+Chaos: seed of every chaos decision, to repeat a run\*(Aqs faults [default: picked per run and shown in the report]
 .TP
 \fB\-o\fR, \fB\-\-output\fR \fI<FILE>\fR
 Write output report to the specified file path

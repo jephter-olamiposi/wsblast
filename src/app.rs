@@ -499,6 +499,16 @@ fn check_distributed_options(cli: &Cli) -> Result<()> {
             "--tui cannot be used with --agents in this version of wsblast; the coordinator prints progress lines instead".to_string(),
         )));
     }
+    #[cfg(feature = "chaos")]
+    if cli.chaos_delay.is_some()
+        || cli.chaos_drop.is_some()
+        || cli.chaos_corrupt.is_some()
+        || cli.chaos_close.is_some()
+    {
+        return Err(WsBlastError::Config(ConfigError::UnsupportedOption(
+            "--chaos-* cannot be used with --agents in this version of wsblast".to_string(),
+        )));
+    }
     Ok(())
 }
 

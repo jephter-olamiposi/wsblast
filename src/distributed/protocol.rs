@@ -344,6 +344,12 @@ pub(crate) fn check_supported(config: &LoadTestConfig) -> Result<()> {
             "--tui is not supported with --agents; the coordinator prints progress lines instead",
         ));
     }
+    #[cfg(feature = "chaos")]
+    if config.chaos.is_some() {
+        return Err(unsupported(
+            "--chaos-* options are not supported with --agents",
+        ));
+    }
     Ok(())
 }
 
@@ -759,6 +765,10 @@ impl WirePhase {
             actions,
             slo: crate::config::SloThresholds::default(),
             stages: config.stages.clone(),
+            // Chaos is not sent to agents in this protocol version; the
+            // coordinator rejects it with --agents.
+            #[cfg(feature = "chaos")]
+            chaos: None,
         })
     }
 }
@@ -896,6 +906,7 @@ impl WireTotals {
             sent_message_errors: self.sent_message_errors,
             interrupted: self.interrupted,
             errors: self.errors,
+            chaos: None,
         })
     }
 }

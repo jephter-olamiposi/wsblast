@@ -187,6 +187,8 @@ pub struct WorkerMetrics {
     /// Whether the time series takes response time instead of RTT, as it
     /// does for paced echo sessions.
     pub(crate) interval_uses_response: bool,
+    /// Injected faults, when the run injects any (`--chaos-*`).
+    pub(crate) chaos: Option<ChaosSummary>,
     pub(crate) live: Arc<LiveMetrics>,
     /// The live counter shard this worker updates.
     shard: usize,
@@ -225,6 +227,7 @@ impl WorkerMetrics {
             interrupted: false,
             interval: None,
             interval_uses_response: false,
+            chaos: None,
             shard: live.assign_shard(),
             live,
         })
@@ -350,6 +353,39 @@ impl WorkerMetrics {
         self.counters()
             .unsolicited_frames
             .fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// Counts a data send that a chaos delay held back.
+    #[inline]
+    pub(crate) fn record_chaos_delayed(&mut self) {
+        if let Some(chaos) = self.chaos.as_mut() {
+            chaos.delayed += 1;
+        }
+    }
+
+    /// Counts a data send that chaos skipped. It is not a sent message.
+    #[inline]
+    pub(crate) fn record_chaos_dropped(&mut self) {
+        if let Some(chaos) = self.chaos.as_mut() {
+            chaos.dropped += 1;
+        }
+    }
+
+    /// Counts a data send whose payload chaos corrupted.
+    #[inline]
+    #[cfg(feature = "chaos")]
+    pub(crate) fn record_chaos_corrupted(&mut self) {
+        if let Some(chaos) = self.chaos.as_mut() {
+            chaos.corrupted += 1;
+        }
+    }
+
+    /// Counts a connection that chaos closed. It is not an error.
+    #[inline]
+    pub(crate) fn record_chaos_close(&mut self) {
+        if let Some(chaos) = self.chaos.as_mut() {
+            chaos.closes += 1;
+        }
     }
 
     #[inline]
@@ -531,6 +567,62 @@ pub struct AggregatedMetrics {
     /// The agents of a distributed run (`--agents`); absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distributed: Option<DistributedSummary>,
+    /// The faults the run injected (`--chaos-*`); absent when it injected
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chaos: Option<ChaosSummary>,
+}
+
+/// The faults a run injected on the client side (`--chaos-*`).
+///
+/// None of these events is an error, and none adds a latency sample by
+/// itself. METHODOLOGY.md, section 13, defines what each one does to every
+/// metric.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ChaosSummary {
+    /// Seed of the generator behind every decision; a run with
+    /// `--chaos-seed` set to it repeats them. In a scenario, the seed of the
+    /// first phase that injected faults.
+    pub seed: u64,
+    /// Data sends held back by `--chaos-delay`.
+    pub delayed: u64,
+    /// Data sends skipped by `--chaos-drop`. They are not counted as sent.
+    pub dropped: u64,
+    /// Data sends whose payload `--chaos-corrupt` changed. They are counted
+    /// as sent.
+    pub corrupted: u64,
+    /// Connections closed by `--chaos-close`.
+    pub closes: u64,
+}
+
+impl ChaosSummary {
+    /// No events yet, for a run seeded with `seed`.
+    #[cfg(feature = "chaos")]
+    pub(crate) fn new(seed: u64) -> Self {
+        Self {
+            seed,
+            ..Self::default()
+        }
+    }
+
+    /// Adds `other`'s counts, keeping this summary's seed.
+    fn add(&mut self, other: &Self) {
+        self.delayed += other.delayed;
+        self.dropped += other.dropped;
+        self.corrupted += other.corrupted;
+        self.closes += other.closes;
+    }
+}
+
+/// Adds the chaos counts of `other` to `into`, taking `other`'s seed when
+/// `into` has none yet.
+fn add_chaos(into: &mut Option<ChaosSummary>, other: Option<&ChaosSummary>) {
+    match (into.as_mut(), other) {
+        (Some(into), Some(other)) => into.add(other),
+        (None, Some(other)) => *into = Some(other.clone()),
+        (_, None) => {}
+    }
 }
 
 /// Which agents generated the load of a distributed run.
@@ -590,6 +682,8 @@ pub(crate) struct MetricsTotals {
     /// Workers whose first handshake was in progress when the run ended.
     pub(crate) interrupted: u64,
     pub(crate) errors: HashMap<ErrorCategory, u64>,
+    /// Injected faults, when any worker injected them.
+    pub(crate) chaos: Option<ChaosSummary>,
 }
 
 impl MetricsTotals {
@@ -608,6 +702,7 @@ impl MetricsTotals {
             sent_message_errors: 0,
             interrupted: 0,
             errors: HashMap::new(),
+            chaos: None,
         })
     }
 
@@ -636,6 +731,7 @@ impl MetricsTotals {
         for (category, count) in w.errors {
             *self.errors.entry(category).or_insert(0) += count;
         }
+        add_chaos(&mut self.chaos, w.chaos.as_ref());
     }
 
     /// Adds totals built elsewhere, such as those of another machine or of
@@ -662,6 +758,7 @@ impl MetricsTotals {
         for (category, count) in &other.errors {
             *self.errors.entry(*category).or_insert(0) += count;
         }
+        add_chaos(&mut self.chaos, other.chaos.as_ref());
         Ok(())
     }
 
@@ -723,6 +820,7 @@ impl MetricsTotals {
             error_breakdown,
             capture: None,
             distributed: None,
+            chaos: self.chaos,
         }
     }
 }

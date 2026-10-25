@@ -59,7 +59,7 @@ pub struct Runner {
 }
 
 /// The configuration a scenario phase runs with: `config` with the phase's
-/// sizing, duration, ramp, stages, rate and payload.
+/// sizing, duration, ramp, stages, rate, payload and chaos.
 #[cfg(feature = "scenario")]
 pub(crate) fn phase_config(mut config: LoadTestConfig, phase: &ScenarioPhase) -> LoadTestConfig {
     config.connections = phase.connections;
@@ -71,6 +71,18 @@ pub(crate) fn phase_config(mut config: LoadTestConfig, phase: &ScenarioPhase) ->
     config.rate_per_conn = phase.rate_per_conn;
     if let Some(payload) = phase.payload.clone() {
         config.payload = payload;
+    }
+    // A phase's own chaos replaces the command line's; without a seed it
+    // takes the command line's seed, if any, so one flag seeds the whole
+    // scenario.
+    #[cfg(feature = "chaos")]
+    if let Some(chaos) = phase.chaos.clone() {
+        let fallback_seed = config.chaos.as_ref().and_then(|base| base.seed);
+        config.chaos = chaos.is_active().then(|| {
+            let mut chaos = chaos;
+            chaos.seed = chaos.seed.or(fallback_seed);
+            chaos.seeded()
+        });
     }
     config
 }

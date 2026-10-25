@@ -15,9 +15,8 @@ use tokio_tungstenite::tungstenite::Error as TungsteniteError;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::protocol::Message;
-#[cfg(feature = "scenario")]
-use tokio_tungstenite::tungstenite::protocol::frame::CloseFrame;
-use tokio_tungstenite::tungstenite::protocol::frame::Utf8Bytes;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::protocol::frame::{CloseFrame, Utf8Bytes};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "graphql-ws")]
@@ -38,6 +37,9 @@ pub(crate) struct WorkerSession {
     /// Records this worker's frames when the run captures.
     #[cfg(feature = "capture")]
     capture: Option<crate::capture::CaptureHandle>,
+    /// This worker's fault injection, when the run injects faults.
+    #[cfg(feature = "chaos")]
+    chaos: Option<crate::chaos::ChaosState>,
 }
 
 impl WorkerSession {
@@ -48,6 +50,20 @@ impl WorkerSession {
         cancel_token: CancellationToken,
         metrics: WorkerMetrics,
     ) -> Self {
+        #[cfg(feature = "chaos")]
+        let (chaos, metrics) = match &config.chaos {
+            Some(chaos) => {
+                let mut metrics = metrics;
+                metrics.chaos = Some(crate::metrics::ChaosSummary::new(
+                    chaos.seed.unwrap_or_default(),
+                ));
+                (
+                    Some(crate::chaos::ChaosState::new(chaos, worker_id)),
+                    metrics,
+                )
+            }
+            None => (None, metrics),
+        };
         Self {
             worker_id,
             config,
@@ -58,6 +74,8 @@ impl WorkerSession {
             scenario: None,
             #[cfg(feature = "capture")]
             capture: None,
+            #[cfg(feature = "chaos")]
+            chaos,
         }
     }
 
@@ -310,7 +328,31 @@ impl WorkerSession {
                 break;
             }
 
-            let msg = self.render_payload(seq);
+            let plan = self.chaos_plan();
+            if plan.drop {
+                // The slot is used up; nothing is sent and no reply awaited.
+                self.metrics.record_chaos_dropped();
+                seq += 1;
+                if let Some(schedule) = schedule.as_mut() {
+                    schedule.advance();
+                }
+                continue;
+            }
+            let mut due = due;
+            if !plan.delay.is_zero() {
+                if !self.chaos_delay(plan.delay).await {
+                    let _ = sink.send(Message::Close(None)).await;
+                    break;
+                }
+                // The delay moves this request's slot and every later one,
+                // so it is never counted as response time.
+                if let Some(schedule) = schedule.as_mut() {
+                    schedule.shift(plan.delay);
+                }
+                due = due.map(|due| due + plan.delay);
+            }
+
+            let (msg, corrupted) = self.chaos_corrupt(self.render_payload(seq), plan.corrupt);
             let frame_len = message_byte_len(&msg);
             let sent = self.retain_for_exact_match(&msg);
             let start_time = Instant::now();
@@ -333,8 +375,14 @@ impl WorkerSession {
             }
 
             let mut unsolicited = 0u64;
-            let recv_fut =
-                self.await_reply(&mut stream, &mut sink, sent.as_ref(), seq, &mut unsolicited);
+            let recv_fut = self.await_reply(
+                &mut stream,
+                &mut sink,
+                sent.as_ref(),
+                seq,
+                corrupted,
+                &mut unsolicited,
+            );
 
             // Cancellation wins over a simultaneously ready reply so nothing
             // after the test window is recorded.
@@ -361,6 +409,9 @@ impl WorkerSession {
                             .record_response_time(SendSchedule::response_time(
                                 due, start_time, rtt,
                             ));
+                    }
+                    if let Some(graceful) = self.chaos_close_now() {
+                        return self.chaos_close(&mut sink, graceful).await;
                     }
                 }
                 // A server Close ends the session; it is not the reply.
@@ -425,7 +476,17 @@ impl WorkerSession {
                         let _ = sink.send(Message::Close(None)).await;
                         break;
                     }
-                    let msg = self.render_payload(seq);
+                    let plan = self.chaos_plan();
+                    if plan.drop {
+                        self.metrics.record_chaos_dropped();
+                        seq += 1;
+                        continue;
+                    }
+                    if !plan.delay.is_zero() && !self.chaos_delay(plan.delay).await {
+                        let _ = sink.send(Message::Close(None)).await;
+                        break;
+                    }
+                    let (msg, _) = self.chaos_corrupt(self.render_payload(seq), plan.corrupt);
                     let len = message_byte_len(&msg);
                     if let Err(e) = sink.send(msg).await {
                         self.metrics.record_error(
@@ -436,6 +497,9 @@ impl WorkerSession {
                     }
                     self.metrics.record_message_sent(len);
                     seq += 1;
+                    if let Some(graceful) = self.chaos_close_now() {
+                        return self.chaos_close(&mut sink, graceful).await;
+                    }
 
                     #[cfg(feature = "scenario")]
                     if !self.apply_think_time().await {
@@ -625,8 +689,30 @@ impl WorkerSession {
                                 break 'script;
                             }
 
+                            let plan = self.chaos_plan();
+                            if plan.drop {
+                                self.metrics.record_chaos_dropped();
+                                seq += 1;
+                                if let Some(schedule) = schedule.as_mut() {
+                                    schedule.advance();
+                                }
+                                continue;
+                            }
+                            let mut due = due;
+                            if !plan.delay.is_zero() {
+                                if !self.chaos_delay(plan.delay).await {
+                                    let _ = sink.send(Message::Close(None)).await;
+                                    break 'script;
+                                }
+                                if let Some(schedule) = schedule.as_mut() {
+                                    schedule.shift(plan.delay);
+                                }
+                                due = due.map(|due| due + plan.delay);
+                            }
+
                             let active_payload = payload.as_ref().unwrap_or(&self.config.payload);
                             let msg = self.render_message(active_payload, seq);
+                            let (msg, corrupted) = self.chaos_corrupt(msg, plan.corrupt);
                             let frame_len = message_byte_len(&msg);
                             let sent = self.retain_for_exact_match(&msg);
                             let start_time = Instant::now();
@@ -648,6 +734,7 @@ impl WorkerSession {
                                     &mut sink,
                                     sent.as_ref(),
                                     seq,
+                                    corrupted,
                                     &mut unsolicited,
                                 );
 
@@ -693,6 +780,11 @@ impl WorkerSession {
                             seq += 1;
                             if let Some(schedule) = schedule.as_mut() {
                                 schedule.advance();
+                            }
+                            // After the reply in echo mode, after the send in
+                            // the other modes.
+                            if let Some(graceful) = self.chaos_close_now() {
+                                return self.chaos_close(&mut sink, graceful).await;
                             }
                         }
 
@@ -794,6 +886,11 @@ impl WorkerSession {
     /// Reads frames until one matches `--match` for request `seq`, answering
     /// pings on the way. Returns the reply size, or `None` on a server Close.
     ///
+    /// The reply to a request that chaos `corrupted` is matched against the
+    /// corrupted frame with `exact`; with `json:POINTER` the first data frame
+    /// is the reply, since the corruption may have changed the value at the
+    /// pointer.
+    ///
     /// Non-matching data frames are added to `unsolicited`, which the caller
     /// records even when this future is dropped by a timeout or cancellation.
     async fn await_reply<St, Si>(
@@ -802,6 +899,7 @@ impl WorkerSession {
         sink: &mut Si,
         sent: Option<&Message>,
         seq: u64,
+        corrupted: bool,
         unsolicited: &mut u64,
     ) -> Result<Option<usize>, ErrorCategory>
     where
@@ -819,12 +917,83 @@ impl WorkerSession {
                 Ok(Message::Pong(_) | Message::Frame(_)) => continue,
                 Err(e) => return Err(categorize_session_error(&e, ErrorDirection::Read)),
             };
-            if reply_matches(&self.config.reply_match, &frame, sent, seq) {
+            let rule = match &self.config.reply_match {
+                ReplyMatch::JsonPointer(_) if corrupted => &ReplyMatch::First,
+                rule => rule,
+            };
+            if reply_matches(rule, &frame, sent, seq) {
                 return Ok(Some(message_byte_len(&frame)));
             }
             *unsolicited += 1;
         }
         Err(ErrorCategory::UnexpectedClose)
+    }
+
+    /// What chaos does to the next data send; nothing without chaos.
+    #[inline]
+    fn chaos_plan(&mut self) -> SendPlan {
+        #[cfg(feature = "chaos")]
+        if let Some(chaos) = self.chaos.as_mut() {
+            return chaos.plan_send();
+        }
+        SendPlan::default()
+    }
+
+    /// Waits out a chaos delay before a send. Returns false when the run
+    /// was cancelled meanwhile.
+    async fn chaos_delay(&mut self, delay: Duration) -> bool {
+        self.metrics.record_chaos_delayed();
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => true,
+            _ = self.cancel_token.cancelled() => false,
+        }
+    }
+
+    /// Corrupts `msg` when the plan says so. Returns the frame to send and
+    /// whether chaos changed it.
+    #[inline]
+    fn chaos_corrupt(&mut self, msg: Message, corrupt: bool) -> (Message, bool) {
+        #[cfg(feature = "chaos")]
+        if corrupt && let Some(chaos) = self.chaos.as_mut() {
+            let (msg, changed) = chaos.corrupt(msg);
+            if changed {
+                self.metrics.record_chaos_corrupted();
+            }
+            return (msg, changed);
+        }
+        let _ = corrupt;
+        (msg, false)
+    }
+
+    /// Whether chaos closes the connection now; `Some(graceful)` when it
+    /// does.
+    #[inline]
+    fn chaos_close_now(&mut self) -> Option<bool> {
+        #[cfg(feature = "chaos")]
+        if let Some(chaos) = self.chaos.as_mut() {
+            return chaos.close_now();
+        }
+        None
+    }
+
+    /// Ends the session for chaos: with a Close frame with code 1001 when
+    /// `graceful`, else by dropping the TCP connection without a Close
+    /// frame. The connection counts as lost, so the worker reconnects
+    /// unless the run ends or `--no-reconnect` is set; it is not an error.
+    async fn chaos_close<Si>(&mut self, sink: &mut Si, graceful: bool) -> SessionEnd
+    where
+        Si: futures_util::Sink<Message, Error = TungsteniteError> + Unpin,
+    {
+        self.metrics.record_chaos_close();
+        if graceful {
+            let _ = sink
+                .send(Message::Close(Some(CloseFrame {
+                    code: CloseCode::Away,
+                    reason: Utf8Bytes::from_static("wsblast chaos close"),
+                })))
+                .await;
+        }
+        self.session_end()
     }
 
     /// Builds the optional keepalive ticker shared by every session mode.
@@ -1288,6 +1457,18 @@ const TIMER_SLACK: Duration = if cfg!(windows) {
     Duration::from_millis(2)
 };
 
+/// What chaos does to one data send. The default does nothing, which is
+/// all a run without chaos ever sees.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SendPlan {
+    /// Pause before the send.
+    pub(crate) delay: Duration,
+    /// Skip the send.
+    pub(crate) drop: bool,
+    /// Corrupt the payload.
+    pub(crate) corrupt: bool,
+}
+
 /// The send times of a paced echo session or echo action script.
 ///
 /// Request `n` of a session is due at `session start + n * period`. A
@@ -1313,6 +1494,11 @@ impl SendSchedule {
     /// Moves on to the next request's slot.
     fn advance(&mut self) {
         self.next_due += self.period;
+    }
+
+    /// Moves the next slot, and with it every later one, by `delay`.
+    fn shift(&mut self, delay: Duration) {
+        self.next_due += delay;
     }
 
     /// Restarts the schedule from now after a deliberate pause (think time,

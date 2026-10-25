@@ -62,7 +62,7 @@ phases:                           # required, at least one
 Unknown keys are rejected at every level: the top level, `metadata`, each phase, each `slo` mapping and each action. A misspelled field fails validation with its name and the list of valid keys, so it cannot silently fall back to a default:
 
 ```text
-Error: Configuration error: Invalid scenario: load.yaml: phases[0]: unknown field `conections`, expected one of `name`, `target`, `duration`, `connections`, `ramp_rate`, `stages`, `rate_per_conn`, `payload`, `think_time`, `actions`, `slo` at line 10 column 5
+Error: Configuration error: Invalid scenario: load.yaml: phases[0]: unknown field `conections`, expected one of `name`, `target`, `duration`, `connections`, `ramp_rate`, `stages`, `rate_per_conn`, `payload`, `think_time`, `actions`, `slo`, `chaos` at line 10 column 5
 ```
 
 ## 2. Phase fields
@@ -80,6 +80,7 @@ Error: Configuration error: Invalid scenario: load.yaml: phases[0]: unknown fiel
 | `think_time` | duration | no | `0` | Pause after each `Send` action, or after each message when the phase has no actions. See [section 4](#4-how-a-phase-runs). |
 | `actions` | list of actions | no | `[]` | Script each connection runs. Without actions the phase runs the `--mode` loop. |
 | `slo` | SLO mapping | no | none | Thresholds checked on this phase's own metrics. See [section 7](#7-slos). |
+| `chaos` | chaos mapping | no | the `--chaos-*` flags | Client-side faults this phase injects instead of those of the command line. See [section 4.5](#45-chaos). Needs the `chaos` feature (on by default). |
 
 **Durations** are strings with a unit: `ns`, `us` (or `µs`), `ms`, `s`, `m`, `h`. Fractions are allowed (`1.5s`, `0.5ms`). A bare integer is seconds. Negative, infinite and out-of-range values are rejected.
 
@@ -191,6 +192,38 @@ phases:
 | `target` | integer | yes | Connections open at the end of the stage. `0` is allowed, but at least one stage needs a target above 0. |
 
 `stages` replaces `connections`, `duration` and `ramp_rate`; setting any of them in the same phase is an error that names the phase and the keys. The phase's configured connection count, shown as `connections` of the phase in the JSON report's `phases`, is its highest target. Its `total_connections_attempted` counts every connection the phase opened, so a profile that ramps down and up again attempts more connections than its peak. No slot of a staged phase is reported as not started. See METHODOLOGY.md, section 2.1.1.
+
+### 4.5 Chaos
+
+A phase's `chaos` mapping injects client-side faults into that phase, with the keys and values of the `--chaos-*` flags:
+
+| Key | Type | Default | Meaning |
+| :--- | :--- | :--- | :--- |
+| `delay` | duration, or `DURATION:JITTER` | none | Wait this long before every data send, plus a value drawn uniformly from 0 to `JITTER`. |
+| `drop` | number, 0 to 100 | `0` | Percentage of data sends skipped. They are not counted as sent. |
+| `corrupt` | number, 0 to 100 | `0` | Percentage of data sends with one byte changed. `drop` and `corrupt` add up to at most 100. |
+| `close` | number, 0 to 100 | `0` | Percentage of replies (of sends in stream mode) after which the client closes the connection; the worker reconnects. |
+| `close_mode` | `abrupt` or `graceful` | `abrupt` | `abrupt` closes the TCP connection without a Close frame; `graceful` sends a Close frame with code 1001 first. |
+| `seed` | integer | `--chaos-seed`, else picked per run | Seed of the phase's decisions. |
+
+```yaml
+phases:
+  - name: "flaky clients"
+    duration: "1m"
+    connections: 200
+    rate_per_conn: 10
+    chaos:
+      delay: "5ms:20ms"
+      drop: 1
+      close: 0.5
+      close_mode: graceful
+      seed: 42
+```
+
+- The mapping replaces the command-line `--chaos-*` options for that phase as a whole: keys it leaves out are off, not taken from the flags. `chaos: {}` runs the phase without faults. A phase without a `chaos` key uses the flags.
+- A phase without a `seed` uses `--chaos-seed` when it is given and otherwise picks its own seed. Every phase numbers its connection slots from 0, so phases with the same seed make the same decisions on the same slots.
+- Injected events are never errors and add no latency sample by themselves; [METHODOLOGY.md section 13](../METHODOLOGY.md#13-chaos-injection) defines their effect on every metric. The phase's own metrics in the JSON report carry its `chaos` counts, and the merged `metrics.chaos` adds up the counts of every phase, with the seed of the first phase that injected faults.
+- Chaos acts on data sends: in `listen` and `graphql-ws` mode a phase may use it only with an action script.
 
 ## 5. Target URL precedence
 
@@ -339,6 +372,9 @@ The whole file is validated before any connection is opened, including phases th
 | Unknown `slo` key | ``load.yaml: phases[0].slo: unknown field `max_p99_ms`, expected one of `max_p50`, `max_p95`, `max_p99`, `max_p999`, `max_error_rate`, `min_throughput` at line 9 column 7`` |
 | Unparsable SLO duration | `phase 'spike': slo: max_p99: Configuration error: Invalid duration 'fast': ...` (`slo: max_p99: ...` at the top level) |
 | `max_error_rate` outside 0 to 1 | `phase 'spike': slo: Configuration error: Invalid threshold specification: max_error_rate must be between 0.0 and 1.0, received 1.5` |
+| `chaos` percentage outside 0 to 100, or `drop` and `corrupt` adding up to more than 100 | `phase 'flaky': chaos: Configuration error: Invalid option: chaos drop percentage must be between 0 and 100, received 150` |
+| Unparsable `chaos` delay | `phase 'flaky': chaos: Configuration error: Invalid duration 'soon': ...` |
+| `chaos` in a `listen` or `graphql-ws` phase without actions | `Unsupported option combination: phase 'watch': chaos injection needs data sends to act on; Listen mode sends none, use --mode echo or stream, or an action script` (exit code 1, when the phase will run) |
 | `--phase` names a missing phase | `phase 'nope' not found; available phases: soak, spike` |
 | A phase that will run has no target from the command line, the phase or the scenario | ``phase 'spike': no target URL; set `target` on this phase or at the top level of the scenario, or pass a URL on the command line`` |
 

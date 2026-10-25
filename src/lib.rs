@@ -99,6 +99,10 @@
 //! - `distributed`: the `wsblast agent` command, the `--agents` options
 //!   and the [`distributed`] module, to generate one run's load from several
 //!   machines and merge their results exactly.
+//! - `chaos`: the `--chaos-*` options and [`ChaosConfig`], which inject
+//!   client-side faults (delayed, dropped and corrupted sends and closed
+//!   connections) without counting them as errors or latency. Their counts
+//!   are in [`AggregatedMetrics::chaos`].
 //! - `auth` and `compare` add the `--auth-*` and `--compare` command-line
 //!   options and have no library API. Send credentials with
 //!   [`header`](LoadTestConfigBuilder::header).
@@ -117,6 +121,10 @@
 #![cfg_attr(
     not(feature = "mock"),
     doc = "[`mock`]: https://docs.rs/wsblast/latest/wsblast/mock/index.html"
+)]
+#![cfg_attr(
+    not(feature = "chaos"),
+    doc = "[`ChaosConfig`]: https://docs.rs/wsblast/latest/wsblast/struct.ChaosConfig.html"
 )]
 #![cfg_attr(
     not(feature = "distributed"),
@@ -143,6 +151,8 @@ mod auth;
 mod base64;
 #[cfg(feature = "capture")]
 mod capture;
+#[cfg(feature = "chaos")]
+mod chaos;
 mod cli;
 mod clock;
 mod config;
@@ -168,13 +178,15 @@ mod tls;
 mod tui;
 mod worker;
 
+#[cfg(feature = "chaos")]
+pub use chaos::{ChaosCloseMode, ChaosConfig};
 pub use cli::{OutputFormat, TestMode};
 #[cfg(feature = "scenario")]
 pub use config::ScenarioConfig;
 pub use config::{LoadTestConfig, LoadTestConfigBuilder, ReplyMatch, SloThresholds, Stage};
 pub use error::{ConfigError, ErrorCategory, Result, WorkerError, WsBlastError};
 pub use metrics::{
-    AggregatedMetrics, CaptureSummary, DistributedSummary, LatencyStats, LiveSnapshot,
+    AggregatedMetrics, CaptureSummary, ChaosSummary, DistributedSummary, LatencyStats, LiveSnapshot,
 };
 #[cfg(feature = "scenario")]
 pub use report::PhaseTarget;

@@ -291,6 +291,18 @@
             "limit": { "description": "--capture-limit; 0 means unlimited.", "$ref": "#/$defs/count" }
           }
         },
+        "chaos": {
+          "description": "Faults the run injected on the client side (--chaos-* or a scenario phase's chaos mapping). Present only when the run injected faults; absent from other reports and from reports written before this field was added. None of these events is counted as an error or adds a latency sample by itself; see METHODOLOGY.md section 13.",
+          "type": "object",
+          "required": ["seed", "delayed", "dropped", "corrupted", "closes"],
+          "properties": {
+            "seed": { "description": "Seed of every chaos decision; --chaos-seed with this value repeats them. In a scenario, the seed of the first phase that injected faults.", "type": "integer", "minimum": 0 },
+            "delayed": { "description": "Data sends held back by --chaos-delay.", "$ref": "#/$defs/count" },
+            "dropped": { "description": "Data sends skipped by --chaos-drop. They are not in total_messages_sent.", "$ref": "#/$defs/count" },
+            "corrupted": { "description": "Data sends whose payload --chaos-corrupt changed. They are in total_messages_sent.", "$ref": "#/$defs/count" },
+            "closes": { "description": "Connections the client closed for --chaos-close. They are not errors; a worker that reconnects afterwards adds to total_reconnects.", "$ref": "#/$defs/count" }
+          }
+        },
         "distributed": {
           "description": "Distributed runs (--agents) only: which agents generated the load. Absent from single-machine reports and from reports written before this field was added. The metrics are merged from the agents that sent their result; see METHODOLOGY.md section 12.",
           "type": "object",
