@@ -1,0 +1,27 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH wsblast-agent 1  "wsblast-agent 0.2.0" 
+.SH NAME
+wsblast\-agent \- Run a load agent that generates load for a coordinator (`wsblast URL \-\-agents ...`), one test at a time
+.SH SYNOPSIS
+\fBwsblast agent\fR [\fB\-\-token\fR] [\fB\-\-tls\-cert\fR] [\fB\-\-tls\-key\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fB\-\-listen\fR> 
+.SH DESCRIPTION
+Run a load agent that generates load for a coordinator (`wsblast URL \-\-agents ...`), one test at a time
+.SH OPTIONS
+.TP
+\fB\-\-listen\fR \fI<ADDR>\fR
+Address to accept coordinators on (host:port, e.g. \*(Aq0.0.0.0:7700\*(Aq; port 0 picks a free port)
+.TP
+\fB\-\-token\fR \fI<TOKEN>\fR
+Token coordinators must present, at least 16 characters; required, here or in WSBLAST_AGENT_TOKEN
+.TP
+\fB\-\-tls\-cert\fR \fI<PEM>\fR
+PEM certificate chain to serve the control channel over TLS (wss://)
+.TP
+\fB\-\-tls\-key\fR \fI<PEM>\fR
+PEM private key for \-\-tls\-cert
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.SH VERSION
+v0.2.0

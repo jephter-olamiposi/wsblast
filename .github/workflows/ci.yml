@@ -50,6 +50,7 @@ jobs:
           - otel
           - capture
           - mock
+          - distributed
           - full
     steps:
       - uses: actions/checkout@v5

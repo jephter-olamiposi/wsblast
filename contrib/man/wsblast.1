@@ -4,7 +4,7 @@
 .SH NAME
 wsblast \- High\-performance WebSocket load\-testing CLI with percentile latency & CI gating
 .SH SYNOPSIS
-\fBwsblast\fR [\fB\-u\fR|\fB\-\-url\fR] [\fB\-c\fR|\fB\-\-connections\fR] [\fB\-\-ramp\-rate\fR] [\fB\-d\fR|\fB\-\-duration\fR] [\fB\-\-stages\fR] [\fB\-n\fR|\fB\-\-requests\fR] [\fB\-r\fR|\fB\-\-rate\fR] [\fB\-p\fR|\fB\-\-payload\fR] [\fB\-\-payload\-file\fR] [\fB\-\-binary\fR] [\fB\-H\fR|\fB\-\-header\fR] [\fB\-\-subprotocol\fR] [\fB\-\-mode\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-message\-timeout\fR] [\fB\-\-match\fR] [\fB\-\-ping\-interval\fR] [\fB\-\-max\-p50\fR] [\fB\-\-max\-p95\fR] [\fB\-\-max\-p99\fR] [\fB\-\-max\-p999\fR] [\fB\-\-max\-error\-rate\fR] [\fB\-\-min\-throughput\fR] [\fB\-\-auth\-type\fR] [\fB\-\-auth\-token\fR] [\fB\-\-auth\-token\-cmd\fR] [\fB\-\-auth\-token\-cmd\-timeout\fR] [\fB\-\-auth\-token\-refresh\fR] [\fB\-\-auth\-header\fR] [\fB\-\-auth\-apikey\fR] [\fB\-\-auth\-apikey\-header\fR] [\fB\-\-graphql\-ws\-operation\-name\fR] [\fB\-\-graphql\-ws\-operation\fR] [\fB\-\-graphql\-ws\-variables\fR] [\fB\-\-graphql\-ws\-extensions\fR] [\fB\-\-format\fR] [\fB\-\-compare\fR] [\fB\-\-compare\-threshold\fR] [\fB\-\-fail\-on\-regression\fR] [\fB\-\-capture\fR] [\fB\-\-capture\-limit\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-tui\fR] [\fB\-\-no\-progress\fR] [\fB\-\-no\-reconnect\fR] [\fB\-\-prometheus\-listen\fR] [\fB\-\-otel\-endpoint\fR] [\fB\-\-otel\-interval\fR] [\fB\-\-otel\-service\-name\fR] [\fB\-\-scenario\fR] [\fB\-\-phase\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIURL\fR] [\fIsubcommands\fR]
+\fBwsblast\fR [\fB\-u\fR|\fB\-\-url\fR] [\fB\-c\fR|\fB\-\-connections\fR] [\fB\-\-ramp\-rate\fR] [\fB\-d\fR|\fB\-\-duration\fR] [\fB\-\-stages\fR] [\fB\-n\fR|\fB\-\-requests\fR] [\fB\-r\fR|\fB\-\-rate\fR] [\fB\-p\fR|\fB\-\-payload\fR] [\fB\-\-payload\-file\fR] [\fB\-\-binary\fR] [\fB\-H\fR|\fB\-\-header\fR] [\fB\-\-subprotocol\fR] [\fB\-\-mode\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-message\-timeout\fR] [\fB\-\-match\fR] [\fB\-\-ping\-interval\fR] [\fB\-\-max\-p50\fR] [\fB\-\-max\-p95\fR] [\fB\-\-max\-p99\fR] [\fB\-\-max\-p999\fR] [\fB\-\-max\-error\-rate\fR] [\fB\-\-min\-throughput\fR] [\fB\-\-auth\-type\fR] [\fB\-\-auth\-token\fR] [\fB\-\-auth\-token\-cmd\fR] [\fB\-\-auth\-token\-cmd\-timeout\fR] [\fB\-\-auth\-token\-refresh\fR] [\fB\-\-auth\-header\fR] [\fB\-\-auth\-apikey\fR] [\fB\-\-auth\-apikey\-header\fR] [\fB\-\-graphql\-ws\-operation\-name\fR] [\fB\-\-graphql\-ws\-operation\fR] [\fB\-\-graphql\-ws\-variables\fR] [\fB\-\-graphql\-ws\-extensions\fR] [\fB\-\-format\fR] [\fB\-\-compare\fR] [\fB\-\-compare\-threshold\fR] [\fB\-\-fail\-on\-regression\fR] [\fB\-\-capture\fR] [\fB\-\-capture\-limit\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-tui\fR] [\fB\-\-no\-progress\fR] [\fB\-\-no\-reconnect\fR] [\fB\-\-prometheus\-listen\fR] [\fB\-\-otel\-endpoint\fR] [\fB\-\-otel\-interval\fR] [\fB\-\-otel\-service\-name\fR] [\fB\-\-scenario\fR] [\fB\-\-phase\fR] [\fB\-\-agents\fR] [\fB\-\-agent\-token\fR] [\fB\-\-agent\-timeout\fR] [\fB\-\-agent\-ca\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIURL\fR] [\fIsubcommands\fR]
 .SH DESCRIPTION
 wsblast stresses WebSocket targets, computes high\-resolution latency percentiles (p50/p95/p99/p99.9), maps failure taxonomy, and gates CI pipelines via SLO thresholds.
 .SH OPTIONS
@@ -208,6 +208,18 @@ Path to scenario YAML file defining multi\-phase test (conflicts with individual
 \fB\-\-phase\fR \fI<NAME>\fR
 Run only a specific phase from the scenario by name
 .TP
+\fB\-\-agents\fR \fI<HOST:PORT>\fR
+Generate the load on these agents (started with `wsblast agent`) instead of locally; comma\-separated HOST:PORT, ws://HOST:PORT or wss://HOST:PORT
+.TP
+\fB\-\-agent\-token\fR \fI<TOKEN>\fR
+Token the agents were started with [default: $WSBLAST_AGENT_TOKEN]
+.TP
+\fB\-\-agent\-timeout\fR \fI<DURATION>\fR [default: 30s]
+Time the agents get to become ready before the start, and to send their results after the end of the run
+.TP
+\fB\-\-agent\-ca\fR \fI<PEM>\fR
+PEM file of CA certificates to trust for wss:// agents, in addition to the platform\*(Aqs roots
+.TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)
 .TP
@@ -220,5 +232,8 @@ Target WebSocket URL (e.g., ws://127.0.0.1:9001/ws or wss://api.example.com/stre
 .TP
 wsblast\-mock(1)
 Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file
+.TP
+wsblast\-agent(1)
+Run a load agent that generates load for a coordinator (`wsblast URL \-\-agents ...`), one test at a time
 .SH VERSION
 v0.2.0

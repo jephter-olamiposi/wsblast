@@ -3,7 +3,7 @@
 
 use crate::cli::OutputFormat;
 use crate::config::{LoadTestConfig, SloThresholds};
-use crate::metrics::{AggregatedMetrics, CaptureSummary, LatencyStats};
+use crate::metrics::{AggregatedMetrics, CaptureSummary, DistributedSummary, LatencyStats};
 use colored::Colorize;
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, Color, Row, Table};
@@ -742,6 +742,12 @@ fn render_text_report(
         },
     ]);
     meta_table.add_row(vec!["Mode", &format!("{:?}", config.mode)]);
+    if let Some(distributed) = &metrics.distributed {
+        meta_table.add_row(vec![
+            "Agents",
+            &agents_label(distributed, |a| a.to_string()),
+        ]);
+    }
     out.push_str(&meta_table.to_string());
     out.push_str("\n\n");
 
@@ -980,6 +986,12 @@ fn render_markdown_report(
     if !config.stages.is_empty() {
         md.push_str(&format!("- **Load Stages:** `{}`\n", stages_label(config)));
     }
+    if let Some(distributed) = &metrics.distributed {
+        md.push_str(&format!(
+            "- **Agents:** {}\n",
+            agents_label(distributed, |a| format!("`{a}`"))
+        ));
+    }
     md.push_str(&format!(
         "- **Connections:** `{}` established / `{}` failed / `{}` reconnects\n",
         metrics.total_connections_established,
@@ -1081,6 +1093,17 @@ fn render_markdown_report(
     }
 
     md
+}
+
+/// "N" or "N (lost: a, b)" for a distributed run, each lost agent rendered
+/// by `name`.
+fn agents_label(distributed: &DistributedSummary, name: impl Fn(&str) -> String) -> String {
+    let count = distributed.agents.len();
+    if distributed.lost_agents.is_empty() {
+        return count.to_string();
+    }
+    let lost: Vec<String> = distributed.lost_agents.iter().map(|a| name(a)).collect();
+    format!("{count} (lost: {})", lost.join(", "))
 }
 
 /// The capture totals line of the text report.
@@ -1438,6 +1461,51 @@ mod tests {
         let parsed: AggregatedMetrics =
             serde_json::from_value(json["metrics"].clone()).expect("report parses");
         assert_eq!(parsed.capture, metrics.capture);
+    }
+
+    #[test]
+    fn distributed_runs_list_their_agents_and_lost_agents() {
+        let slo = evaluate_slos(&SloThresholds::default(), &sample_metrics());
+        let mut metrics = sample_metrics();
+        for format in ["text", "markdown", "json"] {
+            let rendered = render_report(&report_config(format), &metrics, &slo);
+            assert!(!rendered.contains("Agents"), "{format}: {rendered}");
+            assert!(!rendered.contains("distributed"), "{format}");
+        }
+        metrics.distributed = Some(DistributedSummary {
+            agents: vec![
+                "10.0.0.1:7700".into(),
+                "10.0.0.2:7700".into(),
+                "10.0.0.3:7700".into(),
+            ],
+            lost_agents: vec!["10.0.0.2:7700".into()],
+        });
+        let text = render_report(&report_config("text"), &metrics, &slo);
+        assert!(text.contains("3 (lost: 10.0.0.2:7700)"), "{text}");
+        let markdown = render_report(&report_config("markdown"), &metrics, &slo);
+        assert!(
+            markdown.contains("- **Agents:** 3 (lost: `10.0.0.2:7700`)"),
+            "{markdown}"
+        );
+        let json = render_report(&report_config("json"), &metrics, &slo);
+        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            json["metrics"]["distributed"]["lost_agents"][0],
+            "10.0.0.2:7700"
+        );
+        assert_eq!(
+            json["metrics"]["distributed"]["agents"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        let parsed: AggregatedMetrics = serde_json::from_value(json["metrics"].clone()).unwrap();
+        assert_eq!(parsed.distributed, metrics.distributed);
+
+        metrics.distributed.as_mut().unwrap().lost_agents.clear();
+        let text = render_report(&report_config("text"), &metrics, &slo);
+        assert!(!text.contains("lost"), "{text}");
     }
 
     #[test]

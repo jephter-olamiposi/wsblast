@@ -72,6 +72,10 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --otel-service-name 'OpenTelemetry service.name resource attribute [default: $OTEL_SERVICE_NAME, else wsblast]'
             cand --scenario 'Path to scenario YAML file defining multi-phase test (conflicts with individual flags)'
             cand --phase 'Run only a specific phase from the scenario by name'
+            cand --agents 'Generate the load on these agents (started with `wsblast agent`) instead of locally; comma-separated HOST:PORT, ws://HOST:PORT or wss://HOST:PORT'
+            cand --agent-token 'Token the agents were started with [default: $WSBLAST_AGENT_TOKEN]'
+            cand --agent-timeout 'Time the agents get to become ready before the start, and to send their results after the end of the run'
+            cand --agent-ca 'PEM file of CA certificates to trust for wss:// agents, in addition to the platform''s roots'
             cand --binary 'Send payload as WebSocket binary frames instead of text frames'
             cand --fail-on-regression 'Fail on regression (exit code 2)'
             cand --tui 'Launch interactive terminal dashboard (TUI)'
@@ -82,6 +86,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand -V 'Print version'
             cand --version 'Print version'
             cand mock 'Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file'
+            cand agent 'Run a load agent that generates load for a coordinator (`wsblast URL --agents ...`), one test at a time'
         }
         &'wsblast;mock'= {
             cand --listen 'Address to listen on (host:port; port 0 picks a free port)'
@@ -92,6 +97,14 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --stall-every 'Stop replying on every connection at each multiple of this period (needs --stall-for)'
             cand --stall-for 'How long each stall lasts; shorter than --stall-every'
             cand --replay 'Instead of echoing, send each connection the frames a --capture file recorded as received, with their timing'
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'wsblast;agent'= {
+            cand --listen 'Address to accept coordinators on (host:port, e.g. ''0.0.0.0:7700''; port 0 picks a free port)'
+            cand --token 'Token coordinators must present, at least 16 characters; required, here or in WSBLAST_AGENT_TOKEN'
+            cand --tls-cert 'PEM certificate chain to serve the control channel over TLS (wss://)'
+            cand --tls-key 'PEM private key for --tls-cert'
             cand -h 'Print help'
             cand --help 'Print help'
         }

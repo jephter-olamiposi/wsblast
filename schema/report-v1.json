@@ -31,7 +31,7 @@
       "minimum": 1
     },
     "duration_secs": {
-      "description": "Measured elapsed time in seconds (metrics.elapsed as a float), not the configured --duration. For a scenario, the sum of each phase's elapsed time; the 500 ms pause between phases is not included.",
+      "description": "Measured elapsed time in seconds (metrics.elapsed as a float), not the configured --duration. For a scenario, the sum of each phase's elapsed time; the 500 ms pause between phases is not included. For a distributed run (metrics.distributed present), the coordinator's time from sending start to receiving the last agent result.",
       "type": "number",
       "minimum": 0
     },
@@ -283,6 +283,24 @@
             "frames_written": { "description": "Records written after the header line: text, binary and Close frames and connection open events.", "$ref": "#/$defs/count" },
             "frames_dropped": { "description": "Records not written because the limit was reached, the writer queue was full or a write failed. frames_written + frames_dropped is every record the run produced.", "$ref": "#/$defs/count" },
             "limit": { "description": "--capture-limit; 0 means unlimited.", "$ref": "#/$defs/count" }
+          }
+        },
+        "distributed": {
+          "description": "Distributed runs (--agents) only: which agents generated the load. Absent from single-machine reports and from reports written before this field was added. The metrics are merged from the agents that sent their result; see METHODOLOGY.md section 12.",
+          "type": "object",
+          "required": ["agents", "lost_agents"],
+          "properties": {
+            "agents": {
+              "description": "Every agent of the run, as given to --agents, in that order.",
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "lost_agents": {
+              "description": "Agents that disconnected or missed their result deadline after the run started, in --agents order. Their connections and messages are not in the report. Empty when every agent reported.",
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            }
           }
         },
         "error_breakdown": {

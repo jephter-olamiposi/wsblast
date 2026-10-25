@@ -16,6 +16,9 @@ _wsblast() {
             ",$1")
                 cmd="wsblast"
                 ;;
+            wsblast,agent)
+                cmd="wsblast__subcmd__agent"
+                ;;
             wsblast,mock)
                 cmd="wsblast__subcmd__mock"
                 ;;
@@ -26,7 +29,7 @@ _wsblast() {
 
     case "${cmd}" in
         wsblast)
-            opts="-u -c -d -n -r -p -H -o -h -V --url --connections --ramp-rate --duration --stages --requests --rate --payload --payload-file --binary --header --subprotocol --mode --connect-timeout --message-timeout --match --ping-interval --max-p50 --max-p95 --max-p99 --max-p999 --max-error-rate --min-throughput --auth-type --auth-token --auth-token-cmd --auth-token-cmd-timeout --auth-token-refresh --auth-header --auth-apikey --auth-apikey-header --graphql-ws-operation-name --graphql-ws-operation --graphql-ws-variables --graphql-ws-extensions --format --compare --compare-threshold --fail-on-regression --capture --capture-limit --output --tui --no-progress --no-reconnect --prometheus-listen --otel-endpoint --otel-interval --otel-service-name --scenario --phase --help --version mock"
+            opts="-u -c -d -n -r -p -H -o -h -V --url --connections --ramp-rate --duration --stages --requests --rate --payload --payload-file --binary --header --subprotocol --mode --connect-timeout --message-timeout --match --ping-interval --max-p50 --max-p95 --max-p99 --max-p999 --max-error-rate --min-throughput --auth-type --auth-token --auth-token-cmd --auth-token-cmd-timeout --auth-token-refresh --auth-header --auth-apikey --auth-apikey-header --graphql-ws-operation-name --graphql-ws-operation --graphql-ws-variables --graphql-ws-extensions --format --compare --compare-threshold --fail-on-regression --capture --capture-limit --output --tui --no-progress --no-reconnect --prometheus-listen --otel-endpoint --otel-interval --otel-service-name --scenario --phase --agents --agent-token --agent-timeout --agent-ca --help --version mock agent"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -245,6 +248,52 @@ _wsblast() {
                     return 0
                     ;;
                 --phase)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --agents)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --agent-token)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --agent-timeout)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --agent-ca)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        wsblast__subcmd__agent)
+            opts="-h --listen --token --tls-cert --tls-key --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --listen)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-cert)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

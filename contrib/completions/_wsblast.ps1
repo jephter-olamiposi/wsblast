@@ -75,6 +75,10 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--otel-service-name', '--otel-service-name', [CompletionResultType]::ParameterName, 'OpenTelemetry service.name resource attribute [default: $OTEL_SERVICE_NAME, else wsblast]')
             [CompletionResult]::new('--scenario', '--scenario', [CompletionResultType]::ParameterName, 'Path to scenario YAML file defining multi-phase test (conflicts with individual flags)')
             [CompletionResult]::new('--phase', '--phase', [CompletionResultType]::ParameterName, 'Run only a specific phase from the scenario by name')
+            [CompletionResult]::new('--agents', '--agents', [CompletionResultType]::ParameterName, 'Generate the load on these agents (started with `wsblast agent`) instead of locally; comma-separated HOST:PORT, ws://HOST:PORT or wss://HOST:PORT')
+            [CompletionResult]::new('--agent-token', '--agent-token', [CompletionResultType]::ParameterName, 'Token the agents were started with [default: $WSBLAST_AGENT_TOKEN]')
+            [CompletionResult]::new('--agent-timeout', '--agent-timeout', [CompletionResultType]::ParameterName, 'Time the agents get to become ready before the start, and to send their results after the end of the run')
+            [CompletionResult]::new('--agent-ca', '--agent-ca', [CompletionResultType]::ParameterName, 'PEM file of CA certificates to trust for wss:// agents, in addition to the platform''s roots')
             [CompletionResult]::new('--binary', '--binary', [CompletionResultType]::ParameterName, 'Send payload as WebSocket binary frames instead of text frames')
             [CompletionResult]::new('--fail-on-regression', '--fail-on-regression', [CompletionResultType]::ParameterName, 'Fail on regression (exit code 2)')
             [CompletionResult]::new('--tui', '--tui', [CompletionResultType]::ParameterName, 'Launch interactive terminal dashboard (TUI)')
@@ -85,6 +89,7 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('-V', '-V ', [CompletionResultType]::ParameterName, 'Print version')
             [CompletionResult]::new('--version', '--version', [CompletionResultType]::ParameterName, 'Print version')
             [CompletionResult]::new('mock', 'mock', [CompletionResultType]::ParameterValue, 'Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file')
+            [CompletionResult]::new('agent', 'agent', [CompletionResultType]::ParameterValue, 'Run a load agent that generates load for a coordinator (`wsblast URL --agents ...`), one test at a time')
             break
         }
         'wsblast;mock' {
@@ -96,6 +101,15 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--stall-every', '--stall-every', [CompletionResultType]::ParameterName, 'Stop replying on every connection at each multiple of this period (needs --stall-for)')
             [CompletionResult]::new('--stall-for', '--stall-for', [CompletionResultType]::ParameterName, 'How long each stall lasts; shorter than --stall-every')
             [CompletionResult]::new('--replay', '--replay', [CompletionResultType]::ParameterName, 'Instead of echoing, send each connection the frames a --capture file recorded as received, with their timing')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'wsblast;agent' {
+            [CompletionResult]::new('--listen', '--listen', [CompletionResultType]::ParameterName, 'Address to accept coordinators on (host:port, e.g. ''0.0.0.0:7700''; port 0 picks a free port)')
+            [CompletionResult]::new('--token', '--token', [CompletionResultType]::ParameterName, 'Token coordinators must present, at least 16 characters; required, here or in WSBLAST_AGENT_TOKEN')
+            [CompletionResult]::new('--tls-cert', '--tls-cert', [CompletionResultType]::ParameterName, 'PEM certificate chain to serve the control channel over TLS (wss://)')
+            [CompletionResult]::new('--tls-key', '--tls-key', [CompletionResultType]::ParameterName, 'PEM private key for --tls-cert')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

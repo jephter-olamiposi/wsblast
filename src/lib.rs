@@ -95,9 +95,9 @@
 //! - `mock`: the `wsblast mock` test server and the [`mock`] module, to run
 //!   it in-process: echo with delays, jitter, stalls, rejected upgrades and
 //!   server closes, or replay of a capture file.
-//! - `distributed`: the [`distributed`] module, load agents and a
-//!   coordinator that generate one run's load from several machines and
-//!   merge their results exactly.
+//! - `distributed`: the `wsblast agent` command, the `--agents` options
+//!   and the [`distributed`] module, to generate one run's load from several
+//!   machines and merge their results exactly.
 //! - `auth` and `compare` add the `--auth-*` and `--compare` command-line
 //!   options and have no library API. Send credentials with
 //!   [`header`](LoadTestConfigBuilder::header).

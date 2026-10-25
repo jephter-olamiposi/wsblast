@@ -1,6 +1,6 @@
 # Print an optspec for argparse to handle cmd's options that are independent of any subcommand.
 function __fish_wsblast_global_optspecs
-    string join \n u/url= c/connections= ramp-rate= d/duration= stages= n/requests= r/rate= p/payload= payload-file= binary H/header= subprotocol= mode= connect-timeout= message-timeout= match= ping-interval= max-p50= max-p95= max-p99= max-p999= max-error-rate= min-throughput= auth-type= auth-token= auth-token-cmd= auth-token-cmd-timeout= auth-token-refresh= auth-header= auth-apikey= auth-apikey-header= graphql-ws-operation-name= graphql-ws-operation= graphql-ws-variables= graphql-ws-extensions= format= compare= compare-threshold= fail-on-regression capture= capture-limit= o/output= tui no-progress no-reconnect prometheus-listen= otel-endpoint= otel-interval= otel-service-name= scenario= phase= h/help V/version
+    string join \n u/url= c/connections= ramp-rate= d/duration= stages= n/requests= r/rate= p/payload= payload-file= binary H/header= subprotocol= mode= connect-timeout= message-timeout= match= ping-interval= max-p50= max-p95= max-p99= max-p999= max-error-rate= min-throughput= auth-type= auth-token= auth-token-cmd= auth-token-cmd-timeout= auth-token-refresh= auth-header= auth-apikey= auth-apikey-header= graphql-ws-operation-name= graphql-ws-operation= graphql-ws-variables= graphql-ws-extensions= format= compare= compare-threshold= fail-on-regression capture= capture-limit= o/output= tui no-progress no-reconnect prometheus-listen= otel-endpoint= otel-interval= otel-service-name= scenario= phase= agents= agent-token= agent-timeout= agent-ca= h/help V/version
 end
 
 function __fish_wsblast_needs_command
@@ -77,6 +77,10 @@ complete -c wsblast -n "__fish_wsblast_needs_command" -l otel-interval -d 'How o
 complete -c wsblast -n "__fish_wsblast_needs_command" -l otel-service-name -d 'OpenTelemetry service.name resource attribute [default: $OTEL_SERVICE_NAME, else wsblast]' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l scenario -d 'Path to scenario YAML file defining multi-phase test (conflicts with individual flags)' -r -F
 complete -c wsblast -n "__fish_wsblast_needs_command" -l phase -d 'Run only a specific phase from the scenario by name' -r
+complete -c wsblast -n "__fish_wsblast_needs_command" -l agents -d 'Generate the load on these agents (started with `wsblast agent`) instead of locally; comma-separated HOST:PORT, ws://HOST:PORT or wss://HOST:PORT' -r
+complete -c wsblast -n "__fish_wsblast_needs_command" -l agent-token -d 'Token the agents were started with [default: $WSBLAST_AGENT_TOKEN]' -r
+complete -c wsblast -n "__fish_wsblast_needs_command" -l agent-timeout -d 'Time the agents get to become ready before the start, and to send their results after the end of the run' -r
+complete -c wsblast -n "__fish_wsblast_needs_command" -l agent-ca -d 'PEM file of CA certificates to trust for wss:// agents, in addition to the platform\'s roots' -r -F
 complete -c wsblast -n "__fish_wsblast_needs_command" -l binary -d 'Send payload as WebSocket binary frames instead of text frames'
 complete -c wsblast -n "__fish_wsblast_needs_command" -l fail-on-regression -d 'Fail on regression (exit code 2)'
 complete -c wsblast -n "__fish_wsblast_needs_command" -l tui -d 'Launch interactive terminal dashboard (TUI)'
@@ -85,6 +89,7 @@ complete -c wsblast -n "__fish_wsblast_needs_command" -l no-reconnect -d 'End a 
 complete -c wsblast -n "__fish_wsblast_needs_command" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c wsblast -n "__fish_wsblast_needs_command" -s V -l version -d 'Print version'
 complete -c wsblast -n "__fish_wsblast_needs_command" -a "mock" -d 'Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file'
+complete -c wsblast -n "__fish_wsblast_needs_command" -a "agent" -d 'Run a load agent that generates load for a coordinator (`wsblast URL --agents ...`), one test at a time'
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l listen -d 'Address to listen on (host:port; port 0 picks a free port)' -r
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l delay -d 'Hold every reply for this long after its request arrived (e.g. \'20ms\')' -r
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l jitter -d 'Add a uniformly distributed extra delay between 0 and this to every reply' -r
@@ -94,3 +99,8 @@ complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l stall-every -d 
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l stall-for -d 'How long each stall lasts; shorter than --stall-every' -r
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l replay -d 'Instead of echoing, send each connection the frames a --capture file recorded as received, with their timing' -r -F
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -s h -l help -d 'Print help'
+complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -l listen -d 'Address to accept coordinators on (host:port, e.g. \'0.0.0.0:7700\'; port 0 picks a free port)' -r
+complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -l token -d 'Token coordinators must present, at least 16 characters; required, here or in WSBLAST_AGENT_TOKEN' -r
+complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -l tls-cert -d 'PEM certificate chain to serve the control channel over TLS (wss://)' -r -F
+complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -l tls-key -d 'PEM private key for --tls-cert' -r -F
+complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -s h -l help -d 'Print help'

@@ -71,3 +71,25 @@ fn ws_config() -> WebSocketConfig {
         .max_message_size(Some(256 << 20))
         .max_frame_size(Some(256 << 20))
 }
+
+/// `wsblast agent`: validates the flags, serves until Ctrl+C or SIGTERM.
+pub(crate) async fn run_agent_command(args: &crate::cli::AgentArgs) -> crate::Result<()> {
+    let mut builder = AgentConfig::builder().listen(&args.listen);
+    if let Some(token) = &args.token {
+        builder = builder.token(token);
+    }
+    if let (Some(cert), Some(key)) = (&args.tls_cert, &args.tls_key) {
+        builder = builder.tls(cert, key);
+    }
+    let config = builder.build()?;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let _signals = crate::runner::spawn_signal_listener(cancel.clone());
+    let server = AgentServer::bind(config).await?;
+    println!(
+        "wsblast agent listening on {} (protocol {PROTOCOL_VERSION}, one test at a time)",
+        server.url()
+    );
+    server.run(cancel).await?;
+    println!("wsblast agent stopped");
+    Ok(())
+}

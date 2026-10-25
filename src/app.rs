@@ -100,6 +100,7 @@ impl AssetCommand {
                         // name is listed here.
                         let page_name = match name.as_str() {
                             "mock" => "wsblast-mock",
+                            "agent" => "wsblast-agent",
                             _ => "",
                         };
                         let sub = command
@@ -330,6 +331,130 @@ fn otel_settings(
     })
 }
 
+/// Rejects the options a distributed run does not support in this version.
+#[cfg(feature = "distributed")]
+fn check_distributed_options(cli: &Cli) -> Result<()> {
+    let mut unsupported: Vec<&str> = Vec::new();
+    if cli.scenario.is_some() {
+        unsupported.push("--scenario");
+    }
+    #[cfg(feature = "capture")]
+    if cli.capture.is_some() {
+        unsupported.push("--capture");
+    }
+    if cli.tui {
+        unsupported.push("--tui");
+    }
+    #[cfg(feature = "auth")]
+    if cli.auth_token_refresh.is_some() {
+        unsupported.push("--auth-token-refresh");
+    }
+    if cli.prometheus_listen.is_some() {
+        unsupported.push("--prometheus-listen");
+    }
+    if cli.otel_endpoint.is_some() {
+        unsupported.push("--otel-endpoint");
+    }
+    match unsupported.as_slice() {
+        [] => Ok(()),
+        flags => Err(WsBlastError::Config(ConfigError::UnsupportedOption(
+            format!(
+                "{} cannot be used with --agents in this version of wsblast",
+                flags.join(", ")
+            ),
+        ))),
+    }
+}
+
+/// `wsblast URL --agents ...`: runs the test on the agents, prints the
+/// merged report and exits with 2 on an SLO breach, else 1 when an agent was
+/// lost.
+#[cfg(feature = "distributed")]
+async fn run_distributed(cli: &Cli) -> Result<()> {
+    use crate::distributed::{Coordinator, TOKEN_ENV};
+
+    check_distributed_options(cli)?;
+    let token = cli
+        .agent_token
+        .clone()
+        .or_else(|| std::env::var(TOKEN_ENV).ok())
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| {
+            WsBlastError::Config(ConfigError::InvalidOption(format!(
+                "--agents needs the agents' token: pass --agent-token or set {TOKEN_ENV}"
+            )))
+        })?;
+    let agent_timeout = crate::config::parse_human_duration(&cli.agent_timeout)?;
+    if agent_timeout.is_zero() {
+        return Err(WsBlastError::Config(ConfigError::InvalidOption(
+            "--agent-timeout must be greater than zero".into(),
+        )));
+    }
+
+    let config = LoadTestConfig::from_cli(cli.clone())?;
+    // Credentials are resolved here, once, and sent to the agents as
+    // handshake headers; a refreshed token was rejected above.
+    #[cfg(feature = "auth")]
+    let mut config = config;
+    #[cfg(feature = "auth")]
+    let _token_refresh = apply_auth(&mut config)?;
+
+    let mut coordinator =
+        Coordinator::new(config.clone(), &cli.agents, token)?.agent_timeout(agent_timeout);
+    if let Some(ca) = &cli.agent_ca {
+        coordinator = coordinator.agent_ca(ca);
+    }
+    let outcome = coordinator.run().await?;
+
+    for agent in outcome.lost_agents() {
+        eprintln!(
+            "\n{} agent {} was lost: {}. Its connections and messages are not in this report.",
+            "WARNING:".bold().red(),
+            agent.address,
+            agent.error.as_deref().unwrap_or("no result")
+        );
+    }
+    let lost = outcome.lost_agents().count();
+    let metrics = outcome.metrics;
+    let slo_result = report::evaluate_slos(&config.slo, &metrics);
+    report::emit_scenario_report(&config, &metrics, &slo_result, &[]).map_err(WsBlastError::Io)?;
+    if lost > 0 {
+        eprintln!(
+            "{} {lost} of {} agents were lost; the report covers the other {}.",
+            "WARNING:".bold().red(),
+            cli.agents.len(),
+            cli.agents.len() - lost
+        );
+    }
+
+    if !slo_result.passed {
+        std::process::exit(2);
+    }
+    if lost > 0 {
+        std::process::exit(1);
+    }
+    exit_if_nothing_connected(&metrics);
+    Ok(())
+}
+
+/// Exits with code 1 when no connection completed its handshake.
+fn exit_if_nothing_connected(metrics: &crate::metrics::AggregatedMetrics) {
+    if metrics.total_connections_attempted > 0 && metrics.total_connections_established == 0 {
+        if metrics.total_connections_failed == 0 && metrics.total_connections_interrupted > 0 {
+            eprintln!(
+                "{} No connection finished its handshake before the run ended. Increase --duration or check the target.",
+                "Failure:".bold().red()
+            );
+        } else {
+            eprintln!(
+                "{} All connection attempts failed. Target may be unreachable.",
+                "Failure:".bold().red()
+            );
+        }
+        std::process::exit(1);
+    }
+}
+
 async fn run_app() -> Result<()> {
     if let Some(command) = AssetCommand::from_args() {
         return command.print();
@@ -342,10 +467,20 @@ async fn run_app() -> Result<()> {
         return crate::mock::run_command(args).await;
     }
 
+    #[cfg(feature = "distributed")]
+    if let Some(crate::cli::Command::Agent(args)) = &cli.command {
+        return crate::distributed::run_agent_command(args).await;
+    }
+
     // Handle compare command first (doesn't run load test)
     #[cfg(feature = "compare")]
     if !cli.compare.is_empty() {
         return run_compare(&cli);
+    }
+
+    #[cfg(feature = "distributed")]
+    if !cli.agents.is_empty() {
+        return run_distributed(&cli).await;
     }
 
     let scenario_mode = cli.is_scenario_mode();
@@ -469,20 +604,7 @@ async fn run_app() -> Result<()> {
         std::process::exit(2);
     }
 
-    if metrics.total_connections_attempted > 0 && metrics.total_connections_established == 0 {
-        if metrics.total_connections_failed == 0 && metrics.total_connections_interrupted > 0 {
-            eprintln!(
-                "{} No connection finished its handshake before the run ended. Increase --duration or check the target.",
-                "Failure:".bold().red()
-            );
-        } else {
-            eprintln!(
-                "{} All connection attempts failed. Target may be unreachable.",
-                "Failure:".bold().red()
-            );
-        }
-        std::process::exit(1);
-    }
+    exit_if_nothing_connected(&metrics);
 
     Ok(())
 }

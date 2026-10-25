@@ -76,6 +76,10 @@ markdown\:"GitHub Flavored Markdown table for PR comments and job summaries"))' 
 '--otel-service-name=[OpenTelemetry service.name resource attribute \[default\: \$OTEL_SERVICE_NAME, else wsblast\]]:NAME:_default' \
 '(-c --connections -d --duration -r --rate -p --payload --payload-file)--scenario=[Path to scenario YAML file defining multi-phase test (conflicts with individual flags)]:FILE:_files' \
 '--phase=[Run only a specific phase from the scenario by name]:NAME:_default' \
+'*--agents=[Generate the load on these agents (started with \`wsblast agent\`) instead of locally; comma-separated HOST\:PORT, ws\://HOST\:PORT or wss\://HOST\:PORT]:HOST:PORT:_default' \
+'--agent-token=[Token the agents were started with \[default\: \$WSBLAST_AGENT_TOKEN\]]:TOKEN:_default' \
+'--agent-timeout=[Time the agents get to become ready before the start, and to send their results after the end of the run]:DURATION:_default' \
+'--agent-ca=[PEM file of CA certificates to trust for wss\:// agents, in addition to the platform'\''s roots]:PEM:_files' \
 '--binary[Send payload as WebSocket binary frames instead of text frames]' \
 '--fail-on-regression[Fail on regression (exit code 2)]' \
 '--tui[Launch interactive terminal dashboard (TUI)]' \
@@ -109,6 +113,16 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
+(agent)
+_arguments "${_arguments_options[@]}" : \
+'--listen=[Address to accept coordinators on (host\:port, e.g. '\''0.0.0.0\:7700'\''; port 0 picks a free port)]:ADDR:_default' \
+'--token=[Token coordinators must present, at least 16 characters; required, here or in WSBLAST_AGENT_TOKEN]:TOKEN:_default' \
+'--tls-cert=[PEM certificate chain to serve the control channel over TLS (wss\://)]:PEM:_files' \
+'--tls-key=[PEM private key for --tls-cert]:PEM:_files' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
         esac
     ;;
 esac
@@ -118,8 +132,14 @@ esac
 _wsblast_commands() {
     local commands; commands=(
 'mock:Run a local WebSocket test server\: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file' \
+'agent:Run a load agent that generates load for a coordinator (\`wsblast URL --agents ...\`), one test at a time' \
     )
     _describe -t commands 'wsblast commands' commands "$@"
+}
+(( $+functions[_wsblast__subcmd__agent_commands] )) ||
+_wsblast__subcmd__agent_commands() {
+    local commands; commands=()
+    _describe -t commands 'wsblast agent commands' commands "$@"
 }
 (( $+functions[_wsblast__subcmd__mock_commands] )) ||
 _wsblast__subcmd__mock_commands() {

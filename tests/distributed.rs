@@ -4,6 +4,7 @@
 #![cfg(all(feature = "distributed", feature = "mock"))]
 
 use futures_util::{SinkExt, StreamExt};
+use std::process::Stdio;
 use std::time::{Duration, SystemTime};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -422,6 +423,162 @@ async fn a_lost_agent_is_reported_and_the_others_still_count() {
     assert_eq!(outcome.metrics.total_connections_established, 2);
 }
 
+struct Finished {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+async fn wsblast(args: &[&str], token_env: Option<&str>) -> Finished {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_wsblast"));
+    command
+        .args(args)
+        .env("NO_COLOR", "1")
+        .env_remove("WSBLAST_AGENT_TOKEN")
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    if let Some(token) = token_env {
+        command.env("WSBLAST_AGENT_TOKEN", token);
+    }
+    let output = tokio::time::timeout(Duration::from_secs(60), command.output())
+        .await
+        .expect("wsblast did not exit in time")
+        .unwrap();
+    Finished {
+        code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_exits_with_1_on_a_wrong_token() {
+    let harness = harness(1, None).await;
+    let finished = wsblast(
+        &[
+            &harness.target,
+            "-c",
+            "1",
+            "-d",
+            "300ms",
+            "--agents",
+            &harness.agents[0],
+            "--agent-token",
+            "not-the-right-token-at-all",
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(finished.code, Some(1), "{}", finished.stderr);
+    assert!(finished.stderr.contains("HTTP 401"), "{}", finished.stderr);
+    assert!(
+        !finished.stdout.contains("Benchmark"),
+        "{}",
+        finished.stdout
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_reports_a_lost_agent_and_exits_with_1() {
+    let mut harness = harness(1, None).await;
+    let scripted = spawn_scripted_agent(&harness.stop, Script::DisconnectAfterStart).await;
+    harness.agents.push(scripted.clone());
+    let agents = harness.agents.join(",");
+    let finished = wsblast(
+        &[
+            &harness.target,
+            "-c",
+            "2",
+            "-d",
+            "800ms",
+            "--no-progress",
+            "--format",
+            "json",
+            "--agents",
+            &agents,
+        ],
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(finished.code, Some(1), "{}", finished.stderr);
+    assert!(
+        finished
+            .stderr
+            .contains(&format!("agent {scripted} was lost")),
+        "{}",
+        finished.stderr
+    );
+    let report: serde_json::Value = serde_json::from_str(&finished.stdout).unwrap();
+    assert_eq!(report["metrics"]["distributed"]["lost_agents"][0], scripted);
+    assert_eq!(report["metrics"]["total_connections_established"], 1);
+
+    // An SLO breach takes precedence: exit code 2.
+    let finished = wsblast(
+        &[
+            &harness.target,
+            "-c",
+            "2",
+            "-d",
+            "800ms",
+            "--no-progress",
+            "--min-throughput",
+            "1000000000",
+            "--agents",
+            &agents,
+        ],
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(finished.code, Some(2), "{}", finished.stderr);
+    assert!(finished.stdout.contains("Agents"), "{}", finished.stdout);
+    assert!(finished.stdout.contains("(lost: "), "{}", finished.stdout);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_rejects_unsupported_combinations_and_missing_tokens() {
+    for extra in [
+        &["--tui"][..],
+        &["--prometheus-listen", "127.0.0.1:0"],
+        &["--capture", "never-written.jsonl"],
+    ] {
+        let mut args = vec!["ws://127.0.0.1:9/", "--agents", "127.0.0.1:9"];
+        args.extend_from_slice(extra);
+        let finished = wsblast(&args, Some(TOKEN)).await;
+        assert_eq!(finished.code, Some(1), "{extra:?}: {}", finished.stderr);
+        assert!(
+            finished.stderr.contains("cannot be used with --agents"),
+            "{extra:?}: {}",
+            finished.stderr
+        );
+    }
+    let finished = wsblast(&["ws://127.0.0.1:9/", "--agents", "127.0.0.1:9"], None).await;
+    assert_eq!(finished.code, Some(1));
+    assert!(
+        finished.stderr.contains("WSBLAST_AGENT_TOKEN"),
+        "{}",
+        finished.stderr
+    );
+
+    let finished = wsblast(&["agent", "--listen", "127.0.0.1:0"], None).await;
+    assert_eq!(finished.code, Some(1));
+    assert!(
+        finished.stderr.contains("needs a token"),
+        "{}",
+        finished.stderr
+    );
+    let finished = wsblast(
+        &["agent", "--listen", "127.0.0.1:0", "--token", "short"],
+        None,
+    )
+    .await;
+    assert_eq!(finished.code, Some(1));
+    assert!(
+        finished.stderr.contains("at least 16"),
+        "{}",
+        finished.stderr
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agents_serve_the_control_channel_over_tls() {
     let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
@@ -562,4 +719,49 @@ async fn an_agent_stops_its_run_when_the_coordinator_disconnects() {
             Err(err) => panic!("the agent is still busy: {err}"),
         }
     }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sigint_on_the_coordinator_still_reports_the_agents_results() {
+    let harness = harness(2, None).await;
+    let agents = harness.agents.join(",");
+    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_wsblast"))
+        .args([
+            harness.target.as_str(),
+            "-c",
+            "2",
+            "-d",
+            "60s",
+            "-r",
+            "20",
+            "--no-progress",
+            "--format",
+            "json",
+            "--agents",
+            &agents,
+        ])
+        .env("NO_COLOR", "1")
+        .env("WSBLAST_AGENT_TOKEN", TOKEN)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let pid = libc::pid_t::try_from(child.id().unwrap()).unwrap();
+    // SAFETY: kill(2) only reads its integer arguments; pid belongs to a child
+    // this test spawned and has not yet reaped.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGINT) }, 0);
+    let output = tokio::time::timeout(Duration::from_secs(20), child.wait_with_output())
+        .await
+        .expect("the coordinator did not exit after SIGINT")
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["metrics"]["total_connections_established"], 2);
+    assert!(report["metrics"]["total_messages_recv"].as_u64().unwrap() > 0);
+    assert!(report["duration_secs"].as_f64().unwrap() < 15.0);
 }
