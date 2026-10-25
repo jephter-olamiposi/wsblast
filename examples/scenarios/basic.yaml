@@ -25,6 +25,17 @@ phases:
     payload: '{"type":"data","size":512,"seq":{{seq}}}'
     think_time: "5ms"
 
+  # A staged phase: no connections, duration or ramp_rate. The open
+  # connections move linearly from 0 to 100 over 10s, then down to 50.
+  - name: "ramp"
+    rate_per_conn: 200
+    payload: '{"type":"ramp","seq":{{seq}}}'
+    stages:
+      - duration: "10s"
+        target: 100
+      - duration: "10s"
+        target: 50
+
   - name: "spike"
     duration: "10s"
     connections: 100

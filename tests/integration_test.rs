@@ -1115,6 +1115,79 @@ async fn test_scenario_slo_applies_to_the_merged_metrics_and_the_base_config_win
     cancel_server.cancel();
 }
 
+#[cfg(feature = "scenario")]
+#[tokio::test]
+async fn test_scenario_staged_phase_follows_its_profile() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+
+    let scenario = scenario(
+        &target_url,
+        r#"  - name: "warmup"
+    duration: "200ms"
+    connections: 2
+  - name: "ramp"
+    rate_per_conn: 20
+    payload: "stage"
+    stages:
+      - duration: "1s"
+        target: 10
+      - duration: "1s"
+        target: 10
+      - duration: "1s"
+        target: 0
+"#,
+    );
+    let outcome = ScenarioExecutor::new(
+        &scenario,
+        scenario_base_config(&target_url).build().unwrap(),
+        None,
+        None,
+    )
+    .unwrap()
+    .with_signal_handling(false)
+    .run()
+    .await
+    .unwrap();
+
+    let ramp = &outcome.phases[1];
+    assert_eq!(
+        ramp.stages,
+        [
+            Stage::new(Duration::from_secs(1), 10),
+            Stage::new(Duration::from_secs(1), 10),
+            Stage::new(Duration::from_secs(1), 0),
+        ]
+    );
+    assert_eq!(ramp.connections, 10);
+    assert!(outcome.phases[0].stages.is_empty());
+    let metrics = &ramp.metrics;
+    assert_eq!(metrics.total_connections_attempted, 10, "{metrics:?}");
+    assert_eq!(metrics.total_connections_established, 10, "{metrics:?}");
+    assert_eq!(metrics.total_connections_not_started, 0, "{metrics:?}");
+    assert!(metrics.elapsed >= Duration::from_secs(3), "{metrics:?}");
+    assert!(
+        metrics.elapsed < Duration::from_millis(3_600),
+        "{metrics:?}"
+    );
+
+    let active: Vec<u64> = metrics
+        .time_series
+        .points
+        .iter()
+        .map(|p| p.active_connections)
+        .collect();
+    assert_eq!(active.len(), 3, "{active:?}");
+    assert!(active[0] >= 8, "{active:?}");
+    assert_eq!(active[1], 10, "{active:?}");
+    assert!(active[2] <= 1, "{active:?}");
+    let sent = |i: usize| metrics.time_series.points[i].messages_sent;
+    assert!(sent(1) > sent(0) + 50, "{:?}", metrics.time_series);
+
+    // The merged run counts the constant phase's two connections too.
+    assert_eq!(outcome.metrics.total_connections_attempted, 12);
+    cancel_server.cancel();
+}
+
 #[tokio::test]
 async fn test_echo_ping_interval_does_not_throttle_unpaced_load() {
     let (target_url, cancel_server) = spawn_echo_server().await;

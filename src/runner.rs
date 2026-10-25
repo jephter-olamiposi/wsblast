@@ -84,6 +84,9 @@ impl Runner {
         config.connections = phase.connections;
         config.duration = phase.duration;
         config.ramp_rate = phase.ramp_rate;
+        // A staged phase runs exactly like `--stages`; any other phase holds
+        // its connection count, whatever stages the base configuration had.
+        config.stages = phase.stages.clone();
         config.rate_per_conn = phase.rate_per_conn;
         if let Some(payload) = phase.payload.clone() {
             config.payload = payload;
@@ -770,8 +773,12 @@ pub struct PhaseResult {
     pub name: String,
     /// Endpoint the phase connected to.
     pub target_url: url::Url,
-    /// Configured connection count of the phase.
+    /// Configured connection count of the phase; for a staged phase, the
+    /// highest stage target.
     pub connections: usize,
+    /// The phase's staged load profile; empty for a constant connection
+    /// count.
+    pub stages: Vec<crate::config::Stage>,
     /// Metrics merged from this phase's workers only. `elapsed` is the
     /// phase's run time, and the time series starts at the phase start.
     pub metrics: AggregatedMetrics,
@@ -921,15 +928,18 @@ impl ScenarioExecutor {
             if self.cancel_token.is_cancelled() {
                 break;
             }
+            let load = if phase.stages.is_empty() {
+                format!("{} connections for {:?}", phase.connections, phase.duration)
+            } else {
+                format!("stages {}", crate::report::stage_list_label(&phase.stages))
+            };
             eprintln!(
-                "{} Scenario '{}' phase {}/{}: '{}' ({} connections for {:?})",
+                "{} Scenario '{}' phase {}/{}: '{}' ({load})",
                 if phase_idx > 0 { "→" } else { "▶" },
                 self.scenario_name,
                 phase_idx + 1,
                 self.phases.len(),
                 phase.name,
-                phase.connections,
-                phase.duration
             );
 
             let mut config = self.base_config.clone();
@@ -969,6 +979,7 @@ impl ScenarioExecutor {
                 name: phase.name.clone(),
                 target_url: target.clone(),
                 connections: phase.connections,
+                stages: phase.stages.clone(),
                 slo: crate::report::evaluate_slos(&phase.slo, &phase_metrics),
                 metrics: phase_metrics,
             });

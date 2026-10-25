@@ -1403,6 +1403,7 @@ mod tests {
             name: name.to_string(),
             target_url: url::Url::parse("ws://phase.test/").unwrap(),
             connections: 7,
+            stages: Vec::new(),
             metrics: metrics.clone(),
             slo: SloEvaluation {
                 passed: checks.iter().all(|check| check.passed),

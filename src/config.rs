@@ -1207,10 +1207,19 @@ pub(crate) struct PhaseConfig {
     /// Optional endpoint override for this phase.
     #[serde(default)]
     pub(crate) target: Option<String>,
-    pub(crate) duration: String,
-    pub(crate) connections: usize,
+    /// Required unless `stages` is set, which excludes it.
     #[serde(default)]
-    pub(crate) ramp_rate: u64,
+    pub(crate) duration: Option<String>,
+    /// Required unless `stages` is set, which excludes it.
+    #[serde(default)]
+    pub(crate) connections: Option<usize>,
+    /// Excluded by `stages`; 0 when absent.
+    #[serde(default)]
+    pub(crate) ramp_rate: Option<u64>,
+    /// A staged load profile in place of `connections`, `duration` and
+    /// `ramp_rate`.
+    #[serde(default)]
+    pub(crate) stages: Option<StagesConfig>,
     #[serde(default)]
     pub(crate) rate_per_conn: u64,
     #[serde(default)]
@@ -1222,6 +1231,121 @@ pub(crate) struct PhaseConfig {
     /// SLOs checked on this phase's own metrics.
     #[serde(default)]
     pub(crate) slo: Option<SloConfig>,
+}
+
+/// The `stages:` of a phase: a list of `{duration, target}` mappings, or one
+/// string in the `--stages` syntax (`30s:100,1m:100,30s:0`).
+#[cfg(feature = "scenario")]
+#[derive(Debug, Clone)]
+pub(crate) enum StagesConfig {
+    /// The `--stages` syntax.
+    Spec(String),
+    /// One mapping per stage.
+    List(Vec<StageConfig>),
+}
+
+/// One stage of a phase's `stages:` list.
+#[cfg(feature = "scenario")]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StageConfig {
+    pub(crate) duration: String,
+    pub(crate) target: usize,
+}
+
+/// Reads a string or a sequence, so each form keeps the error messages of
+/// its own parser: an unknown key in a stage mapping is reported by name.
+#[cfg(feature = "scenario")]
+impl<'de> Deserialize<'de> for StagesConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct StagesVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for StagesVisitor {
+            type Value = StagesConfig;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "a list of {duration, target} stages or a string such as \"30s:100,1m:100,30s:0\"",
+                )
+            }
+
+            fn visit_str<E: serde::de::Error>(
+                self,
+                value: &str,
+            ) -> std::result::Result<Self::Value, E> {
+                Ok(StagesConfig::Spec(value.to_owned()))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut stages = Vec::new();
+                while let Some(stage) = seq.next_element::<StageConfig>()? {
+                    stages.push(stage);
+                }
+                Ok(StagesConfig::List(stages))
+            }
+        }
+
+        deserializer.deserialize_any(StagesVisitor)
+    }
+}
+
+#[cfg(feature = "scenario")]
+impl StagesConfig {
+    /// Parses and validates the stages of phase `phase`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidScenario`] for an empty list, a stage
+    /// that does not parse or has a zero duration, and stages whose targets
+    /// are all zero.
+    fn compile(&self, phase: &str) -> Result<Vec<Stage>> {
+        let stages = match self {
+            Self::Spec(spec) if spec.split(',').all(|part| part.trim().is_empty()) => Vec::new(),
+            Self::Spec(spec) => Stage::parse_list(spec).map_err(|e| {
+                ConfigError::InvalidScenario(format!("phase '{phase}': stages: {e}"))
+            })?,
+            Self::List(list) => list
+                .iter()
+                .enumerate()
+                .map(|(index, stage)| {
+                    let duration = parse_human_duration(&stage.duration).map_err(|e| {
+                        ConfigError::InvalidScenario(format!(
+                            "phase '{phase}': stage {}: duration: {e}",
+                            index + 1
+                        ))
+                    })?;
+                    Ok(Stage::new(duration, stage.target))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        };
+        if stages.is_empty() {
+            return Err(invalid_phase(
+                phase,
+                "stages must list at least one stage, such as `{duration: 30s, target: 100}`",
+            )
+            .into());
+        }
+        if let Some(index) = stages.iter().position(|s| s.duration.is_zero()) {
+            return Err(ConfigError::InvalidScenario(format!(
+                "phase '{phase}': stage {} has a zero duration; every stage needs a duration greater than zero",
+                index + 1
+            ))
+            .into());
+        }
+        if stages.iter().all(|s| s.target == 0) {
+            return Err(invalid_phase(
+                phase,
+                "every stage target is zero; at least one stage needs connections",
+            )
+            .into());
+        }
+        Ok(stages)
+    }
 }
 
 /// The `slo:` mapping of a scenario or a phase, with the thresholds of the
@@ -1323,6 +1447,10 @@ pub(crate) struct ScenarioPhase {
     pub(crate) actions: Vec<ScenarioAction>,
     /// Thresholds checked on this phase's own metrics.
     pub(crate) slo: SloThresholds,
+    /// The phase's staged load profile; empty for a constant connection
+    /// count. With stages, `connections` is the highest target, `duration`
+    /// the sum of the stage durations and `ramp_rate` 0.
+    pub(crate) stages: Vec<Stage>,
 }
 
 /// Execution-ready action with parsed durations and payload templates.
@@ -1570,17 +1698,73 @@ impl ScenarioPhase {
     /// # Errors
     ///
     /// Returns [`ConfigError::InvalidScenario`] when durations, connection
-    /// counts, action counts, or close codes are invalid.
+    /// counts, stages, action counts, or close codes are invalid, when
+    /// `connections` or `duration` is missing without `stages`, and when
+    /// `stages` is combined with them or with `ramp_rate`.
     pub(crate) fn compile(phase: &PhaseConfig) -> Result<Self> {
-        if phase.connections == 0 {
-            return Err(invalid_phase(&phase.name, "connections must be greater than zero").into());
-        }
-
-        let duration = parse_human_duration(&phase.duration)
-            .map_err(|e| ConfigError::InvalidScenario(format!("phase '{}': {e}", phase.name)))?;
-        if duration.is_zero() {
-            return Err(invalid_phase(&phase.name, "duration must be greater than zero").into());
-        }
+        let (connections, duration, ramp_rate, stages) = match &phase.stages {
+            Some(stages) => {
+                let mixed: Vec<&str> = [
+                    ("`connections`", phase.connections.is_some()),
+                    ("`duration`", phase.duration.is_some()),
+                    ("`ramp_rate`", phase.ramp_rate.is_some()),
+                ]
+                .into_iter()
+                .filter_map(|(key, set)| set.then_some(key))
+                .collect();
+                if !mixed.is_empty() {
+                    return Err(invalid_phase(
+                        &phase.name,
+                        &format!(
+                            "`stages` cannot be combined with {}; the stages set the connection \
+                             count, the duration and the ramp",
+                            mixed.join(", ")
+                        ),
+                    )
+                    .into());
+                }
+                let stages = stages.compile(&phase.name)?;
+                let connections = stages.iter().map(|s| s.target).max().unwrap_or(0);
+                let duration = stages.iter().map(|s| s.duration).sum();
+                (connections, duration, 0, stages)
+            }
+            None => {
+                let missing = |key: &str| {
+                    invalid_phase(
+                        &phase.name,
+                        &format!(
+                            "missing field `{key}`; give `connections` and `duration`, or `stages`"
+                        ),
+                    )
+                };
+                let connections = phase.connections.ok_or_else(|| missing("connections"))?;
+                let raw_duration = phase
+                    .duration
+                    .as_deref()
+                    .ok_or_else(|| missing("duration"))?;
+                if connections == 0 {
+                    return Err(invalid_phase(
+                        &phase.name,
+                        "connections must be greater than zero",
+                    )
+                    .into());
+                }
+                let duration = parse_human_duration(raw_duration).map_err(|e| {
+                    ConfigError::InvalidScenario(format!("phase '{}': {e}", phase.name))
+                })?;
+                if duration.is_zero() {
+                    return Err(
+                        invalid_phase(&phase.name, "duration must be greater than zero").into(),
+                    );
+                }
+                (
+                    connections,
+                    duration,
+                    phase.ramp_rate.unwrap_or(0),
+                    Vec::new(),
+                )
+            }
+        };
 
         let think_time = match &phase.think_time {
             Some(raw) => parse_human_duration(raw).map_err(|e| {
@@ -1599,8 +1783,8 @@ impl ScenarioPhase {
             name: phase.name.clone(),
             target: phase.target.as_deref().map(parse_target_url).transpose()?,
             duration,
-            connections: phase.connections,
-            ramp_rate: phase.ramp_rate,
+            connections,
+            ramp_rate,
             rate_per_conn: phase.rate_per_conn,
             payload: phase
                 .payload
@@ -1609,6 +1793,7 @@ impl ScenarioPhase {
             think_time,
             actions,
             slo: compile_slo(phase.slo.as_ref(), &format!("phase '{}': slo", phase.name))?,
+            stages,
         })
     }
 }
@@ -1934,7 +2119,7 @@ impl LoadTestConfig {
     pub(crate) fn from_scenario_config(scenario: &ScenarioConfig, cli: &Cli) -> Result<Self> {
         if cli.stages.is_some() {
             return Err(ConfigError::UnsupportedOption(
-                "--stages cannot be used with --scenario; give each scenario phase its own connections and ramp_rate"
+                "--stages cannot be used with --scenario; give each scenario phase its own connections and ramp_rate, or its own stages"
                     .to_string(),
             )
             .into());
@@ -2586,9 +2771,10 @@ mod tests {
         PhaseConfig {
             name: name.to_string(),
             target: None,
-            duration: "1s".to_string(),
-            connections: 2,
-            ramp_rate: 0,
+            duration: Some("1s".to_string()),
+            connections: Some(2),
+            ramp_rate: None,
+            stages: None,
             rate_per_conn: 0,
             payload: None,
             think_time: None,
@@ -3232,5 +3418,130 @@ phases:
             }
         }
         assert!(loaded > 0, "no scenarios in {}", dir.display());
+    }
+
+    /// A scenario with one phase `ramp` whose fields after `name` are
+    /// `fields`, each line indented by four spaces.
+    #[cfg(feature = "scenario")]
+    fn staged_yaml(fields: &str) -> String {
+        format!(
+            "version: \"1.0\"\ntarget: \"ws://127.0.0.1:9001\"\nmetadata:\n  name: \"staged\"\n\
+             phases:\n  - name: \"ramp\"\n{fields}"
+        )
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn phase_stages_parse_from_a_list_or_the_flag_syntax() {
+        let list = staged_yaml(
+            "    rate_per_conn: 5\n    stages:\n      - duration: \"30s\"\n        target: 100\n\
+             \x20     - { duration: 1m, target: 100 }\n      - duration: \"500ms\"\n        target: 0\n",
+        );
+        let spec = staged_yaml("    rate_per_conn: 5\n    stages: \"30s:100, 1m:100,500ms:0\"\n");
+        let expected = vec![
+            Stage::new(Duration::from_secs(30), 100),
+            Stage::new(Duration::from_secs(60), 100),
+            Stage::new(Duration::from_millis(500), 0),
+        ];
+        for yaml in [list, spec] {
+            let phase = ScenarioConfig::from_yaml(&yaml)
+                .unwrap()
+                .compile(None)
+                .unwrap();
+            let phase = &phase[0];
+            assert_eq!(phase.stages, expected, "{yaml}");
+            assert_eq!(phase.connections, 100);
+            assert_eq!(phase.duration, Duration::from_millis(90_500));
+            assert_eq!(phase.ramp_rate, 0);
+            assert_eq!(phase.rate_per_conn, 5);
+        }
+
+        let constant = ScenarioConfig::from_yaml(&staged_yaml(
+            "    duration: \"2s\"\n    connections: 3\n    ramp_rate: 1\n",
+        ))
+        .unwrap()
+        .compile(None)
+        .unwrap();
+        assert!(constant[0].stages.is_empty());
+        assert_eq!(constant[0].ramp_rate, 1);
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn phase_stages_cannot_be_mixed_with_connections_duration_or_ramp_rate() {
+        for (extra, keys) in [
+            ("    connections: 5\n", "`connections`"),
+            ("    duration: \"10s\"\n", "`duration`"),
+            ("    ramp_rate: 2\n", "`ramp_rate`"),
+            (
+                "    connections: 5\n    duration: \"10s\"\n",
+                "`connections`, `duration`",
+            ),
+        ] {
+            let yaml = staged_yaml(&format!("{extra}    stages: \"10s:5\"\n"));
+            let message = ScenarioConfig::from_yaml(&yaml).unwrap_err().to_string();
+            assert!(
+                message.contains(&format!(
+                    "phase 'ramp': `stages` cannot be combined with {keys};"
+                )),
+                "{message}"
+            );
+        }
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn invalid_phase_stages_and_missing_sizes_are_rejected_by_phase() {
+        for (fields, expected) in [
+            (
+                "    duration: \"1s\"\n",
+                "phase 'ramp': missing field `connections`; give `connections` and `duration`, or `stages`",
+            ),
+            (
+                "    connections: 2\n",
+                "phase 'ramp': missing field `duration`",
+            ),
+            (
+                "    stages: []\n",
+                "phase 'ramp': stages must list at least one stage",
+            ),
+            (
+                "    stages: \" , \"\n",
+                "phase 'ramp': stages must list at least one stage",
+            ),
+            (
+                "    stages: \"10s:5,0s:5\"\n",
+                "phase 'ramp': stage 2 has a zero duration",
+            ),
+            (
+                "    stages: \"10s:0,5s:0\"\n",
+                "phase 'ramp': every stage target is zero",
+            ),
+            (
+                "    stages: \"10s=5\"\n",
+                "phase 'ramp': stages: Configuration error: Invalid option: invalid stage '10s=5'",
+            ),
+            (
+                "    stages:\n      - duration: \"soon\"\n        target: 5\n",
+                "phase 'ramp': stage 1: duration: Configuration error: Invalid duration 'soon'",
+            ),
+            (
+                "    stages:\n      - duration: \"1s\"\n        targets: 5\n",
+                "phases[0].stages[0]: unknown field `targets`, expected `duration` or `target`",
+            ),
+            (
+                "    stages:\n      - duration: \"1s\"\n",
+                "missing field `target`",
+            ),
+            (
+                "    stages: 5\n",
+                "a list of {duration, target} stages or a string",
+            ),
+        ] {
+            let message = ScenarioConfig::from_yaml(&staged_yaml(fields))
+                .unwrap_err()
+                .to_string();
+            assert!(message.contains(expected), "{fields}: {message}");
+        }
     }
 }

@@ -62,7 +62,7 @@ phases:                           # required, at least one
 Unknown keys are rejected at every level: the top level, `metadata`, each phase, each `slo` mapping and each action. A misspelled field fails validation with its name and the list of valid keys, so it cannot silently fall back to a default:
 
 ```text
-Error: Configuration error: Invalid scenario: load.yaml: phases[0]: unknown field `conections`, expected one of `name`, `target`, `duration`, `connections`, `ramp_rate`, `rate_per_conn`, `payload`, `think_time`, `actions`, `slo` at line 10 column 5
+Error: Configuration error: Invalid scenario: load.yaml: phases[0]: unknown field `conections`, expected one of `name`, `target`, `duration`, `connections`, `ramp_rate`, `stages`, `rate_per_conn`, `payload`, `think_time`, `actions`, `slo` at line 10 column 5
 ```
 
 ## 2. Phase fields
@@ -71,9 +71,10 @@ Error: Configuration error: Invalid scenario: load.yaml: phases[0]: unknown fiel
 | :--- | :--- | :--- | :--- | :--- |
 | `name` | string | yes | | Unique, not empty. Used by `--phase` and in the banner. |
 | `target` | string | no | none | `ws://` or `wss://` URL for this phase. See [section 5](#5-target-url-precedence). |
-| `duration` | duration | yes | | Total wall-clock time of the phase, including its ramp. Must be greater than zero. |
-| `connections` | integer | yes | | Worker connections for this phase. Must be greater than zero. |
+| `duration` | duration | yes, unless `stages` is set | | Total wall-clock time of the phase, including its ramp. Must be greater than zero. |
+| `connections` | integer | yes, unless `stages` is set | | Worker connections for this phase. Must be greater than zero. |
 | `ramp_rate` | integer | no | `0` | Workers started per second. `0` starts all of them at once. |
+| `stages` | list of stages, or a string | no | none | A staged load profile in place of `connections`, `duration` and `ramp_rate`, which cannot be set with it. See [section 4.4](#44-staged-phases). |
 | `rate_per_conn` | integer | no | `0` | Messages per second per connection. `0` is unthrottled. In an action script it paces every individual send. |
 | `payload` | string | no | see below | Text payload for this phase. Supports `{{timestamp}}`, `{{worker_id}}` and `{{seq}}`. |
 | `think_time` | duration | no | `0` | Pause after each `Send` action, or after each message when the phase has no actions. See [section 4](#4-how-a-phase-runs). |
@@ -133,9 +134,9 @@ Use 1000 (normal closure), 1001 (going away), or an application code in 4000 to 
 
 ### 4.1 Phase lifecycle
 
-1. wsblast prints a banner on stderr, for example `▶ Scenario 'Chat session' phase 1/2: 'warmup' (5 connections for 3s)`.
-2. It starts `connections` workers, `ramp_rate` per second.
-3. The phase ends when its `duration` has elapsed (counted from the first worker, ramp included), when the `--requests` cap is reached, or on Ctrl+C. Every worker sends a Close frame and stops.
+1. wsblast prints a banner on stderr, for example `▶ Scenario 'Chat session' phase 1/2: 'warmup' (5 connections for 3s)`, or `→ Scenario 'Rollout' phase 2/3: 'ramp' (stages 30s:100, 1m:100, 30s:0)` for a staged phase.
+2. It starts `connections` workers, `ramp_rate` per second, or follows the phase's `stages`.
+3. The phase ends when its `duration` (the sum of its stage durations for a staged phase) has elapsed (counted from the first worker, ramp included), when the `--requests` cap is reached, or on Ctrl+C. Every worker sends a Close frame and stops.
 4. wsblast waits 500 ms and starts the next phase with new connections.
 
 A phase always lasts its full `duration`, even if every connection has finished its script with a `Close` action or has given up with `--no-reconnect`.
@@ -160,6 +161,36 @@ Each connection runs the action list from the top, and starts again from the fir
 - In `stream` and `listen` mode a script sends without waiting for replies and does not read incoming frames, so the report shows 0 messages received. Use echo mode when the script needs replies.
 - `--ping-interval` keepalives are not sent while a script runs. Add a `Ping` action instead.
 
+### 4.4 Staged phases
+
+A phase with `stages` runs exactly like a run with `--stages`: over each stage the number of open connections moves linearly from the previous stage's target (0 for the first stage) to the stage's `target`, and when the count falls the most recently opened connections are closed first. The phase lasts the sum of the stage durations. Its `rate_per_conn`, `payload`, `think_time` and `actions` apply to every connection it opens, and a connection that a falling stage closes ends its session or script there.
+
+Give the stages either as a list of mappings or as one string in the syntax of `--stages`; both forms are equivalent:
+
+```yaml
+phases:
+  - name: "ramp"
+    rate_per_conn: 20
+    stages:
+      - duration: "30s"
+        target: 100
+      - duration: "1m"
+        target: 100
+      - duration: "30s"
+        target: 0
+
+  - name: "ramp-again"
+    rate_per_conn: 20
+    stages: "30s:100,1m:100,30s:0"
+```
+
+| Stage field | Type | Required | Meaning |
+| :--- | :--- | :--- | :--- |
+| `duration` | duration | yes | How long the stage lasts. Must be greater than zero. |
+| `target` | integer | yes | Connections open at the end of the stage. `0` is allowed, but at least one stage needs a target above 0. |
+
+`stages` replaces `connections`, `duration` and `ramp_rate`; setting any of them in the same phase is an error that names the phase and the keys. The phase's configured connection count, shown as `connections` of the phase in the JSON report's `phases`, is its highest target. Its `total_connections_attempted` counts every connection the phase opened, so a profile that ramps down and up again attempts more connections than its peak. No slot of a staged phase is reported as not started. See METHODOLOGY.md, section 2.1.1.
+
 ## 5. Target URL precedence
 
 For each phase, the target is the first of:
@@ -183,6 +214,7 @@ Set a top-level `target` when phases should share an endpoint. With `--phase`, o
 | `--phase NAME` | Runs only the named phase. An unknown name is an error that lists the available phases. Requires `--scenario`. |
 | `URL`, `-u, --url` | Overrides every phase and scenario target. |
 | `-c`, `-d`, `-r`, `-p`, `--payload-file` | Not allowed. The argument parser rejects them and exits with code 1. Set them per phase instead. |
+| `--stages` | Not allowed; wsblast exits with code 1. Set `stages` on a phase instead ([section 4.4](#44-staged-phases)). |
 | `--ramp-rate` | Ignored. Each phase's `ramp_rate` is used. |
 | `--tui` | Rejected at startup (exit code 1). Use the progress bar or `--no-progress`. |
 | `--mode` | Applies to every phase. |
@@ -251,23 +283,23 @@ With `--phase`, only the selected phase runs, so only its `slo` is checked, toge
 
 All phases are merged into one report: the main tables show the metrics of every executed phase together. The JSON report also lists every phase with its own metrics and SLO result under `phases`, and the HTML report shows a Phases section with one row per phase and the SLO checks of every phase that has its own.
 
-The text and Markdown reports add a phase table when at least one phase sets its own `slo`, so the reports of scenarios without phase SLOs look as they always did:
+The text and Markdown reports add a phase table when at least one phase sets its own `slo` or `stages`, so the reports of scenarios with neither look as they always did:
 
 | Column | Value |
 | :--- | :--- |
 | Phase, Target | The phase name and the endpoint it connected to. |
-| Load | The phase's connection count. |
+| Load | The phase's connection count, or its stages as `DURATION:TARGET` pairs for a staged phase. |
 | Throughput (msg/s), Error Rate | The phase's own values. |
 | Gating p99 | The p99 the phase's latency SLOs gate on, with its basis (`RTT` or `response time`); `-` without samples. |
 | SLO | `PASSED`, `FAILED`, or `-` for a phase without its own `slo`. |
 
 | Report field | Value for a scenario |
 | :--- | :--- |
-| `connections` | Sum of `connections` over the executed phases. |
+| `connections` | Same as `metrics.total_connections_attempted`: the sum of `connections` over the executed phases, where a staged phase counts every connection it opened. |
 | `duration_secs`, `metrics.elapsed` | Sum of each phase's elapsed time. The 500 ms pauses are not included. |
 | `target_url` | Target of the first executed phase. |
 | `phase_targets` | JSON only: one `{"phase", "target_url"}` entry per executed phase, in run order. The text and Markdown reports show the same list in place of the single target. |
-| `phases` | JSON only: one entry per executed phase, in run order, with `name`, `target_url`, `connections`, `metrics` (the phase's own metrics in the format of the top-level `metrics`, with a time series that starts at the phase start) and `slo` (the phase's own checks, without the prefix). |
+| `phases` | JSON only: one entry per executed phase, in run order, with `name`, `target_url`, `connections` (the highest target for a staged phase), `stages` (staged phases only: `{"duration": {"secs", "nanos"}, "target"}` per stage), `metrics` (the phase's own metrics in the format of the top-level `metrics`, with a time series that starts at the phase start) and `slo` (the phase's own checks, without the prefix). |
 | `slo` | Every check of the run, as described in [section 7.2](#72-exit-code-and-check-names). |
 | `metrics.total_connections_attempted` | Same as `connections`. |
 | Latency histograms | One distribution over the samples of every phase. |
@@ -290,8 +322,14 @@ The whole file is validated before any connection is opened, including phases th
 | Empty or duplicate phase name | `phase name must not be empty`, `duplicate phase name 'warmup'` |
 | `connections: 0` | `phase 'warmup': connections must be greater than zero` |
 | Zero `duration` | `phase 'warmup': duration must be greater than zero` |
+| No `connections` or `duration`, and no `stages` | ``phase 'warmup': missing field `duration`; give `connections` and `duration`, or `stages` `` |
+| `stages` with `connections`, `duration` or `ramp_rate` | ``phase 'ramp': `stages` cannot be combined with `connections`, `duration`; the stages set the connection count, the duration and the ramp`` |
+| Empty `stages` | ``phase 'ramp': stages must list at least one stage, such as `{duration: 30s, target: 100}` `` |
+| A stage with a zero duration | `phase 'ramp': stage 2 has a zero duration; every stage needs a duration greater than zero` |
+| Every stage target is 0 | `phase 'ramp': every stage target is zero; at least one stage needs connections` |
+| Unparsable stage | `phase 'ramp': stages: Configuration error: Invalid option: invalid stage '10s=5': expected DURATION:CONNECTIONS, such as 30s:100`, or `phase 'ramp': stage 1: duration: Configuration error: Invalid duration ...` for the list form |
 | Unparsable duration | `phase 'warmup': Configuration error: Invalid duration 'abc': expected a non-negative number with a unit of ...` |
-| Missing required field | ``load.yaml: phases[0]: missing field `duration` at line 6 column 5`` |
+| Missing required field | ``load.yaml: phases[0]: missing field `name` at line 6 column 5`` |
 | Unknown or misspelled key | ``load.yaml: phases[0]: unknown field `conections`, expected one of `name`, `target`, ... at line 10 column 5`` |
 | Unknown action type | ``load.yaml: phases[0].actions[0].type: unknown variant `send`, expected one of `Send`, `Wait`, `Close`, `Ping` `` |
 | `count: 0` | `phase 'warmup': send action count must be greater than zero` |

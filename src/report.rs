@@ -58,8 +58,12 @@ pub(crate) struct PhaseReport {
     pub(crate) name: String,
     /// Endpoint the phase connected to.
     pub(crate) target_url: url::Url,
-    /// Configured connection count of the phase.
+    /// Configured connection count of the phase; for a staged phase, the
+    /// highest stage target.
     pub(crate) connections: usize,
+    /// The phase's load stages; empty for a constant connection count.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) stages: Vec<StageReport>,
     /// Metrics merged from this phase's workers only.
     pub(crate) metrics: AggregatedMetrics,
     /// The phase's `slo:` thresholds checked on `metrics`.
@@ -73,15 +77,50 @@ impl From<&crate::runner::PhaseResult> for PhaseReport {
             name: phase.name.clone(),
             target_url: phase.target_url.clone(),
             connections: phase.connections,
+            stages: phase
+                .stages
+                .iter()
+                .map(|stage| StageReport {
+                    duration: stage.duration,
+                    target: stage.target,
+                })
+                .collect(),
             metrics: phase.metrics.clone(),
             slo: phase.slo.clone(),
         }
     }
 }
 
+/// One load stage of a scenario phase, as the JSON report writes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct StageReport {
+    /// How long the stage lasts.
+    pub(crate) duration: Duration,
+    /// Connections open at the end of the stage.
+    pub(crate) target: usize,
+}
+
+/// Describes load stages as `DURATION:TARGET` pairs, the syntax of
+/// `--stages`.
+pub(crate) fn stage_list_label(stages: &[crate::config::Stage]) -> String {
+    stages
+        .iter()
+        .map(|stage| format!("{:?}:{}", stage.duration, stage.target))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl PhaseReport {
-    /// What the phase ran: its connection count.
+    /// What the phase ran: its stages, or its connection count.
     pub(crate) fn load_label(&self) -> String {
+        if !self.stages.is_empty() {
+            return self
+                .stages
+                .iter()
+                .map(|stage| format!("{:?}:{}", stage.duration, stage.target))
+                .collect::<Vec<_>>()
+                .join(", ");
+        }
         match self.connections {
             1 => "1 connection".to_string(),
             n => format!("{n} connections"),
@@ -113,10 +152,12 @@ impl PhaseReport {
 }
 
 /// Whether the text and Markdown reports show the per-phase table: only when
-/// a phase has its own SLO, so the reports of scenarios without one are
-/// unchanged.
+/// a phase has its own SLO or load stages, so the reports of scenarios with
+/// neither are unchanged.
 fn shows_phase_table(phases: &[PhaseReport]) -> bool {
-    phases.iter().any(|phase| !phase.slo.checks.is_empty())
+    phases
+        .iter()
+        .any(|phase| !phase.slo.checks.is_empty() || !phase.stages.is_empty())
 }
 
 /// Combines the evaluation of the whole scenario with each phase's own,
@@ -679,12 +720,7 @@ fn time_windows(metrics: &AggregatedMetrics) -> Vec<TimeWindow> {
 /// Describes a staged load profile as `DURATION:TARGET` pairs, the syntax of
 /// `--stages`.
 fn stages_label(config: &LoadTestConfig) -> String {
-    config
-        .stages
-        .iter()
-        .map(|stage| format!("{:?}:{}", stage.duration, stage.target))
-        .collect::<Vec<_>>()
-        .join(", ")
+    stage_list_label(&config.stages)
 }
 
 /// The text report's rate row: the per-connection rate, `Unthrottled`, or a
@@ -2051,6 +2087,7 @@ mod tests {
             name: name.to_string(),
             target_url: url::Url::parse("ws://phase.test/ws").expect("url"),
             connections: 10,
+            stages: Vec::new(),
             slo: evaluate_slos(slo, &metrics),
             metrics,
         }
@@ -2151,6 +2188,68 @@ mod tests {
             markdown.contains("| `warmup` | `ws://phase.test/ws` | 10 connections | 100.0 | 0.00% | 250 µs (RTT) | **-** |"),
             "{markdown}"
         );
+    }
+
+    #[test]
+    fn staged_phases_show_their_stages_instead_of_a_connection_count() {
+        let slo = evaluate_slos(&SloThresholds::default(), &sample_metrics());
+        let mut staged = phase_report("ramp", &SloThresholds::new());
+        staged.stages = vec![
+            StageReport {
+                duration: Duration::from_secs(30),
+                target: 100,
+            },
+            StageReport {
+                duration: Duration::from_millis(1_500),
+                target: 0,
+            },
+        ];
+        let phases = [phase_report("warmup", &SloThresholds::new()), staged];
+        assert_eq!(phases[1].load_label(), "30s:100, 1.5s:0");
+
+        // Stages alone are enough to show the phase table.
+        let text = strip_ansi(&render_scenario_report(
+            &report_config("text"),
+            &sample_metrics(),
+            &slo,
+            &[],
+            &phases,
+        ));
+        let row = text
+            .lines()
+            .find(|line| line.contains(" ramp "))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(row.contains("30s:100, 1.5s:0"), "{row}");
+        assert!(text.contains("10 connections"), "{text}");
+        let markdown = render_scenario_report(
+            &report_config("markdown"),
+            &sample_metrics(),
+            &slo,
+            &[],
+            &phases,
+        );
+        assert!(
+            markdown.contains("| `ramp` | `ws://phase.test/ws` | 30s:100, 1.5s:0 |"),
+            "{markdown}"
+        );
+
+        let json = render_scenario_report(
+            &report_config("json"),
+            &sample_metrics(),
+            &slo,
+            &[],
+            &phases,
+        );
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value["phases"][0].get("stages").is_none(), "{json}");
+        assert_eq!(
+            value["phases"][1]["stages"],
+            serde_json::json!([
+                {"duration": {"secs": 30, "nanos": 0}, "target": 100},
+                {"duration": {"secs": 1, "nanos": 500_000_000}, "target": 0},
+            ])
+        );
+        assert_eq!(SavedReport::parse(&json).unwrap().phases, phases);
     }
 
     #[test]

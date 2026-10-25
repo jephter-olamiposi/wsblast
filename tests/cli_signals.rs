@@ -515,3 +515,42 @@ async fn scenario_json_report_renders_its_phases() {
 
     cancel_server.cancel();
 }
+
+#[cfg(feature = "scenario")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scenario_staged_phase_reports_its_stages() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+    let path = write_scenario(
+        "staged_phase",
+        &format!(
+            "version: \"1.0\"\ntarget: \"{target_url}\"\nmetadata:\n  name: \"staged\"\nphases:\n\
+             {}  - name: \"ramp\"\n    stages: \"200ms:2,200ms:0\"\n",
+            phase_yaml("warmup", None)
+        ),
+    );
+
+    let finished = run_wsblast(&["--scenario", path.to_str().unwrap(), "--no-progress"]).await;
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(finished.code, Some(0), "stderr:\n{}", finished.stderr);
+    assert!(
+        finished
+            .stderr
+            .contains("phase 2/2: 'ramp' (stages 200ms:2, 200ms:0)"),
+        "stderr:\n{}",
+        finished.stderr
+    );
+    let row = finished
+        .stdout
+        .lines()
+        .find(|line| line.contains(" ramp ") && line.contains("200ms:2, 200ms:0"))
+        .unwrap_or_else(|| panic!("no ramp row:\n{}", finished.stdout));
+    assert!(row.contains(" - "), "{row}");
+    assert!(
+        finished.stdout.contains("1 connection"),
+        "{}",
+        finished.stdout
+    );
+
+    cancel_server.cancel();
+}

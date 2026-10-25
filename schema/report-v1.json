@@ -26,7 +26,7 @@
       "pattern": "^wss?://"
     },
     "connections": {
-      "description": "Configured connection count (-c). For a scenario, the sum of every executed phase's connections, which equals metrics.total_connections_attempted.",
+      "description": "Configured connection count (-c). For a scenario, metrics.total_connections_attempted: the sum of every executed phase's connections, where a staged phase counts every connection it opened.",
       "type": "integer",
       "minimum": 1
     },
@@ -335,9 +335,22 @@
           "pattern": "^wss?://"
         },
         "connections": {
-          "description": "The phase's configured connection count.",
+          "description": "The phase's configured connection count; for a staged phase, its highest stage target.",
           "type": "integer",
           "minimum": 1
+        },
+        "stages": {
+          "description": "Staged phases only: the phase's load stages in order. Over each stage the number of open connections moves linearly from the previous stage's target (0 for the first) to this one's. Absent for a phase with a constant connection count.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["duration", "target"],
+            "properties": {
+              "duration": { "$ref": "#/$defs/duration" },
+              "target": { "$ref": "#/$defs/count" }
+            }
+          }
         },
         "metrics": {
           "description": "Metrics merged from this phase's workers only. elapsed is the phase's own run time and the time series starts at the phase start (time 0).",

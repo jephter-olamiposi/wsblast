@@ -37,7 +37,7 @@ The ramp counts toward `--duration` (see [section 8](#8-run-duration-and-shutdow
 
 `--stages D1:N1,D2:N2,...` replaces `-c`, `-d` and `--ramp-rate` with a load profile. Over stage `i`, the target number of open connections moves linearly from `N(i-1)` (0 before the first stage) to `Ni` over `Di`, and stays at the last target after the last stage. Every 10 ms the runner compares the number of running workers with the target rounded to the nearest connection, starts new workers when it is below and stops the most recently started workers when it is above. A stopped worker closes its connection with a normal WebSocket close; one stopped during its first handshake counts as interrupted.
 
-The run lasts the sum of the stage durations, `connections` in the report is the highest target, and `total_connections_attempted` counts every worker the run started, so a profile that ramps down and up again (`10s:100,10s:20,10s:100`) attempts more connections than its peak (180 here). No slot is reported as not started. The time series' `active_connections` shows the profile the run achieved; with `--rate`, its throughput follows the profile too. `--stages` cannot be used with `--scenario`, whose phases set their own connections and ramp.
+The run lasts the sum of the stage durations, `connections` in the report is the highest target, and `total_connections_attempted` counts every worker the run started, so a profile that ramps down and up again (`10s:100,10s:20,10s:100`) attempts more connections than its peak (180 here). No slot is reported as not started. The time series' `active_connections` shows the profile the run achieved; with `--rate`, its throughput follows the profile too. `--stages` cannot be used with `--scenario`, whose phases set their own connections and ramp. A scenario phase can set `stages` instead: it then runs exactly as described here, over the phase's own clock, with the phase's rate, payload, think time and actions on every connection it opens; its configured connection count is the highest target, its duration the sum of its stages, and its `total_connections_attempted` every worker it started.
 
 ### 2.2 Message pacing
 
@@ -242,7 +242,7 @@ Connection counts are per worker slot, not per handshake:
 
 | Field | Definition |
 | :--- | :--- |
-| `total_connections_attempted` | Worker slots the run was configured to open: `-c`, or the sum over scenario phases. |
+| `total_connections_attempted` | Worker slots the run was configured to open: `-c`, or the sum over scenario phases. A staged run or phase counts every worker it started ([section 2.1.1](#211-load-stages)). |
 | `total_connections_established` | Slots that completed at least one handshake. |
 | `total_connections_failed` | Started slots that never completed a handshake and recorded a connection error. |
 | `total_connections_interrupted` | Started slots whose first handshake was still in progress when the run ended. |
