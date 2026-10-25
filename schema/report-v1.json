@@ -180,7 +180,7 @@
       "required": ["interval_secs", "latency_basis", "points"],
       "properties": {
         "interval_secs": { "description": "Length of each interval in seconds: 1 for runs up to 600 seconds, otherwise the whole number of seconds that keeps a run within 600 points.", "type": "number", "minimum": 0 },
-        "latency_basis": { "description": "The latency each point reports: response_time for paced echo runs, rtt otherwise, mixed for a scenario whose phases differ. Empty when the run kept no series.", "enum": ["response_time", "rtt", "mixed", ""] },
+        "latency_basis": { "description": "The latency each point reports: response_time for paced echo runs and paced echo action scripts, rtt otherwise, mixed for a scenario whose phases differ. Empty when the run kept no series.", "enum": ["response_time", "rtt", "mixed", ""] },
         "points": { "type": "array", "items": { "$ref": "#/$defs/time_series_point" } }
       }
     },
@@ -273,7 +273,7 @@
           "$ref": "#/$defs/latency_stats"
         },
         "response_time": {
-          "description": "Echo response time, from each request's scheduled send time to its reply, so it includes the time a request waited behind a slow reply (coordinated omission correction). Recorded only for paced echo runs (--rate); count is 0 otherwise. Absent from reports written before this field was added; readers should treat a missing value as an empty distribution.",
+          "description": "Echo response time, from each request's scheduled send time to its reply, so it includes the time a request waited behind a slow reply (coordinated omission correction). Recorded only for paced echo runs (--rate) and paced echo action scripts (a scenario phase with actions and rate_per_conn); count is 0 otherwise. Absent from reports written before this field was added; readers should treat a missing value as an empty distribution.",
           "$ref": "#/$defs/latency_stats"
         },
         "time_series": {

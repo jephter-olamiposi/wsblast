@@ -75,7 +75,7 @@ Error: Configuration error: Invalid scenario: load.yaml: phases[0]: unknown fiel
 | `connections` | integer | yes, unless `stages` is set | | Worker connections for this phase. Must be greater than zero. |
 | `ramp_rate` | integer | no | `0` | Workers started per second. `0` starts all of them at once. |
 | `stages` | list of stages, or a string | no | none | A staged load profile in place of `connections`, `duration` and `ramp_rate`, which cannot be set with it. See [section 4.4](#44-staged-phases). |
-| `rate_per_conn` | integer | no | `0` | Messages per second per connection. `0` is unthrottled. In an action script it paces every individual send. |
+| `rate_per_conn` | integer | no | `0` | Messages per second per connection. `0` is unthrottled. In an action script it paces every individual send; in echo mode those sends follow a fixed schedule and record response time ([section 4.3](#43-phases-with-actions)). |
 | `payload` | string | no | see below | Text payload for this phase. Supports `{{timestamp}}`, `{{worker_id}}` and `{{seq}}`. |
 | `think_time` | duration | no | `0` | Pause after each `Send` action, or after each message when the phase has no actions. See [section 4](#4-how-a-phase-runs). |
 | `actions` | list of actions | no | `[]` | Script each connection runs. Without actions the phase runs the `--mode` loop. |
@@ -103,7 +103,7 @@ Each action is a map with a `type` key. Type names are case-sensitive: `Send`, `
 
 | Type | Fields | Default | Behaviour |
 | :--- | :--- | :--- | :--- |
-| `Send` | `payload` (string, optional), `count` (integer, optional) | `count: 1` | Sends `count` messages back to back, each one paced by `rate_per_conn` when it is set. In echo mode each message waits for its reply and records an RTT sample. After the whole burst the worker sleeps `think_time`. `count` must be greater than zero. |
+| `Send` | `payload` (string, optional), `count` (integer, optional) | `count: 1` | Sends `count` messages back to back, each one paced by `rate_per_conn` when it is set. In echo mode each message waits for its reply and records an RTT sample, and a response time sample when `rate_per_conn` is set. After the whole burst the worker sleeps `think_time`. `count` must be greater than zero. |
 | `Wait` | `duration` (duration, required) | | Sleeps for `duration`. Must be greater than zero. |
 | `Ping` | `interval` (duration, required) | | Sends one WebSocket Ping frame (payload `hb`), then sleeps for `interval`. It is a single ping followed by a pause, not a repeating keepalive. Must be greater than zero. Pings are not counted as messages. |
 | `Close` | `code` (integer, optional), `reason` (string, optional) | `code: 1000`, `reason: ""` | Sends a Close frame with this code and reason, then ends the connection for the rest of the phase. The worker does not reconnect. |
@@ -156,7 +156,8 @@ The phase runs the normal session loop for `--mode` (echo by default) with the p
 Each connection runs the action list from the top, and starts again from the first action after the last one. It keeps looping until the phase ends or a `Close` action runs.
 
 - Before every action and before every message of a `Send` burst, the worker checks for cancellation and for the `--requests` cap.
-- If `rate_per_conn` is set, every message waits for the next tick of a per-connection interval of `1 / rate_per_conn` seconds. Missed ticks are skipped, not sent in a burst.
+- If `rate_per_conn` is set in echo mode, the messages follow a fixed schedule, as `--rate` does in echo mode: message `n` of a connection is due `n / rate_per_conn` seconds after the connection opened, is never sent before it is due, and is sent as soon as the previous reply arrives when that reply was late. Every reply records response time, measured from the message's due time, so a slow server shows up as response time the way it does for `--rate` ([METHODOLOGY.md section 4](../METHODOLOGY.md#4-timing)). A `Wait` or `Ping` action and the `think_time` after a `Send` burst are deliberate pauses: the schedule restarts when each one ends, so a pause is never counted as lateness.
+- If `rate_per_conn` is set in stream or listen mode, every message waits for the next tick of a per-connection interval of `1 / rate_per_conn` seconds. Missed ticks are skipped, not sent in a burst.
 - In echo mode, a message that gets no reply within `--message-timeout` records a `timeout` error and drops the connection. Unless `--no-reconnect` is set, the worker reconnects with backoff (100 ms doubling to 5 s) and the script starts again from the first action on the new connection. A server Close frame has the same effect, without an error.
 - In `stream` and `listen` mode a script sends without waiting for replies and does not read incoming frames, so the report shows 0 messages received. Use echo mode when the script needs replies.
 - `--ping-interval` keepalives are not sent while a script runs. Add a `Ping` action instead.
@@ -266,7 +267,7 @@ phases:
 - **The top-level `slo` and the SLO flags** are checked on the merged metrics of every executed phase, the same numbers the report's main tables show.
 - **When the file and the command line set the same threshold, the command line wins.** Each flag replaces only the top-level threshold of the same name, so `--max-p99 20ms` with a file that sets `max_p99: 50ms` and `max_error_rate: 0.01` gates on a p99 of 20 ms and an error rate of 1%. Flags never change a phase's `slo`.
 
-Latency thresholds gate on the latency a single run would gate on: response time when the phase is paced echo (`rate_per_conn` set, no actions, no think time), RTT otherwise. Each phase chooses on its own, so in one scenario a paced phase's check reads `Response time p99` and an unpaced phase's `Latency p99`. The merged metrics gate on response time when any executed phase recorded it. A latency check with no samples fails, as it does on the command line.
+Latency thresholds gate on the latency a single run would gate on: response time when the phase is paced echo (`rate_per_conn` set, and either actions or no think time), RTT otherwise. Each phase chooses on its own, so in one scenario a paced phase's check reads `Response time p99` and an unpaced phase's `Latency p99`. The merged metrics gate on response time when any executed phase recorded it. A latency check with no samples fails, as it does on the command line.
 
 ### 7.2 Exit code and check names
 

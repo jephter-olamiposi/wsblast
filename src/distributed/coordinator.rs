@@ -566,7 +566,7 @@ impl Coordinator {
             let spec = PhaseSpec {
                 basis: crate::runner::latency_basis_for(
                     &config,
-                    crate::runner::phase_is_scripted(phase),
+                    crate::runner::phase_skips_response_time(phase),
                 ),
                 config,
                 wire_phase: Some(super::protocol::WirePhase::from_phase(phase)),

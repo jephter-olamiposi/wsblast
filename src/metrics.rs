@@ -514,9 +514,9 @@ pub struct AggregatedMetrics {
     /// outside echo mode.
     pub message_rtt: LatencyStats,
     /// Echo response time, from each request's scheduled send time to its
-    /// reply. Recorded only for paced echo runs (`--rate`), where it
-    /// includes the time a request waited behind a slow reply; empty
-    /// otherwise.
+    /// reply. Recorded only for paced echo runs (`--rate`) and paced echo
+    /// action scripts, where it includes the time a request waited behind a
+    /// slow reply; empty otherwise.
     #[serde(default)]
     pub response_time: LatencyStats,
     /// The run broken down by time: counters, throughput and latency per

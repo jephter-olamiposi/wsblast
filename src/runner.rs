@@ -76,23 +76,28 @@ pub(crate) fn phase_config(mut config: LoadTestConfig, phase: &ScenarioPhase) ->
 }
 
 /// The latency a run of `config` reports in its time series: response time
-/// for paced echo runs whose workers record it, RTT otherwise. `scripted`
-/// says whether a scenario phase drives the workers with an action script
-/// or a think time.
-pub(crate) fn latency_basis_for(config: &LoadTestConfig, scripted: bool) -> &'static str {
+/// for paced echo runs whose workers record it, RTT otherwise.
+/// `skips_response_time` says whether a scenario phase is one that records
+/// none (see [`phase_skips_response_time`]).
+pub(crate) fn latency_basis_for(
+    config: &LoadTestConfig,
+    skips_response_time: bool,
+) -> &'static str {
     let paced_echo = config.mode == crate::cli::TestMode::Echo && config.rate_per_conn > 0;
-    if paced_echo && !scripted {
+    if paced_echo && !skips_response_time {
         "response_time"
     } else {
         "rtt"
     }
 }
 
-/// Whether a scenario phase drives its workers with actions or a think time
-/// instead of the plain paced loop.
+/// Whether a paced echo phase records no response time: a phase without an
+/// action script whose think time pauses after every reply. An action script
+/// records response time for every paced send, with its schedule restarted
+/// after `Wait` and think time.
 #[cfg(feature = "scenario")]
-pub(crate) fn phase_is_scripted(phase: &ScenarioPhase) -> bool {
-    !phase.actions.is_empty() || !phase.think_time.is_zero()
+pub(crate) fn phase_skips_response_time(phase: &ScenarioPhase) -> bool {
+    phase.actions.is_empty() && !phase.think_time.is_zero()
 }
 
 impl Runner {
@@ -139,10 +144,13 @@ impl Runner {
     /// runs whose workers record it, RTT otherwise.
     fn latency_basis(&self) -> &'static str {
         #[cfg(feature = "scenario")]
-        let scripted = self.scenario.as_deref().is_some_and(phase_is_scripted);
+        let skips = self
+            .scenario
+            .as_deref()
+            .is_some_and(phase_skips_response_time);
         #[cfg(not(feature = "scenario"))]
-        let scripted = false;
-        latency_basis_for(&self.config, scripted)
+        let skips = false;
+        latency_basis_for(&self.config, skips)
     }
 
     fn create_session(

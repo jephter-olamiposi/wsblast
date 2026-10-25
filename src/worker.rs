@@ -255,10 +255,7 @@ impl WorkerSession {
         // request spent waiting past its due time behind a slow one, less the
         // timer's own slack; RTT is measured from the actual send. See
         // METHODOLOGY.md.
-        let mut schedule = (self.config.rate_per_conn > 0).then(|| SendSchedule {
-            period: Duration::from_secs_f64(1.0 / self.config.rate_per_conn as f64),
-            next_due: Instant::now(),
-        });
+        let mut schedule = SendSchedule::new(self.config.rate_per_conn);
         // Think time is a deliberate pause after each reply, not queueing, so
         // response time is only recorded without it.
         #[cfg(feature = "scenario")]
@@ -360,9 +357,10 @@ impl WorkerSession {
                     if let Some(due) = due
                         && record_response_time
                     {
-                        let late = start_time.saturating_duration_since(due);
                         self.metrics
-                            .record_response_time(rtt + late.saturating_sub(TIMER_SLACK));
+                            .record_response_time(SendSchedule::response_time(
+                                due, start_time, rtt,
+                            ));
                     }
                 }
                 // A server Close ends the session; it is not the reply.
@@ -380,7 +378,7 @@ impl WorkerSession {
 
             seq += 1;
             if let Some(schedule) = schedule.as_mut() {
-                schedule.next_due += schedule.period;
+                schedule.advance();
             }
 
             #[cfg(feature = "scenario")]
@@ -392,7 +390,7 @@ impl WorkerSession {
             // is not counted as lateness.
             #[cfg(feature = "scenario")]
             if !record_response_time && let Some(schedule) = schedule.as_mut() {
-                schedule.next_due = schedule.next_due.max(Instant::now());
+                schedule.restart_after_pause();
             }
         }
 
@@ -547,6 +545,11 @@ impl WorkerSession {
     /// Scripts repeat after their final action so a phase without an explicit
     /// Close keeps generating load for its full duration. `rate_per_conn`
     /// paces individual sends and `think_time` pauses after each Send burst.
+    ///
+    /// In echo mode paced sends follow the fixed schedule of the paced echo
+    /// loop and record response time; `Wait`, `Ping` and think time are
+    /// deliberate pauses, after which the schedule restarts from now. Other
+    /// modes pace sends with an interval that skips missed ticks.
     #[cfg(feature = "scenario")]
     async fn run_action_loop<S>(&mut self, ws_stream: S, phase: Arc<ScenarioPhase>) -> SessionEnd
     where
@@ -557,7 +560,13 @@ impl WorkerSession {
         let (mut sink, mut stream) = ws_stream.split();
 
         let mut seq = 0u64;
-        let mut ticker = if self.config.rate_per_conn > 0 {
+        let echo = self.config.mode == TestMode::Echo;
+        let mut schedule = if echo {
+            SendSchedule::new(self.config.rate_per_conn)
+        } else {
+            None
+        };
+        let mut ticker = if !echo && self.config.rate_per_conn > 0 {
             let mut t = interval(Duration::from_secs_f64(
                 1.0 / self.config.rate_per_conn as f64,
             ));
@@ -566,6 +575,7 @@ impl WorkerSession {
         } else {
             None
         };
+        self.metrics.interval_uses_response = schedule.is_some();
 
         'script: loop {
             if self.cancel_token.is_cancelled() {
@@ -590,7 +600,16 @@ impl WorkerSession {
                                 break 'script;
                             }
 
-                            if let Some(ref mut t) = ticker {
+                            let due = schedule.as_ref().map(|s| s.next_due);
+                            if let Some(due) = due {
+                                tokio::select! {
+                                    _ = tokio::time::sleep_until(due.into()) => {}
+                                    _ = self.cancel_token.cancelled() => {
+                                        let _ = sink.send(Message::Close(None)).await;
+                                        break 'script;
+                                    }
+                                }
+                            } else if let Some(ref mut t) = ticker {
                                 tokio::select! {
                                     _ = t.tick() => {}
                                     _ = self.cancel_token.cancelled() => {
@@ -648,10 +667,13 @@ impl WorkerSession {
 
                                 match response {
                                     Ok(Ok(Some(bytes_recv))) => {
-                                        self.metrics.record_message_recv(
-                                            bytes_recv,
-                                            Some(start_time.elapsed()),
-                                        );
+                                        let rtt = start_time.elapsed();
+                                        self.metrics.record_message_recv(bytes_recv, Some(rtt));
+                                        if let Some(due) = due {
+                                            self.metrics.record_response_time(
+                                                SendSchedule::response_time(due, start_time, rtt),
+                                            );
+                                        }
                                     }
                                     Ok(Ok(None)) => break 'script,
                                     Ok(Err(cat)) => {
@@ -669,11 +691,19 @@ impl WorkerSession {
                             }
 
                             seq += 1;
+                            if let Some(schedule) = schedule.as_mut() {
+                                schedule.advance();
+                            }
                         }
 
                         if !self.apply_think_time().await {
                             let _ = sink.send(Message::Close(None)).await;
                             break 'script;
+                        }
+                        if !phase.think_time.is_zero()
+                            && let Some(schedule) = schedule.as_mut()
+                        {
+                            schedule.restart_after_pause();
                         }
                     }
                     ScenarioAction::Wait(duration) => {
@@ -683,6 +713,9 @@ impl WorkerSession {
                                 let _ = sink.send(Message::Close(None)).await;
                                 break 'script;
                             }
+                        }
+                        if let Some(schedule) = schedule.as_mut() {
+                            schedule.restart_after_pause();
                         }
                     }
                     ScenarioAction::Ping(interval) => {
@@ -700,6 +733,9 @@ impl WorkerSession {
                                 let _ = sink.send(Message::Close(None)).await;
                                 break 'script;
                             }
+                        }
+                        if let Some(schedule) = schedule.as_mut() {
+                            schedule.restart_after_pause();
                         }
                     }
                     ScenarioAction::Close { code, reason } => {
@@ -1252,11 +1288,47 @@ const TIMER_SLACK: Duration = if cfg!(windows) {
     Duration::from_millis(2)
 };
 
-/// The send times of a paced echo session.
+/// The send times of a paced echo session or echo action script.
+///
+/// Request `n` of a session is due at `session start + n * period`. A
+/// request is never sent before it is due; one that falls behind because an
+/// earlier reply was slow is sent as soon as that reply arrives, and the
+/// time it waited past its due time is part of its response time.
 struct SendSchedule {
     period: Duration,
     /// When the next request is due.
     next_due: Instant,
+}
+
+impl SendSchedule {
+    /// A schedule of `rate` requests per second starting now; `None` for an
+    /// unpaced session (`rate` 0).
+    fn new(rate: u64) -> Option<Self> {
+        (rate > 0).then(|| Self {
+            period: Duration::from_secs_f64(1.0 / rate as f64),
+            next_due: Instant::now(),
+        })
+    }
+
+    /// Moves on to the next request's slot.
+    fn advance(&mut self) {
+        self.next_due += self.period;
+    }
+
+    /// Restarts the schedule from now after a deliberate pause (think time,
+    /// a `Wait` or `Ping` action), so the pause is not counted as lateness.
+    #[cfg(feature = "scenario")]
+    fn restart_after_pause(&mut self) {
+        self.next_due = self.next_due.max(Instant::now());
+    }
+
+    /// The response time of a request that was due at `due`, sent at
+    /// `sent_at` and answered `rtt` after that: RTT plus the time it waited
+    /// past its due time, less the timer's own slack.
+    fn response_time(due: Instant, sent_at: Instant, rtt: Duration) -> Duration {
+        let late = sent_at.saturating_duration_since(due);
+        rtt + late.saturating_sub(TIMER_SLACK)
+    }
 }
 
 fn categorize_tungstenite_error(err: &TungsteniteError) -> ErrorCategory {

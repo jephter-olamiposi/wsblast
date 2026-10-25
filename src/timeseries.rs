@@ -428,8 +428,8 @@ pub struct TimeSeries {
     /// Length of each interval in seconds. The last point of a run, or of a
     /// scenario phase, may be shorter.
     pub interval_secs: f64,
-    /// The latency each point reports: `response_time` for paced echo runs,
-    /// `rtt` otherwise.
+    /// The latency each point reports: `response_time` for paced echo runs
+    /// and paced echo action scripts, `rtt` otherwise.
     pub latency_basis: String,
     /// One point per interval, in time order.
     pub points: Vec<TimeSeriesPoint>,

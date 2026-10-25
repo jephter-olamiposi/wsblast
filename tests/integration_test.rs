@@ -1997,6 +1997,97 @@ async fn test_paced_echo_response_time_counts_waiting_behind_a_slow_reply() {
     cancel_server.cancel();
 }
 
+/// Runs a one-phase scenario against `target_url` and returns the outcome.
+#[cfg(feature = "scenario")]
+async fn run_one_phase(target_url: &Url, phase: &str) -> wsblast::ScenarioOutcome {
+    ScenarioExecutor::new(
+        &scenario(target_url, phase),
+        scenario_base_config(target_url).build().unwrap(),
+        None,
+        None,
+    )
+    .unwrap()
+    .with_signal_handling(false)
+    .run()
+    .await
+    .unwrap()
+}
+
+#[cfg(feature = "scenario")]
+#[tokio::test]
+async fn test_paced_echo_script_records_response_time_and_gates_on_it() {
+    // As in the paced echo loop: replies take 40 ms, sends are due every
+    // 10 ms, so response time grows while RTT stays at 40 ms.
+    let (target_url, cancel_server) = spawn_delayed_echo_server(Duration::from_millis(40)).await;
+
+    let outcome = run_one_phase(
+        &target_url,
+        r#"  - name: "scripted"
+    duration: "1200ms"
+    connections: 1
+    rate_per_conn: 100
+    actions:
+      - type: Send
+        count: 3
+    slo:
+      max_p99: "60s"
+"#,
+    )
+    .await;
+
+    let metrics = &outcome.metrics;
+    let (rtt, response) = (&metrics.message_rtt, &metrics.response_time);
+    assert!(rtt.count >= 10, "{metrics:?}");
+    assert_eq!(response.count, rtt.count, "{metrics:?}");
+    assert!(rtt.p99_us < 100_000, "{metrics:?}");
+    assert!(response.p99_us > 300_000, "{metrics:?}");
+    assert!(response.p50_us > rtt.p50_us * 3, "{metrics:?}");
+    assert_eq!(metrics.time_series.latency_basis, "response_time");
+    let checks: Vec<&str> = outcome.phases[0]
+        .slo
+        .checks
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(checks, ["Response time p99"]);
+    cancel_server.cancel();
+}
+
+#[cfg(feature = "scenario")]
+#[tokio::test]
+async fn test_paced_echo_script_restarts_its_schedule_after_a_pause() {
+    // Every 40 ms reply is followed by a 60 ms Wait, far longer than the
+    // 10 ms period. The schedule restarts after each Wait, so no request is
+    // ever counted as late and response time stays close to RTT.
+    let (target_url, cancel_server) = spawn_delayed_echo_server(Duration::from_millis(40)).await;
+
+    let outcome = run_one_phase(
+        &target_url,
+        r#"  - name: "paused"
+    duration: "1s"
+    connections: 1
+    rate_per_conn: 100
+    think_time: "20ms"
+    actions:
+      - type: Send
+      - type: Wait
+        duration: "60ms"
+      - type: Send
+      - type: Ping
+        interval: "30ms"
+"#,
+    )
+    .await;
+
+    let metrics = &outcome.metrics;
+    let (rtt, response) = (&metrics.message_rtt, &metrics.response_time);
+    assert!(rtt.count >= 4, "{metrics:?}");
+    assert_eq!(response.count, rtt.count, "{metrics:?}");
+    // Without the restart the n-th send would be about n * 140 ms late.
+    assert!(response.max_us < rtt.max_us + 30_000, "{metrics:?}");
+    cancel_server.cancel();
+}
+
 #[tokio::test]
 async fn test_paced_echo_response_time_matches_rtt_when_the_server_keeps_up() {
     let (target_url, cancel_server) = spawn_echo_server().await;
