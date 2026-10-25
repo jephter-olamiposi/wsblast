@@ -51,6 +51,9 @@ graphql-ws\:"Apollo GraphQL WS protocol (subscriptions)"))' \
 static\:"Static bearer token"
 apikey\:"API Key"))' \
 '--auth-token=[Static token for auth (used with --auth-type static)]:TOKEN:_default' \
+'(--auth-token --auth-apikey)--auth-token-cmd=[Command whose trimmed stdout is the token or API key, run through the platform shell before the run (replaces --auth-token or --auth-apikey)]:COMMAND:_default' \
+'--auth-token-cmd-timeout=[Time allowed for each run of --auth-token-cmd \[default\: 30s\]]:DURATION:_default' \
+'--auth-token-refresh=[Re-run --auth-token-cmd every DURATION during the run; new handshakes use the latest token]:DURATION:_default' \
 '--auth-header=[Header name for static token (used with --auth-type static)]:HEADER:_default' \
 '--auth-apikey=[API Key (used with --auth-type apikey)]:KEY:_default' \
 '--auth-apikey-header=[API Key header name (used with --auth-type apikey)]:HEADER:_default' \

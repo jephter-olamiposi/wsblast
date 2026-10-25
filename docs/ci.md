@@ -44,6 +44,23 @@ wsblast "$TARGET" -H "Authorization: Bearer $WS_TOKEN"
 wsblast "$TARGET" -H "X-API-Key: $WS_API_KEY"
 ```
 
+### 2.1 Tokens from a command
+
+With the `auth` feature, `--auth-token-cmd` gets the token from a command instead of the command line, which keeps it out of the job log and the process list and lets the job mint a fresh one:
+
+```bash
+wsblast "$TARGET" --auth-type static --auth-token-cmd "gcloud auth print-identity-token"
+wsblast "$TARGET" --auth-type apikey --auth-apikey-header X-API-Key \
+  --auth-token-cmd "./scripts/mint-key.sh"
+```
+
+- The command runs through the platform shell (`sh -c` on Unix, `cmd /C` on Windows) before the run starts. Its standard output, with leading and trailing whitespace removed, is used exactly as `--auth-token` (with `--auth-type static`) or `--auth-apikey` (with `--auth-type apikey`) would be: `Authorization` gets a `Bearer ` prefix unless the token has one, and `--auth-header` and `--auth-apikey-header` name the header as usual. It cannot be combined with `--auth-token` or `--auth-apikey`. Its standard input is empty, and its standard error is captured: only its first line is shown, and only when the command fails.
+- `--auth-token-cmd-timeout` (default `30s`) bounds each run of the command; a command still running then is killed.
+- A command that cannot be started, times out, exits with a non-zero status, prints nothing, or prints something that is not a valid HTTP header value is a configuration error: wsblast exits with code 1 before any connection is opened. The message gives the exit status and the first line of the command's standard error. The token itself is never printed, in errors or reports.
+- `--auth-token-refresh DURATION` runs the command again during the run, each time `DURATION` after the previous run finished. New handshakes (connections still ramping up, connections a stage adds, and reconnects) use the latest token; connections that are already open are not touched. A failed refresh keeps the previous token and prints a warning to stderr; while refreshes keep failing, at most one warning per minute is printed, with the count of failures it covers. A refresh still running when the run ends is abandoned.
+
+When a run can outlast the token and connections may reconnect, set the refresh interval below the token's lifetime.
+
 ## 3. Settings for CI runs
 
 | Setting | Why |

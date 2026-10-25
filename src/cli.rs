@@ -171,6 +171,33 @@ pub(crate) struct Cli {
     #[arg(long = "auth-token", value_name = "TOKEN")]
     pub auth_token: Option<String>,
 
+    /// Command whose trimmed stdout is the token or API key, run through the platform shell before the run (replaces --auth-token or --auth-apikey)
+    #[cfg(feature = "auth")]
+    #[arg(
+        long = "auth-token-cmd",
+        value_name = "COMMAND",
+        conflicts_with_all = ["auth_token", "auth_apikey"]
+    )]
+    pub auth_token_cmd: Option<String>,
+
+    /// Time allowed for each run of --auth-token-cmd [default: 30s]
+    #[cfg(feature = "auth")]
+    #[arg(
+        long = "auth-token-cmd-timeout",
+        value_name = "DURATION",
+        requires = "auth_token_cmd"
+    )]
+    pub auth_token_cmd_timeout: Option<String>,
+
+    /// Re-run --auth-token-cmd every DURATION during the run; new handshakes use the latest token
+    #[cfg(feature = "auth")]
+    #[arg(
+        long = "auth-token-refresh",
+        value_name = "DURATION",
+        requires = "auth_token_cmd"
+    )]
+    pub auth_token_refresh: Option<String>,
+
     /// Header name for static token (used with --auth-type static)
     #[cfg(feature = "auth")]
     #[arg(

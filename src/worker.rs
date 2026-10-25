@@ -83,11 +83,17 @@ impl WorkerSession {
         let mut connected_before = false;
 
         loop {
+            #[cfg_attr(not(feature = "auth"), allow(unused_mut))]
+            let mut request = client_req.clone();
+            // A refreshed token is read per attempt, so reconnects present
+            // the latest one.
+            #[cfg(feature = "auth")]
+            if let Some(auth) = &self.config.live_auth {
+                auth.apply(request.headers_mut());
+            }
             let handshake_start = Instant::now();
-            let connect_fut = tokio::time::timeout(
-                self.config.connect_timeout,
-                self.target.connect(client_req.clone()),
-            );
+            let connect_fut =
+                tokio::time::timeout(self.config.connect_timeout, self.target.connect(request));
             let connect_result = tokio::select! {
                 biased;
                 _ = self.cancel_token.cancelled() => {

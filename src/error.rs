@@ -12,8 +12,7 @@ pub enum WsBlastError {
     #[error("Configuration error: {0}")]
     Config(#[from] ConfigError),
 
-    /// A worker-level failure that aborted the operation, such as an invalid
-    /// authentication header.
+    /// A worker-level failure that aborted the operation.
     #[error("Worker execution error: {0}")]
     Worker(#[from] WorkerError),
 
@@ -64,6 +63,13 @@ pub enum ConfigError {
     /// The authentication flags are incomplete or contradictory.
     #[error("Invalid authentication options: {0}")]
     InvalidAuth(String),
+
+    /// The `--auth-token-cmd` command did not produce a token: it could not
+    /// start, timed out, exited unsuccessfully, printed nothing, or printed
+    /// something that is not a valid header value. The message carries the
+    /// exit status and the first line of standard error, never the output.
+    #[error("Authentication token command failed: {0}")]
+    AuthTokenCommand(String),
 
     /// An option has an invalid value.
     #[error("Invalid option: {0}")]

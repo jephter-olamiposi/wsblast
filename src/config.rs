@@ -5,7 +5,7 @@ use crate::cli::{Cli, OutputFormat, TestMode};
 use crate::error::{ConfigError, Result, WsBlastError};
 use bytes::Bytes;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
-#[cfg(any(feature = "auth", feature = "scenario", feature = "graphql-ws"))]
+#[cfg(any(feature = "scenario", feature = "graphql-ws"))]
 use serde::Deserialize;
 #[cfg(feature = "graphql-ws")]
 use serde::Serialize;
@@ -20,6 +20,10 @@ use url::Url;
 
 /// Default text payload: a JSON template carrying a timestamp and sequence number.
 const DEFAULT_TEXT_PAYLOAD: &str = r#"{"source":"wsblast","ts":"{{timestamp}}","seq":{{seq}}}"#;
+
+/// Time allowed for each run of `--auth-token-cmd` by default.
+#[cfg(feature = "auth")]
+const DEFAULT_TOKEN_CMD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default binary payload used by `--binary` without `--payload`.
 const DEFAULT_BINARY_PAYLOAD: &[u8] = b"wsblast-payload";
@@ -48,6 +52,10 @@ pub struct LoadTestConfig {
     pub(crate) ping_interval: Duration,
     #[cfg(feature = "auth")]
     pub(crate) auth: Option<AuthConfig>,
+    /// The authentication header of a run whose token is refreshed during
+    /// the run; applied to every handshake attempt.
+    #[cfg(feature = "auth")]
+    pub(crate) live_auth: Option<crate::auth::LiveAuthHeader>,
     #[cfg(feature = "graphql-ws")]
     pub(crate) graphql_ws: Option<GraphQLWSConfig>,
     pub(crate) slo: SloThresholds,
@@ -520,6 +528,8 @@ impl LoadTestConfigBuilder {
             ping_interval: self.ping_interval,
             #[cfg(feature = "auth")]
             auth: None,
+            #[cfg(feature = "auth")]
+            live_auth: None,
             #[cfg(feature = "graphql-ws")]
             graphql_ws,
             slo: self.slo,
@@ -922,12 +932,70 @@ impl SloThresholds {
     }
 }
 
+/// Handshake authentication from the `--auth-*` flags.
 #[cfg(feature = "auth")]
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
-pub(crate) enum AuthConfig {
-    Static { token: String, header: String },
-    ApiKey { key: String, header: String },
+#[derive(Debug, Clone)]
+pub(crate) struct AuthConfig {
+    pub(crate) scheme: AuthScheme,
+    /// Name of the header that carries the credential.
+    pub(crate) header: String,
+    pub(crate) credential: Credential,
+}
+
+/// How the credential is sent.
+#[cfg(feature = "auth")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthScheme {
+    /// A token, sent as `Bearer <token>` in `Authorization` and as is in any
+    /// other header.
+    Static,
+    /// An API key, sent as is.
+    ApiKey,
+}
+
+/// Where the credential comes from.
+#[cfg(feature = "auth")]
+#[derive(Debug, Clone)]
+pub(crate) enum Credential {
+    /// Given on the command line.
+    Value(Secret),
+    /// Printed by a command before the run, and optionally during it.
+    Command(TokenCommand),
+}
+
+/// A credential whose `Debug` output is redacted.
+#[cfg(feature = "auth")]
+#[derive(Clone)]
+pub(crate) struct Secret(String);
+
+#[cfg(feature = "auth")]
+impl Secret {
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(feature = "auth")]
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+/// `--auth-token-cmd` and its timing options.
+#[cfg(feature = "auth")]
+#[derive(Debug, Clone)]
+pub(crate) struct TokenCommand {
+    /// Run through the platform shell; its trimmed stdout is the token.
+    pub(crate) command: String,
+    /// Time allowed for each run of the command.
+    pub(crate) timeout: Duration,
+    /// Interval between runs during the load test, if the token is refreshed.
+    pub(crate) refresh: Option<Duration>,
 }
 
 #[cfg(feature = "graphql-ws")]
@@ -1718,47 +1786,94 @@ impl LoadTestConfig {
 #[cfg(feature = "auth")]
 fn auth_from_cli(cli: &Cli) -> Result<Option<AuthConfig>> {
     use crate::cli::AuthType;
-    match cli.auth_type {
+    let invalid = |message: &str| WsBlastError::from(ConfigError::InvalidAuth(message.to_string()));
+    let (scheme, header, value, flag) = match cli.auth_type {
         AuthType::None => {
-            if cli.auth_token.is_some() || cli.auth_apikey.is_some() {
-                return Err(ConfigError::InvalidAuth(
-                    "authentication options require an explicit --auth-type".to_string(),
-                )
-                .into());
+            if cli.auth_token.is_some() || cli.auth_apikey.is_some() || cli.auth_token_cmd.is_some()
+            {
+                return Err(invalid(
+                    "authentication options require an explicit --auth-type",
+                ));
             }
-            Ok(None)
+            return Ok(None);
         }
-        AuthType::Static => {
-            let token = cli
-                .auth_token
+        AuthType::Static => (
+            AuthScheme::Static,
+            &cli.auth_header,
+            &cli.auth_token,
+            "--auth-token",
+        ),
+        AuthType::ApiKey => (
+            AuthScheme::ApiKey,
+            &cli.auth_apikey_header,
+            &cli.auth_apikey,
+            "--auth-apikey",
+        ),
+    };
+
+    let credential = match &cli.auth_token_cmd {
+        Some(command) => {
+            if command.trim().is_empty() {
+                return Err(invalid("--auth-token-cmd requires a non-empty command"));
+            }
+            let timeout = cli
+                .auth_token_cmd_timeout
+                .as_deref()
+                .map_or(Ok(DEFAULT_TOKEN_CMD_TIMEOUT), parse_human_duration)?;
+            if timeout.is_zero() {
+                return Err(invalid(
+                    "--auth-token-cmd-timeout must be greater than zero",
+                ));
+            }
+            let refresh = cli
+                .auth_token_refresh
+                .as_deref()
+                .map(parse_human_duration)
+                .transpose()?;
+            if refresh.is_some_and(|refresh| refresh.is_zero()) {
+                return Err(invalid("--auth-token-refresh must be greater than zero"));
+            }
+            Credential::Command(TokenCommand {
+                command: command.clone(),
+                timeout,
+                refresh,
+            })
+        }
+        None => {
+            // clap does not enforce `requires` when --auth-token or
+            // --auth-apikey, which conflict with --auth-token-cmd, are given.
+            for (flag, set) in [
+                (
+                    "--auth-token-cmd-timeout",
+                    cli.auth_token_cmd_timeout.is_some(),
+                ),
+                ("--auth-token-refresh", cli.auth_token_refresh.is_some()),
+            ] {
+                if set {
+                    return Err(invalid(&format!("{flag} requires --auth-token-cmd")));
+                }
+            }
+            let value = value
                 .as_deref()
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| {
-                    ConfigError::InvalidAuth(
-                        "--auth-type static requires a non-empty --auth-token".to_string(),
-                    )
+                    let kind = match scheme {
+                        AuthScheme::Static => "static",
+                        AuthScheme::ApiKey => "apikey",
+                    };
+                    invalid(&format!(
+                        "--auth-type {kind} requires a non-empty {flag} or --auth-token-cmd"
+                    ))
                 })?;
-            Ok(Some(AuthConfig::Static {
-                token: token.to_string(),
-                header: cli.auth_header.clone(),
-            }))
+            Credential::Value(Secret::new(value.to_string()))
         }
-        AuthType::ApiKey => {
-            let key = cli
-                .auth_apikey
-                .as_deref()
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    ConfigError::InvalidAuth(
-                        "--auth-type apikey requires a non-empty --auth-apikey".to_string(),
-                    )
-                })?;
-            Ok(Some(AuthConfig::ApiKey {
-                key: key.to_string(),
-                header: cli.auth_apikey_header.clone(),
-            }))
-        }
-    }
+    };
+
+    Ok(Some(AuthConfig {
+        scheme,
+        header: header.clone(),
+        credential,
+    }))
 }
 
 /// Parses concise human duration strings into standard [`Duration`].
@@ -2075,6 +2190,137 @@ mod tests {
         let cli = Cli::parse_from(["wsblast", "ws://127.0.0.1:9001", "--auth-type", "apikey"]);
         let error = LoadTestConfig::from_cli(cli).unwrap_err();
         assert!(error.to_string().contains("--auth-apikey"));
+    }
+
+    #[cfg(feature = "auth")]
+    #[test]
+    fn token_command_is_parsed_with_its_timing() {
+        use clap::Parser;
+
+        let cli = Cli::parse_from([
+            "wsblast",
+            "ws://127.0.0.1:9001",
+            "--auth-type",
+            "apikey",
+            "--auth-token-cmd",
+            "mint-token --audience ws",
+            "--auth-token-cmd-timeout",
+            "5s",
+            "--auth-token-refresh",
+            "10m",
+        ]);
+        let auth = LoadTestConfig::from_cli(cli).unwrap().auth.unwrap();
+        assert_eq!(auth.scheme, AuthScheme::ApiKey);
+        assert_eq!(auth.header, "X-API-Key");
+        let Credential::Command(command) = auth.credential else {
+            panic!("expected a command credential");
+        };
+        assert_eq!(command.command, "mint-token --audience ws");
+        assert_eq!(command.timeout, Duration::from_secs(5));
+        assert_eq!(command.refresh, Some(Duration::from_secs(600)));
+
+        let cli = Cli::parse_from([
+            "wsblast",
+            "ws://127.0.0.1:9001",
+            "--auth-type",
+            "static",
+            "--auth-token-cmd",
+            "mint-token",
+        ]);
+        let Credential::Command(command) = LoadTestConfig::from_cli(cli)
+            .unwrap()
+            .auth
+            .unwrap()
+            .credential
+        else {
+            panic!("expected a command credential");
+        };
+        assert_eq!(command.timeout, Duration::from_secs(30));
+        assert_eq!(command.refresh, None);
+    }
+
+    #[cfg(feature = "auth")]
+    #[test]
+    fn token_command_flag_combinations_are_checked() {
+        use clap::Parser;
+
+        let parse = |extra: &str| {
+            let base = ["wsblast", "ws://127.0.0.1:9001"];
+            Cli::try_parse_from(base.into_iter().chain(extra.split(' ')))
+        };
+        let rejected = |extra: &str| {
+            LoadTestConfig::from_cli(parse(extra).unwrap())
+                .unwrap_err()
+                .to_string()
+        };
+
+        // Rejected by the parser.
+        for extra in [
+            "--auth-type static --auth-token t --auth-token-cmd c",
+            "--auth-type apikey --auth-apikey k --auth-token-cmd c",
+            "--auth-token-refresh 1m",
+            "--auth-token-cmd-timeout 1s",
+        ] {
+            assert!(parse(extra).is_err(), "{extra}");
+        }
+
+        // Rejected by validation.
+        for (extra, message) in [
+            ("--auth-token-cmd c", "explicit --auth-type"),
+            (
+                "--auth-type static --auth-token t --auth-token-refresh 1m",
+                "--auth-token-refresh requires --auth-token-cmd",
+            ),
+            (
+                "--auth-type apikey --auth-apikey k --auth-token-cmd-timeout 1s",
+                "--auth-token-cmd-timeout requires --auth-token-cmd",
+            ),
+            (
+                "--auth-type static --auth-token-cmd c --auth-token-cmd-timeout 0s",
+                "--auth-token-cmd-timeout must be greater than zero",
+            ),
+            (
+                "--auth-type static --auth-token-cmd c --auth-token-refresh 0s",
+                "--auth-token-refresh must be greater than zero",
+            ),
+            (
+                "--auth-type static --auth-token-cmd c --auth-token-refresh soon",
+                "Invalid duration",
+            ),
+        ] {
+            let error = rejected(extra);
+            assert!(error.contains(message), "{extra}: {error}");
+        }
+        let error = LoadTestConfig::from_cli(
+            Cli::try_parse_from([
+                "wsblast",
+                "ws://127.0.0.1:9001",
+                "--auth-type",
+                "static",
+                "--auth-token-cmd",
+                " ",
+            ])
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("non-empty command"));
+    }
+
+    #[cfg(feature = "auth")]
+    #[test]
+    fn auth_config_debug_output_hides_the_token() {
+        use clap::Parser;
+
+        let cli = Cli::parse_from([
+            "wsblast",
+            "ws://127.0.0.1:9001",
+            "--auth-type",
+            "static",
+            "--auth-token",
+            "token-123",
+        ]);
+        let config = LoadTestConfig::from_cli(cli).unwrap();
+        assert!(!format!("{config:?}").contains("token-123"));
     }
 
     #[cfg(feature = "graphql-ws")]

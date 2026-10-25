@@ -29,13 +29,20 @@ pub async fn run_cli() {
     }
 }
 
-/// Resolves configured authentication once and merges it into handshake headers.
+/// Resolves configured authentication before the run, running
+/// `--auth-token-cmd` if set. The returned guard keeps a token refresh
+/// running and must live until the run ends.
 #[cfg(feature = "auth")]
-fn apply_auth(config: &mut LoadTestConfig) -> Result<()> {
-    if let Some(auth) = config.auth.take() {
-        crate::auth::apply_auth_header(&mut config.headers, &auth).map_err(WsBlastError::Worker)?;
-    }
-    Ok(())
+fn apply_auth(config: &mut LoadTestConfig) -> Result<Option<crate::auth::RefreshGuard>> {
+    let Some(auth) = config.auth.take() else {
+        return Ok(None);
+    };
+    Ok(
+        crate::auth::prepare_auth(&auth, &mut config.headers)?.map(|(live, guard)| {
+            config.live_auth = Some(live);
+            guard
+        }),
+    )
 }
 
 /// Hidden commands that print packaging assets generated from the CLI
@@ -205,7 +212,7 @@ async fn run_app() -> Result<()> {
     let mut config = config;
 
     #[cfg(feature = "auth")]
-    apply_auth(&mut config)?;
+    let _token_refresh = apply_auth(&mut config)?;
 
     let live_metrics = LiveMetrics::new();
 

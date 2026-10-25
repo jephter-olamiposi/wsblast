@@ -108,6 +108,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod app;
+#[cfg(feature = "auth")]
 mod auth;
 mod cli;
 mod config;

@@ -27,6 +27,9 @@ complete -c wsblast -l auth-type -d 'Authentication type (none, static, apikey)'
 static\t'Static bearer token'
 apikey\t'API Key'"
 complete -c wsblast -l auth-token -d 'Static token for auth (used with --auth-type static)' -r
+complete -c wsblast -l auth-token-cmd -d 'Command whose trimmed stdout is the token or API key, run through the platform shell before the run (replaces --auth-token or --auth-apikey)' -r
+complete -c wsblast -l auth-token-cmd-timeout -d 'Time allowed for each run of --auth-token-cmd [default: 30s]' -r
+complete -c wsblast -l auth-token-refresh -d 'Re-run --auth-token-cmd every DURATION during the run; new handshakes use the latest token' -r
 complete -c wsblast -l auth-header -d 'Header name for static token (used with --auth-type static)' -r
 complete -c wsblast -l auth-apikey -d 'API Key (used with --auth-type apikey)' -r
 complete -c wsblast -l auth-apikey-header -d 'API Key header name (used with --auth-type apikey)' -r
