@@ -280,6 +280,10 @@ pub(crate) struct Cli {
     #[arg(long = "no-reconnect", default_value_t = false)]
     pub no_reconnect: bool,
 
+    /// Serve live metrics at http://ADDR/metrics in the Prometheus text format while the run lasts (e.g. '127.0.0.1:9464'; port 0 picks a free port)
+    #[arg(long = "prometheus-listen", value_name = "ADDR")]
+    pub prometheus_listen: Option<String>,
+
     /// Path to scenario YAML file defining multi-phase test (conflicts with individual flags)
     #[arg(long = "scenario", value_name = "FILE", conflicts_with_all = ["connections", "duration", "rate", "payload", "payload_file"])]
     pub scenario: Option<PathBuf>,

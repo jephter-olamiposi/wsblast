@@ -46,6 +46,7 @@ jobs:
           - auth
           - graphql-ws
           - compare
+          - prometheus
           - full
     steps:
       - uses: actions/checkout@v5

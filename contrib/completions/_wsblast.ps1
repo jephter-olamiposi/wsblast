@@ -67,6 +67,7 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--compare-threshold', '--compare-threshold', [CompletionResultType]::ParameterName, 'Regression threshold percentage (default: 10%)')
             [CompletionResult]::new('-o', '-o', [CompletionResultType]::ParameterName, 'Write output report to the specified file path')
             [CompletionResult]::new('--output', '--output', [CompletionResultType]::ParameterName, 'Write output report to the specified file path')
+            [CompletionResult]::new('--prometheus-listen', '--prometheus-listen', [CompletionResultType]::ParameterName, 'Serve live metrics at http://ADDR/metrics in the Prometheus text format while the run lasts (e.g. ''127.0.0.1:9464''; port 0 picks a free port)')
             [CompletionResult]::new('--scenario', '--scenario', [CompletionResultType]::ParameterName, 'Path to scenario YAML file defining multi-phase test (conflicts with individual flags)')
             [CompletionResult]::new('--phase', '--phase', [CompletionResultType]::ParameterName, 'Run only a specific phase from the scenario by name')
             [CompletionResult]::new('--binary', '--binary', [CompletionResultType]::ParameterName, 'Send payload as WebSocket binary frames instead of text frames')

@@ -114,6 +114,8 @@ mod cli;
 mod config;
 mod connect;
 mod error;
+#[cfg(feature = "prometheus")]
+mod export;
 mod metrics;
 mod report;
 mod runner;

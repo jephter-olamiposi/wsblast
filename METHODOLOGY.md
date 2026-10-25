@@ -168,6 +168,40 @@ The progress bar and the TUI show a live "Msg/s" computed as received messages d
 
 The text and Markdown reports summarise the series in at most 10 rows. When a row covers several intervals, it shows their combined throughput and the highest p99 of any one interval: percentiles cannot be combined, so the row's latency is the worst interval, not a p99 over the whole row. The JSON report has every point.
 
+### 6.4 Live export
+
+While a run is in progress, `--prometheus-listen ADDR` (`prometheus` feature, on by default) publishes its live counters and the latency of its time series ([section 6.3](#63-time-series)) for a Prometheus server to scrape. [docs/export.md](docs/export.md) shows how to set it up. In a scenario every phase shares the live counters, so the counters keep counting across phases.
+
+Live values describe the run while it happens; the report is computed from the per-worker metrics merged at the end ([section 1](#1-execution-model)) and remains the record of the run. The live counters are relaxed atomics summed over their shards when they are read, so the fields of one read can be slightly out of step with each other, and the final values can differ from the report by the operations in flight when the run ended.
+
+| Metric | Type | Definition |
+| :--- | :--- | :--- |
+| `wsblast_messages_sent_total` | counter | Data frames written successfully: `total_messages_sent` so far. |
+| `wsblast_messages_received_total` | counter | Data frames counted as received: `total_messages_recv` so far. |
+| `wsblast_bytes_sent_total` | counter | Payload bytes of the frames sent, as `total_bytes_sent`. |
+| `wsblast_bytes_received_total` | counter | Payload bytes of the frames received, as `total_bytes_recv`. |
+| `wsblast_errors_total` | counter | Errors of every category recorded so far: the sum of `error_breakdown`. |
+| `wsblast_connections_established_total` | counter | Slots that completed their first handshake, as `total_connections_established`. |
+| `wsblast_connections_failed_total` | counter | Failed handshake attempts, counting every failed reconnect attempt. This is not `total_connections_failed`, which counts slots that never connected ([section 7](#7-connection-accounting-and-reconnects)): a target that stays down makes this counter grow with every retry. |
+| `wsblast_reconnects_total` | counter | Handshakes that re-established a slot after it lost its connection, as `total_reconnects`. |
+| `wsblast_active_connections` | gauge | Connections open at the moment of the read. |
+| `wsblast_run_elapsed_seconds` | gauge | Seconds since the run's clock started ([section 8.1](#81-duration)), 0 before it starts. In a scenario the clock starts with the first phase and keeps running through the pauses between phases. It stops when the run ends. |
+| `wsblast_latency_seconds{basis, quantile}` | gauge | p50, p90 and p99 (`quantile` `0.5`, `0.9`, `0.99`) of the most recently completed interval of the time series, in seconds. |
+| `wsblast_latency_samples{basis}` | gauge | Number of latency samples in that interval. |
+
+The counters start at 0 when wsblast starts and only grow, so `rate()` in Prometheus gives per-second rates. They never reset during a run; a new run is a new process and starts again at 0.
+
+**Latency.** The latency values are those of one interval of the run's time series, with the interval length and the 2-significant-figure precision of [section 6.3](#63-time-series) (1 second for runs of up to 600 seconds). `basis` is `response_time` for paced echo runs and `rtt` otherwise, as `latency_basis` in the report; in a scenario it is the basis of the phase in progress. The interval exported is the last one that has ended, so the value changes once per interval and lags the run by up to one interval:
+
+- Before the first interval of the run (or of a scenario phase) ends, there is no completed interval, and the two latency families are listed without samples.
+- An interval with no replies exports `wsblast_latency_samples 0` and no quantiles.
+- A connection hands its samples for an interval to the run with its first reply in a later interval, or when the run ends. A read taken just after an interval boundary can therefore miss the samples of connections that have not received a reply since; the time series in the report has every sample.
+- When a run or phase ends, the last interval that ended before the run did stays exported. The partial interval at the very end of the run is not exported.
+
+Percentiles cannot be added up, so a monitoring system cannot compute a percentile over a longer window from these values; use the report for whole-run percentiles.
+
+**Prometheus endpoint.** `--prometheus-listen ADDR` binds `ADDR` before the run starts; an address that cannot be bound, for example a port in use, is a configuration error with exit code 1. Port 0 picks a free port, and wsblast prints the address it serves on to stderr. The endpoint answers `GET /metrics` with the text exposition format 0.0.4 and content type `text/plain; version=0.0.4; charset=utf-8`; other paths and methods get 404, a malformed request line 400 and a request head over 8 KiB 431. Every response closes the connection. A scrape reads the live counters without a lock and holds the time series lock only while it reads one interval's percentiles; a worker handing over its interval samples at that moment (about once per interval, [section 6.3](#63-time-series)) waits for it as it would for another worker. The endpoint closes when the run ends, before the report is printed.
+
 ### 6.1 What counts as an error
 
 `error_breakdown` counts errors per category: `dns_resolution`, `tcp_connect`, `tls_handshake`, `http_upgrade_rejected`, `protocol_error`, `write_error`, `read_error`, `timeout`, `unexpected_close`, `other`.
@@ -303,6 +337,7 @@ SLOs are checked before the "all connections failed" condition. A run where ever
 - **Reply matching.** Echo replies are matched by `--match` (default `first`, see [section 3.1](#31-how-replies-are-matched-echo-mode)). With `first`, unsolicited server frames are taken as replies.
 - **Single generator.** All load comes from one process. wsblast does not detect when the generator itself is the bottleneck (CPU saturation, file descriptor limit, ephemeral ports). It prints a warning when `-c` plus 64 exceeds the open file limit (`ulimit -n`). Watch the generator's CPU when RTT matters.
 - **Timer resolution.** Per-connection rates above about 1000 msg/s are approximate (see [section 8.3](#83-timer-resolution)).
+- **Live export lags by one interval.** The latency that `--prometheus-listen` publishes is that of the last completed time-series interval, not of the moment of the read, and the final partial interval is not published (see [section 6.4](#64-live-export)).
 - **Payload bytes only.** Byte counts exclude framing, TLS and handshake traffic, so they understate wire bandwidth.
 - **Request cap overshoot.** `--requests` can be exceeded by up to about one message per connection.
 - **Scenario report header.** In a scenario, the JSON report's `target_url` is the first executed phase's target. `phase_targets` lists the target of every executed phase.

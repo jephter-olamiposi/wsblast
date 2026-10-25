@@ -166,6 +166,81 @@ fn run_compare(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+/// The live exporters a run was asked for. They start before the run, so a
+/// port in use is a configuration error before any connection is made, and
+/// they stop as soon as the run ends.
+#[derive(Default)]
+struct LiveExport {
+    #[cfg(feature = "prometheus")]
+    source: Option<Arc<crate::export::ExportSource>>,
+    #[cfg(feature = "prometheus")]
+    prometheus: Option<crate::export::prometheus::PrometheusServer>,
+}
+
+impl LiveExport {
+    async fn start(cli: &Cli, live: &Arc<LiveMetrics>) -> Result<Self> {
+        #[cfg(not(feature = "prometheus"))]
+        {
+            let _ = live;
+            if cli.prometheus_listen.is_some() {
+                return Err(not_compiled_in("--prometheus-listen", "prometheus"));
+            }
+            Ok(Self::default())
+        }
+
+        #[cfg(feature = "prometheus")]
+        {
+            let mut export = Self::default();
+            if let Some(addr) = &cli.prometheus_listen {
+                let server = crate::export::prometheus::PrometheusServer::bind(
+                    addr,
+                    export.source_for(live),
+                )
+                .await?;
+                eprintln!(
+                    "Serving Prometheus metrics at http://{}/metrics",
+                    server.local_addr()
+                );
+                export.prometheus = Some(server);
+            }
+            Ok(export)
+        }
+    }
+
+    #[cfg(feature = "prometheus")]
+    fn source_for(&mut self, live: &Arc<LiveMetrics>) -> Arc<crate::export::ExportSource> {
+        Arc::clone(
+            self.source
+                .get_or_insert_with(|| crate::export::ExportSource::new(Arc::clone(live))),
+        )
+    }
+
+    /// The source runners publish their time series to, when any exporter runs.
+    #[cfg(feature = "prometheus")]
+    fn source(&self) -> Option<Arc<crate::export::ExportSource>> {
+        self.source.clone()
+    }
+
+    /// Freezes the exported run time and stops the Prometheus endpoint.
+    async fn finish(self) {
+        #[cfg(feature = "prometheus")]
+        if let Some(source) = &self.source {
+            source.finish();
+        }
+        #[cfg(feature = "prometheus")]
+        if let Some(server) = self.prometheus {
+            server.shutdown().await;
+        }
+    }
+}
+
+#[cfg(not(feature = "prometheus"))]
+fn not_compiled_in(flag: &str, feature: &str) -> WsBlastError {
+    WsBlastError::Config(ConfigError::UnsupportedOption(format!(
+        "{flag} needs the '{feature}' feature, which this build of wsblast does not include; rebuild with --features {feature}"
+    )))
+}
+
 async fn run_app() -> Result<()> {
     if let Some(command) = AssetCommand::from_args() {
         return command.print();
@@ -215,56 +290,68 @@ async fn run_app() -> Result<()> {
     let _token_refresh = apply_auth(&mut config)?;
 
     let live_metrics = LiveMetrics::new();
+    let live_export = LiveExport::start(&cli, &live_metrics).await?;
 
-    // For scenario mode, run the ScenarioExecutor instead of single Runner
-    let (metrics, phase_targets) = if scenario_mode {
-        #[cfg(feature = "scenario")]
-        {
-            let scenario = scenario.as_ref().ok_or_else(|| {
-                WsBlastError::Config(ConfigError::InvalidScenario(
-                    "Scenario mode requires --scenario <FILE>".to_string(),
-                ))
-            })?;
-            let executor = ScenarioExecutor::new(
-                scenario,
-                config.clone(),
-                cli.phase.as_deref(),
-                cli.resolve_url(),
-            )?
-            .with_live_metrics(Arc::clone(&live_metrics));
-            let outcome = executor.run().await?;
-            (outcome.metrics, outcome.phase_targets)
-        }
-        #[cfg(not(feature = "scenario"))]
-        {
-            return Err(WsBlastError::Config(ConfigError::InvalidScenario(
-                "Scenario support not compiled in. Build with --features scenario".to_string(),
-            )));
-        }
-    } else {
-        // Normal single-phase run
-        let runner = Runner::new(config.clone()).with_live_metrics(Arc::clone(&live_metrics));
-
-        if config.tui {
-            let config_arc = Arc::new(config.clone());
-            let cancel_token = runner.cancel_token();
-
-            let mut tui_app = TuiApp::new(config_arc, Arc::clone(&live_metrics), cancel_token);
-
-            let runner_handle = tokio::spawn(async move { runner.run().await });
-
-            if let Err(e) = tui_app.run().await {
-                eprintln!("TUI error: {e}");
+    // For scenario mode, run the ScenarioExecutor instead of single Runner.
+    // The block's result is held until the live exporters have stopped, so
+    // they shut down on errors too.
+    let outcome: Result<_> = async {
+        if scenario_mode {
+            #[cfg(feature = "scenario")]
+            {
+                let scenario = scenario.as_ref().ok_or_else(|| {
+                    WsBlastError::Config(ConfigError::InvalidScenario(
+                        "Scenario mode requires --scenario <FILE>".to_string(),
+                    ))
+                })?;
+                let executor = ScenarioExecutor::new(
+                    scenario,
+                    config.clone(),
+                    cli.phase.as_deref(),
+                    cli.resolve_url(),
+                )?
+                .with_live_metrics(Arc::clone(&live_metrics));
+                #[cfg(feature = "prometheus")]
+                let executor = executor.with_export(live_export.source());
+                let outcome = executor.run().await?;
+                Ok((outcome.metrics, outcome.phase_targets))
             }
-
-            let metrics = runner_handle
-                .await
-                .map_err(|e| std::io::Error::other(e.to_string()))??;
-            (metrics, Vec::new())
+            #[cfg(not(feature = "scenario"))]
+            {
+                Err(WsBlastError::Config(ConfigError::InvalidScenario(
+                    "Scenario support not compiled in. Build with --features scenario".to_string(),
+                )))
+            }
         } else {
-            (runner.run().await?, Vec::new())
+            // Normal single-phase run
+            let runner = Runner::new(config.clone()).with_live_metrics(Arc::clone(&live_metrics));
+            #[cfg(feature = "prometheus")]
+            let runner = runner.with_export(live_export.source());
+
+            if config.tui {
+                let config_arc = Arc::new(config.clone());
+                let cancel_token = runner.cancel_token();
+
+                let mut tui_app = TuiApp::new(config_arc, Arc::clone(&live_metrics), cancel_token);
+
+                let runner_handle = tokio::spawn(async move { runner.run().await });
+
+                if let Err(e) = tui_app.run().await {
+                    eprintln!("TUI error: {e}");
+                }
+
+                let metrics = runner_handle
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))??;
+                Ok((metrics, Vec::new()))
+            } else {
+                Ok((runner.run().await?, Vec::new()))
+            }
         }
-    };
+    }
+    .await;
+    live_export.finish().await;
+    let (metrics, phase_targets) = outcome?;
 
     // Multi-phase scenarios report aggregate sizing rather than the first phase.
     #[cfg(feature = "scenario")]

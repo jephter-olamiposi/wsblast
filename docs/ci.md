@@ -29,7 +29,7 @@ Rules that matter in a pipeline:
 
 ## 2. Installing in CI
 
-Every wsblast feature, including `--compare`, `--scenario`, `--auth-type` and `--mode graphql-ws`, is part of the default build, so a plain install has all of them:
+Every wsblast feature, including `--compare`, `--scenario`, `--auth-type`, `--mode graphql-ws` and `--prometheus-listen`, is part of the default build, so a plain install has all of them:
 
 ```bash
 cargo install wsblast --locked

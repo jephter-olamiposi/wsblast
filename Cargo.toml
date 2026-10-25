@@ -74,16 +74,18 @@ rustls-native-certs = "0.8"
 
 [features]
 # Every feature is on by default, so `cargo install wsblast` and the release
-# binaries ship the whole CLI. `auth`, `graphql-ws` and `compare` add no
-# dependencies; `scenario` adds the YAML parser. Library users can opt out
-# with `default-features = false`.
-default = ["scenario", "compare", "auth", "graphql-ws"]
+# binaries ship the whole CLI. `auth`, `graphql-ws`, `compare` and `prometheus`
+# add no dependencies; `scenario` adds the YAML parser. Library users can opt
+# out with `default-features = false`.
+default = ["scenario", "compare", "auth", "graphql-ws", "prometheus"]
 scenario = ["dep:serde_norway"]
 auth = []
 graphql-ws = []
 compare = []
+# `--prometheus-listen`: a /metrics endpoint served for the length of a run.
+prometheus = ["tokio/io-util"]
 # Kept so existing `--features full` invocations keep working.
-full = ["scenario", "auth", "graphql-ws", "compare"]
+full = ["scenario", "auth", "graphql-ws", "compare", "prometheus"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

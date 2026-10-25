@@ -68,6 +68,7 @@ markdown\:"GitHub Flavored Markdown table for PR comments and job summaries"))' 
 '--compare-threshold=[Regression threshold percentage (default\: 10%)]:PERCENT:_default' \
 '-o+[Write output report to the specified file path]:FILE:_files' \
 '--output=[Write output report to the specified file path]:FILE:_files' \
+'--prometheus-listen=[Serve live metrics at http\://ADDR/metrics in the Prometheus text format while the run lasts (e.g. '\''127.0.0.1\:9464'\''; port 0 picks a free port)]:ADDR:_default' \
 '(-c --connections -d --duration -r --rate -p --payload --payload-file)--scenario=[Path to scenario YAML file defining multi-phase test (conflicts with individual flags)]:FILE:_files' \
 '--phase=[Run only a specific phase from the scenario by name]:NAME:_default' \
 '--binary[Send payload as WebSocket binary frames instead of text frames]' \

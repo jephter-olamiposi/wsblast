@@ -6,6 +6,8 @@ use crate::config::{LoadTestConfig, Stage};
 #[cfg(feature = "scenario")]
 use crate::config::{ScenarioConfig, ScenarioPhase};
 use crate::connect::ConnectTarget;
+#[cfg(feature = "prometheus")]
+use crate::export::ExportSource;
 use crate::metrics::{AggregatedMetrics, LiveMetrics, LiveSnapshot, WorkerMetrics};
 #[cfg(feature = "scenario")]
 use crate::report::PhaseTarget;
@@ -31,6 +33,9 @@ pub struct Runner {
     handle_signals: bool,
     #[cfg(feature = "scenario")]
     scenario: Option<Arc<ScenarioPhase>>,
+    /// Where the live exporters read the time series of this run.
+    #[cfg(feature = "prometheus")]
+    export: Option<Arc<ExportSource>>,
 }
 
 impl Runner {
@@ -43,6 +48,8 @@ impl Runner {
             handle_signals: true,
             #[cfg(feature = "scenario")]
             scenario: None,
+            #[cfg(feature = "prometheus")]
+            export: None,
         }
     }
 
@@ -67,6 +74,8 @@ impl Runner {
             cancel_token: CancellationToken::new(),
             handle_signals: true,
             scenario: Some(Arc::new(phase)),
+            #[cfg(feature = "prometheus")]
+            export: None,
         }
     }
 
@@ -115,6 +124,14 @@ impl Runner {
     /// this runner's telemetry.
     pub(crate) fn with_live_metrics(mut self, live_metrics: Arc<LiveMetrics>) -> Self {
         self.live_metrics = live_metrics;
+        self
+    }
+
+    /// Publishes this run's time series to the live exporters reading
+    /// `export`.
+    #[cfg(feature = "prometheus")]
+    pub(crate) fn with_export(mut self, export: Option<Arc<ExportSource>>) -> Self {
+        self.export = export;
         self
     }
 
@@ -343,6 +360,10 @@ impl Runner {
         let start_time = Instant::now();
         let interval = interval_for(self.config.duration);
         let interval_store = IntervalStore::new(start_time, interval);
+        #[cfg(feature = "prometheus")]
+        if let Some(export) = &self.export {
+            export.begin_phase(Arc::clone(&interval_store), self.latency_basis());
+        }
         let sampler = CounterSampler::spawn(
             Arc::clone(&self.live_metrics),
             start_time,
@@ -413,6 +434,10 @@ impl Runner {
                 metrics.flush_interval();
                 worker_metrics.push(metrics);
             }
+        }
+        #[cfg(feature = "prometheus")]
+        if let Some(export) = &self.export {
+            export.end_phase(elapsed);
         }
         let samples = sampler.finish().await;
         let time_series = TimeSeries::build(&samples, &interval_store, self.latency_basis());
@@ -599,6 +624,8 @@ pub struct ScenarioExecutor {
     live_metrics: Arc<LiveMetrics>,
     cancel_token: CancellationToken,
     handle_signals: bool,
+    #[cfg(feature = "prometheus")]
+    export: Option<Arc<ExportSource>>,
 }
 
 #[cfg(feature = "scenario")]
@@ -634,7 +661,17 @@ impl ScenarioExecutor {
             live_metrics: LiveMetrics::new(),
             cancel_token: CancellationToken::new(),
             handle_signals: true,
+            #[cfg(feature = "prometheus")]
+            export: None,
         })
+    }
+
+    /// Publishes every phase's time series to the live exporters reading
+    /// `export`.
+    #[cfg(feature = "prometheus")]
+    pub(crate) fn with_export(mut self, export: Option<Arc<ExportSource>>) -> Self {
+        self.export = export;
+        self
     }
 
     /// Shares an existing live-metrics registry across every phase.
@@ -715,6 +752,8 @@ impl ScenarioExecutor {
                 .with_live_metrics(Arc::clone(&self.live_metrics))
                 .with_cancel_token(self.cancel_token.child_token())
                 .with_signal_handling(false);
+            #[cfg(feature = "prometheus")]
+            let runner = runner.with_export(self.export.clone());
             let outcome = runner.run_and_collect().await?;
 
             total_elapsed += outcome.elapsed;

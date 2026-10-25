@@ -1927,3 +1927,249 @@ async fn test_live_counters_add_up_across_shards() {
     assert_eq!(live.active_connections, 0);
     cancel_server.cancel();
 }
+
+/// Drives the `wsblast` binary with live export enabled against the
+/// in-process echo server.
+#[cfg(feature = "prometheus")]
+mod live_export {
+    pub(super) use super::spawn_echo_server;
+    use std::process::Stdio;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+    use tokio::process::{Child, Command};
+
+    fn spawn_wsblast(args: &[&str]) -> Child {
+        Command::new(env!("CARGO_BIN_EXE_wsblast"))
+            .args(args)
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap()
+    }
+
+    pub(super) struct Finished {
+        pub(super) code: Option<i32>,
+        pub(super) stdout: String,
+        pub(super) stderr: String,
+    }
+
+    /// A running wsblast whose stderr is read in the background.
+    pub(super) struct Running {
+        child: Child,
+        stderr: tokio::task::JoinHandle<String>,
+    }
+
+    /// Starts wsblast and reads stderr until a line containing `marker`,
+    /// which is returned, if `marker` is given.
+    pub(super) async fn start(args: &[&str], marker: Option<&str>) -> (Running, String) {
+        let mut child = spawn_wsblast(args);
+        let mut reader = BufReader::new(child.stderr.take().unwrap());
+        let mut seen = String::new();
+        let mut found = String::new();
+        if let Some(marker) = marker {
+            loop {
+                let mut line = String::new();
+                let n = tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+                    .await
+                    .expect("no output from wsblast")
+                    .unwrap();
+                assert!(n > 0, "wsblast closed stderr before {marker:?}:\n{seen}");
+                seen.push_str(&line);
+                if line.contains(marker) {
+                    found = line;
+                    break;
+                }
+            }
+        }
+        // Keep draining stderr so the child never blocks on a full pipe.
+        let stderr = tokio::spawn(async move {
+            let _ = reader.read_to_string(&mut seen).await;
+            seen
+        });
+        (Running { child, stderr }, found)
+    }
+
+    /// Waits for the child to exit, failing the test after `limit`.
+    pub(super) async fn finish(running: Running, limit: Duration) -> Finished {
+        let Running { mut child, stderr } = running;
+        let mut stdout_pipe = child.stdout.take().unwrap();
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = String::new();
+            let _ = stdout_pipe.read_to_string(&mut buf).await;
+            buf
+        });
+        let stderr_task = stderr;
+        let status = tokio::time::timeout(limit, child.wait())
+            .await
+            .expect("wsblast did not exit in time")
+            .unwrap();
+        Finished {
+            code: status.code(),
+            stdout: stdout_task.await.unwrap(),
+            stderr: stderr_task.await.unwrap(),
+        }
+    }
+}
+
+#[cfg(feature = "prometheus")]
+mod prometheus_export {
+    use super::live_export::{Finished, Running, finish, spawn_echo_server, start};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Sends one scrape and returns the status line and the body.
+    async fn get(addr: &str, path: &str) -> (String, String) {
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        (head.lines().next().unwrap().to_string(), body.to_string())
+    }
+
+    /// The value of the sample line that starts with `series`.
+    fn value(body: &str, series: &str) -> f64 {
+        body.lines()
+            .find_map(|line| line.strip_prefix(series)?.strip_prefix(' '))
+            .unwrap_or_else(|| panic!("{series} missing from\n{body}"))
+            .parse()
+            .unwrap()
+    }
+
+    /// Starts wsblast with an endpoint on a free port and returns its address.
+    async fn start_serving(args: &[&str]) -> (Running, String) {
+        let mut all = args.to_vec();
+        all.extend(["--no-progress", "--prometheus-listen", "127.0.0.1:0"]);
+        let (running, line) = start(&all, Some("Serving Prometheus metrics")).await;
+        let addr = line
+            .split("http://")
+            .nth(1)
+            .and_then(|s| s.split("/metrics").next())
+            .unwrap()
+            .to_string();
+        (running, addr)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn metrics_are_scraped_while_the_run_is_in_progress() {
+        let (target_url, cancel_server) = spawn_echo_server().await;
+        let (running, addr) =
+            start_serving(&[target_url.as_str(), "-c", "2", "-r", "200", "-d", "2500ms"]).await;
+
+        let (status, other) = get(&addr, "/").await;
+        assert_eq!(status, "HTTP/1.1 404 Not Found", "{other}");
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let (status, first) = get(&addr, "/metrics").await;
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        let (_, second) = get(&addr, "/metrics").await;
+
+        let sent = |body: &str| value(body, "wsblast_messages_sent_total");
+        assert!(sent(&first) > 0.0, "{first}");
+        assert!(sent(&second) > sent(&first), "{first}\n---\n{second}");
+        assert!(
+            value(&second, "wsblast_messages_received_total")
+                > value(&first, "wsblast_messages_received_total")
+        );
+        assert_eq!(value(&second, "wsblast_active_connections"), 2.0);
+        assert_eq!(value(&second, "wsblast_connections_established_total"), 2.0);
+        assert!(
+            value(&second, "wsblast_run_elapsed_seconds") >= 1.4,
+            "{second}"
+        );
+        // After the first second, the completed interval reports latency.
+        assert!(
+            value(&second, "wsblast_latency_samples{basis=\"response_time\"}") > 0.0,
+            "{second}"
+        );
+        assert!(
+            value(
+                &second,
+                "wsblast_latency_seconds{basis=\"response_time\",quantile=\"0.99\"}"
+            ) > 0.0
+        );
+
+        let Finished { code, stdout, .. } = finish(running, Duration::from_secs(10)).await;
+        assert_eq!(code, Some(0), "{stdout}");
+        // The endpoint closes with the run.
+        assert!(tokio::net::TcpStream::connect(&addr).await.is_err());
+        cancel_server.cancel();
+    }
+
+    #[cfg(feature = "scenario")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scenario_phases_share_one_endpoint() {
+        let (target_url, cancel_server) = spawn_echo_server().await;
+        let phase = |name: &str| {
+            format!(
+                "  - name: \"{name}\"\n    target: \"{target_url}\"\n    duration: \"1200ms\"\n    connections: 1\n"
+            )
+        };
+        let yaml = format!(
+            "version: \"1.0\"\nmetadata:\n  name: \"export\"\nphases:\n{}{}",
+            phase("one"),
+            phase("two")
+        );
+        let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("prometheus_scenario_{}.yaml", std::process::id()));
+        std::fs::write(&path, yaml).unwrap();
+
+        let (running, addr) = start_serving(&["--scenario", path.to_str().unwrap()]).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let (_, during_one) = get(&addr, "/metrics").await;
+        // Phase two starts after 1.2 s plus the 500 ms pause.
+        tokio::time::sleep(Duration::from_millis(1_600)).await;
+        let (_, during_two) = get(&addr, "/metrics").await;
+
+        let sent = |body: &str| value(body, "wsblast_messages_sent_total");
+        assert!(
+            sent(&during_two) > sent(&during_one),
+            "{during_one}\n---\n{during_two}"
+        );
+        assert_eq!(
+            value(&during_two, "wsblast_connections_established_total"),
+            2.0
+        );
+        assert!(value(&during_two, "wsblast_run_elapsed_seconds") > 2.0);
+
+        let finished = finish(running, Duration::from_secs(10)).await;
+        assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+        let _ = std::fs::remove_file(path);
+        cancel_server.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_port_in_use_is_a_configuration_error() {
+        let taken = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = taken.local_addr().unwrap().to_string();
+        let (running, _) = start(
+            &[
+                "ws://127.0.0.1:9",
+                "--no-progress",
+                "-d",
+                "30s",
+                "--prometheus-listen",
+                &addr,
+            ],
+            None,
+        )
+        .await;
+        let finished = finish(running, Duration::from_secs(10)).await;
+        assert_eq!(finished.code, Some(1), "{}", finished.stderr);
+        assert!(
+            finished
+                .stderr
+                .contains("--prometheus-listen cannot listen on"),
+            "{}",
+            finished.stderr
+        );
+        assert!(finished.stdout.is_empty(), "{}", finished.stdout);
+    }
+}

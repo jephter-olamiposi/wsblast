@@ -43,6 +43,7 @@ markdown\t'GitHub Flavored Markdown table for PR comments and job summaries'"
 complete -c wsblast -l compare -d 'Compare two JSON reports for regression detection' -r -F
 complete -c wsblast -l compare-threshold -d 'Regression threshold percentage (default: 10%)' -r
 complete -c wsblast -s o -l output -d 'Write output report to the specified file path' -r -F
+complete -c wsblast -l prometheus-listen -d 'Serve live metrics at http://ADDR/metrics in the Prometheus text format while the run lasts (e.g. \'127.0.0.1:9464\'; port 0 picks a free port)' -r
 complete -c wsblast -l scenario -d 'Path to scenario YAML file defining multi-phase test (conflicts with individual flags)' -r -F
 complete -c wsblast -l phase -d 'Run only a specific phase from the scenario by name' -r
 complete -c wsblast -l binary -d 'Send payload as WebSocket binary frames instead of text frames'

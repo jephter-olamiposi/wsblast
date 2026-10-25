@@ -29,7 +29,7 @@ pub(crate) fn interval_for(duration: Duration) -> Duration {
     Duration::from_secs(secs)
 }
 
-fn interval_histogram() -> Option<Histogram<u64>> {
+pub(crate) fn interval_histogram() -> Option<Histogram<u64>> {
     Histogram::new_with_bounds(1, 60_000_000, INTERVAL_SIGFIG).ok()
 }
 
@@ -54,7 +54,27 @@ impl IntervalStore {
         (at.saturating_duration_since(self.start).as_nanos() / self.interval.as_nanos()) as u64
     }
 
-    fn absorb(&self, bucket: u64, hist: &Histogram<u64>) {
+    /// When the run's clock started.
+    #[cfg(feature = "prometheus")]
+    pub(crate) fn start(&self) -> Instant {
+        self.start
+    }
+
+    /// The length of one interval.
+    #[cfg(feature = "prometheus")]
+    pub(crate) fn interval(&self) -> Duration {
+        self.interval
+    }
+
+    /// Latency of interval `bucket` from the samples workers have handed
+    /// over so far. The lock is held only while the percentiles are read.
+    #[cfg(feature = "prometheus")]
+    pub(crate) fn latency_of(&self, bucket: u64) -> IntervalLatency {
+        let buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        IntervalLatency::from_histogram(buckets.get(&bucket))
+    }
+
+    pub(crate) fn absorb(&self, bucket: u64, hist: &Histogram<u64>) {
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
         match buckets.get_mut(&bucket) {
             Some(existing) => {

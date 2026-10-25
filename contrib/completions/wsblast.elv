@@ -64,6 +64,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --compare-threshold 'Regression threshold percentage (default: 10%)'
             cand -o 'Write output report to the specified file path'
             cand --output 'Write output report to the specified file path'
+            cand --prometheus-listen 'Serve live metrics at http://ADDR/metrics in the Prometheus text format while the run lasts (e.g. ''127.0.0.1:9464''; port 0 picks a free port)'
             cand --scenario 'Path to scenario YAML file defining multi-phase test (conflicts with individual flags)'
             cand --phase 'Run only a specific phase from the scenario by name'
             cand --binary 'Send payload as WebSocket binary frames instead of text frames'
