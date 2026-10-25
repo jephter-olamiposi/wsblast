@@ -1206,7 +1206,10 @@ fn render_markdown_report(view: &ReportView<'_>) -> String {
 
 /// "N" or "N (lost: a, b)" for a distributed run, each lost agent rendered
 /// by `name`.
-fn agents_label(distributed: &DistributedSummary, name: impl Fn(&str) -> String) -> String {
+pub(crate) fn agents_label(
+    distributed: &DistributedSummary,
+    name: impl Fn(&str) -> String,
+) -> String {
     let count = distributed.agents.len();
     if distributed.lost_agents.is_empty() {
         return count.to_string();

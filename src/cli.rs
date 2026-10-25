@@ -399,7 +399,6 @@ pub(crate) struct AgentArgs {
     pub tls_key: Option<PathBuf>,
 }
 
-
 /// Flags of `wsblast render`.
 #[derive(Debug, Clone, clap::Args)]
 pub(crate) struct RenderArgs {

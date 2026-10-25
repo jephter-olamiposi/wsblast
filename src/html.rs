@@ -211,6 +211,13 @@ fn render_header(html: &mut String, view: &ReportView<'_>) {
         None => "Not recorded in the JSON report".to_string(),
     };
     let _ = writeln!(html, "<dt>Rate</dt><dd>{}</dd>", escape(&rate));
+    if let Some(distributed) = &view.metrics.distributed {
+        let _ = writeln!(
+            html,
+            "<dt>Agents</dt><dd>{}</dd>",
+            crate::report::agents_label(distributed, escape)
+        );
+    }
     html.push_str("</dl>\n</header>\n");
 }
 
@@ -1257,6 +1264,29 @@ mod tests {
         let html = render_html_report(&view(&metrics, &slo, &[], "ws://h/"));
         assert!(html.contains("(ms, log scale)"), "{html}");
         assert_eq!(html.matches("log scale").count(), 1);
+    }
+
+    #[test]
+    fn distributed_runs_list_their_agents_escaped() {
+        let mut metrics = metrics_with((0..3).map(|i| point(i, 2)).collect());
+        let slo = SloEvaluation {
+            passed: true,
+            checks: Vec::new(),
+        };
+        let target = "ws://h.test/".to_string();
+        let html = render_html_report(&view(&metrics, &slo, &[], &target));
+        assert!(!html.contains("<dt>Agents</dt>"), "{html}");
+
+        metrics.distributed = Some(crate::metrics::DistributedSummary {
+            agents: vec!["a.test:7700".into(), "<b>evil</b>:1".into()],
+            lost_agents: vec!["<b>evil</b>:1".into()],
+        });
+        let html = render_html_report(&view(&metrics, &slo, &[], &target));
+        assert_well_formed(&html);
+        assert!(
+            html.contains("<dt>Agents</dt><dd>2 (lost: &lt;b&gt;evil&lt;/b&gt;:1)</dd>"),
+            "{html}"
+        );
     }
 
     #[test]
