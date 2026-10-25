@@ -69,6 +69,9 @@ markdown\:"GitHub Flavored Markdown table for PR comments and job summaries"))' 
 '-o+[Write output report to the specified file path]:FILE:_files' \
 '--output=[Write output report to the specified file path]:FILE:_files' \
 '--prometheus-listen=[Serve live metrics at http\://ADDR/metrics in the Prometheus text format while the run lasts (e.g. '\''127.0.0.1\:9464'\''; port 0 picks a free port)]:ADDR:_default' \
+'--otel-endpoint=[Export live metrics over OTLP/HTTP with protobuf bodies to this base URL, e.g. '\''http\://localhost\:4318'\'' (needs the otel feature)]:URL:_default' \
+'--otel-interval=[How often metrics are exported over OTLP; the final values are also exported when the run ends]:DURATION:_default' \
+'--otel-service-name=[OpenTelemetry service.name resource attribute \[default\: \$OTEL_SERVICE_NAME, else wsblast\]]:NAME:_default' \
 '(-c --connections -d --duration -r --rate -p --payload --payload-file)--scenario=[Path to scenario YAML file defining multi-phase test (conflicts with individual flags)]:FILE:_files' \
 '--phase=[Run only a specific phase from the scenario by name]:NAME:_default' \
 '--binary[Send payload as WebSocket binary frames instead of text frames]' \

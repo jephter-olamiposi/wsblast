@@ -284,6 +284,27 @@ pub(crate) struct Cli {
     #[arg(long = "prometheus-listen", value_name = "ADDR")]
     pub prometheus_listen: Option<String>,
 
+    /// Export live metrics over OTLP/HTTP with protobuf bodies to this base URL, e.g. 'http://localhost:4318' (needs the otel feature)
+    #[arg(long = "otel-endpoint", value_name = "URL")]
+    pub otel_endpoint: Option<String>,
+
+    /// How often metrics are exported over OTLP; the final values are also exported when the run ends
+    #[arg(
+        long = "otel-interval",
+        value_name = "DURATION",
+        default_value = "10s",
+        requires = "otel_endpoint"
+    )]
+    pub otel_interval: String,
+
+    /// OpenTelemetry service.name resource attribute [default: $OTEL_SERVICE_NAME, else wsblast]
+    #[arg(
+        long = "otel-service-name",
+        value_name = "NAME",
+        requires = "otel_endpoint"
+    )]
+    pub otel_service_name: Option<String>,
+
     /// Path to scenario YAML file defining multi-phase test (conflicts with individual flags)
     #[arg(long = "scenario", value_name = "FILE", conflicts_with_all = ["connections", "duration", "rate", "payload", "payload_file"])]
     pub scenario: Option<PathBuf>,

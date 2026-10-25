@@ -124,19 +124,23 @@ async fn resolve(url: &Url) -> Result<Arc<[SocketAddr]>, ErrorCategory> {
     Ok(interleave_families(&addrs).into())
 }
 
-/// Builds one rustls client configuration that trusts the platform's root
+/// Builds a rustls client configuration that trusts the platform's root
 /// certificates. `SSL_CERT_FILE` and `SSL_CERT_DIR` override the platform
 /// store, as documented by `rustls-native-certs`.
-fn rustls_connector() -> Connector {
+pub(crate) fn rustls_client_config() -> rustls::ClientConfig {
     let mut roots = rustls::RootCertStore::empty();
     roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(provider)
+    rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .expect("ring supports the default TLS protocol versions")
         .with_root_certificates(roots)
-        .with_no_client_auth();
-    Connector::Rustls(Arc::new(config))
+        .with_no_client_auth()
+}
+
+/// The TLS connector every `wss://` handshake of a run shares.
+fn rustls_connector() -> Connector {
+    Connector::Rustls(Arc::new(rustls_client_config()))
 }
 
 /// Connects to the first address that accepts, trying them in the given

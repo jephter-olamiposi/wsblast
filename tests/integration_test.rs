@@ -1930,7 +1930,7 @@ async fn test_live_counters_add_up_across_shards() {
 
 /// Drives the `wsblast` binary with live export enabled against the
 /// in-process echo server.
-#[cfg(feature = "prometheus")]
+#[cfg(any(feature = "prometheus", feature = "otel"))]
 mod live_export {
     pub(super) use super::spawn_echo_server;
     use std::process::Stdio;
@@ -1942,6 +1942,7 @@ mod live_export {
         Command::new(env!("CARGO_BIN_EXE_wsblast"))
             .args(args)
             .env("NO_COLOR", "1")
+            .env_remove("OTEL_SERVICE_NAME")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -2171,5 +2172,189 @@ mod prometheus_export {
             finished.stderr
         );
         assert!(finished.stdout.is_empty(), "{}", finished.stdout);
+    }
+}
+
+#[cfg(feature = "otel")]
+mod otel_export {
+    use super::live_export::{finish, spawn_echo_server, start};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// One request the collector received.
+    #[derive(Debug, Clone)]
+    struct Export {
+        request_line: String,
+        content_type: String,
+        body: Vec<u8>,
+    }
+
+    /// A minimal OTLP/HTTP collector that records every request and answers
+    /// 200 with an empty protobuf body.
+    async fn spawn_collector() -> (String, Arc<Mutex<Vec<Export>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&received);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let log = Arc::clone(&log);
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let head_end = loop {
+                        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break i + 4;
+                        }
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                    let header = |name: &str| {
+                        head.lines()
+                            .find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.eq_ignore_ascii_case(name)
+                                    .then(|| value.trim().to_string())
+                            })
+                            .unwrap_or_default()
+                    };
+                    let length: usize = header("content-length").parse().unwrap_or(0);
+                    while buf.len() < head_end + length {
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    log.lock().unwrap().push(Export {
+                        request_line: head.lines().next().unwrap_or_default().to_string(),
+                        content_type: header("content-type"),
+                        body: buf[head_end..head_end + length].to_vec(),
+                    });
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: application/x-protobuf\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (base, received)
+    }
+
+    fn contains(haystack: &[u8], needle: &str) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_short_run_exports_to_the_collector() {
+        let (target_url, cancel_server) = spawn_echo_server().await;
+        let (collector, received) = spawn_collector().await;
+        let (running, _) = start(
+            &[
+                target_url.as_str(),
+                "-c",
+                "2",
+                "-d",
+                "1200ms",
+                "--no-progress",
+                "--otel-endpoint",
+                &collector,
+                "--otel-interval",
+                "300ms",
+                "--otel-service-name",
+                "wsblast-test",
+            ],
+            None,
+        )
+        .await;
+        let finished = finish(running, Duration::from_secs(20)).await;
+        assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+        assert!(!finished.stderr.contains("Warning"), "{}", finished.stderr);
+
+        let exports = received.lock().unwrap().clone();
+        assert!(exports.len() >= 2, "{exports:?}");
+        for export in &exports {
+            assert_eq!(export.request_line, "POST /v1/metrics HTTP/1.1");
+            assert_eq!(export.content_type, "application/x-protobuf");
+            assert!(!export.body.is_empty());
+        }
+        // Protobuf keeps strings as UTF-8, so names and attributes are visible
+        // without decoding the message.
+        let last = &exports.last().unwrap().body;
+        for needle in [
+            "wsblast.messages.sent",
+            "wsblast.latency",
+            "wsblast-test",
+            "service.name",
+            "server.address",
+            "127.0.0.1",
+            "wsblast.mode",
+            "echo",
+            "quantile",
+        ] {
+            assert!(
+                contains(last, needle),
+                "{needle} missing from the final export"
+            );
+        }
+        cancel_server.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unreachable_collector_warns_once_and_the_run_succeeds() {
+        let (target_url, cancel_server) = spawn_echo_server().await;
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", closed.local_addr().unwrap());
+        drop(closed);
+
+        let (running, _) = start(
+            &[
+                target_url.as_str(),
+                "-c",
+                "1",
+                "-d",
+                "800ms",
+                "--no-progress",
+                "--otel-endpoint",
+                &endpoint,
+                "--otel-interval",
+                "200ms",
+            ],
+            None,
+        )
+        .await;
+        let finished = finish(running, Duration::from_secs(20)).await;
+        assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+        assert_eq!(
+            finished.stderr.matches("OpenTelemetry export to").count(),
+            1,
+            "{}",
+            finished.stderr
+        );
+        assert!(finished.stdout.contains("WebSocket Benchmark Summary"));
+        cancel_server.cancel();
+    }
+
+    #[tokio::test]
+    async fn an_invalid_endpoint_is_a_configuration_error() {
+        let (running, _) = start(
+            &["ws://127.0.0.1:9", "--otel-endpoint", "localhost:4318"],
+            None,
+        )
+        .await;
+        let finished = finish(running, Duration::from_secs(10)).await;
+        assert_eq!(finished.code, Some(1), "{}", finished.stderr);
+        assert!(
+            finished.stderr.contains("--otel-endpoint"),
+            "{}",
+            finished.stderr
+        );
     }
 }

@@ -114,7 +114,7 @@ mod cli;
 mod config;
 mod connect;
 mod error;
-#[cfg(feature = "prometheus")]
+#[cfg(any(feature = "prometheus", feature = "otel"))]
 mod export;
 mod metrics;
 mod report;

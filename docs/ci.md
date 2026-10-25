@@ -29,7 +29,7 @@ Rules that matter in a pipeline:
 
 ## 2. Installing in CI
 
-Every wsblast feature, including `--compare`, `--scenario`, `--auth-type`, `--mode graphql-ws` and `--prometheus-listen`, is part of the default build, so a plain install has all of them:
+Every wsblast feature except the opt-in OpenTelemetry export, including `--compare`, `--scenario`, `--auth-type`, `--mode graphql-ws` and `--prometheus-listen`, is part of the default build, so a plain install has all of them (add `--features otel` for `--otel-endpoint`, see [docs/export.md](export.md)):
 
 ```bash
 cargo install wsblast --locked

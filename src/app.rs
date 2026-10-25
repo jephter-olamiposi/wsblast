@@ -167,47 +167,66 @@ fn run_compare(cli: &Cli) -> Result<()> {
 }
 
 /// The live exporters a run was asked for. They start before the run, so a
-/// port in use is a configuration error before any connection is made, and
-/// they stop as soon as the run ends.
+/// port in use or an invalid endpoint is a configuration error before any
+/// connection is made, and they stop as soon as the run ends.
 #[derive(Default)]
 struct LiveExport {
-    #[cfg(feature = "prometheus")]
+    #[cfg(any(feature = "prometheus", feature = "otel"))]
     source: Option<Arc<crate::export::ExportSource>>,
     #[cfg(feature = "prometheus")]
     prometheus: Option<crate::export::prometheus::PrometheusServer>,
+    #[cfg(feature = "otel")]
+    otel: Option<crate::export::otel::OtelExporter>,
 }
 
 impl LiveExport {
-    async fn start(cli: &Cli, live: &Arc<LiveMetrics>) -> Result<Self> {
+    async fn start(cli: &Cli, config: &LoadTestConfig, live: &Arc<LiveMetrics>) -> Result<Self> {
+        #[cfg_attr(not(any(feature = "prometheus", feature = "otel")), allow(unused_mut))]
+        let mut export = Self::default();
+
         #[cfg(not(feature = "prometheus"))]
-        {
-            let _ = live;
-            if cli.prometheus_listen.is_some() {
-                return Err(not_compiled_in("--prometheus-listen", "prometheus"));
-            }
-            Ok(Self::default())
+        if cli.prometheus_listen.is_some() {
+            return Err(not_compiled_in("--prometheus-listen", "prometheus"));
         }
+        #[cfg(not(feature = "otel"))]
+        if cli.otel_endpoint.is_some() {
+            return Err(not_compiled_in("--otel-endpoint", "otel"));
+        }
+        #[cfg(not(any(feature = "prometheus", feature = "otel")))]
+        let _ = (config, live);
+
+        #[cfg(feature = "otel")]
+        let otel = match &cli.otel_endpoint {
+            Some(endpoint) => Some(otel_settings(cli, endpoint, config)?),
+            None => None,
+        };
+        #[cfg(all(feature = "prometheus", not(feature = "otel")))]
+        let _ = config;
 
         #[cfg(feature = "prometheus")]
-        {
-            let mut export = Self::default();
-            if let Some(addr) = &cli.prometheus_listen {
-                let server = crate::export::prometheus::PrometheusServer::bind(
-                    addr,
-                    export.source_for(live),
-                )
-                .await?;
-                eprintln!(
-                    "Serving Prometheus metrics at http://{}/metrics",
-                    server.local_addr()
-                );
-                export.prometheus = Some(server);
-            }
-            Ok(export)
+        if let Some(addr) = &cli.prometheus_listen {
+            let server =
+                crate::export::prometheus::PrometheusServer::bind(addr, export.source_for(live))
+                    .await?;
+            eprintln!(
+                "Serving Prometheus metrics at http://{}/metrics",
+                server.local_addr()
+            );
+            export.prometheus = Some(server);
         }
+
+        #[cfg(feature = "otel")]
+        if let Some(settings) = otel {
+            export.otel = Some(crate::export::otel::OtelExporter::start(
+                settings,
+                export.source_for(live),
+            )?);
+        }
+
+        Ok(export)
     }
 
-    #[cfg(feature = "prometheus")]
+    #[cfg(any(feature = "prometheus", feature = "otel"))]
     fn source_for(&mut self, live: &Arc<LiveMetrics>) -> Arc<crate::export::ExportSource> {
         Arc::clone(
             self.source
@@ -216,14 +235,15 @@ impl LiveExport {
     }
 
     /// The source runners publish their time series to, when any exporter runs.
-    #[cfg(feature = "prometheus")]
+    #[cfg(any(feature = "prometheus", feature = "otel"))]
     fn source(&self) -> Option<Arc<crate::export::ExportSource>> {
         self.source.clone()
     }
 
-    /// Freezes the exported run time and stops the Prometheus endpoint.
+    /// Freezes the exported run time, stops the Prometheus endpoint and sends
+    /// the final OTLP export.
     async fn finish(self) {
-        #[cfg(feature = "prometheus")]
+        #[cfg(any(feature = "prometheus", feature = "otel"))]
         if let Some(source) = &self.source {
             source.finish();
         }
@@ -231,14 +251,53 @@ impl LiveExport {
         if let Some(server) = self.prometheus {
             server.shutdown().await;
         }
+        #[cfg(feature = "otel")]
+        if let Some(otel) = self.otel {
+            otel.finish().await;
+        }
     }
 }
 
-#[cfg(not(feature = "prometheus"))]
+#[cfg(not(all(feature = "prometheus", feature = "otel")))]
 fn not_compiled_in(flag: &str, feature: &str) -> WsBlastError {
     WsBlastError::Config(ConfigError::UnsupportedOption(format!(
         "{flag} needs the '{feature}' feature, which this build of wsblast does not include; rebuild with --features {feature}"
     )))
+}
+
+/// Validates the `--otel-*` options.
+#[cfg(feature = "otel")]
+fn otel_settings(
+    cli: &Cli,
+    endpoint: &str,
+    config: &LoadTestConfig,
+) -> Result<crate::export::otel::OtelSettings> {
+    use clap::ValueEnum;
+
+    let interval = crate::config::parse_human_duration(&cli.otel_interval)?;
+    if interval.is_zero() {
+        return Err(WsBlastError::Config(ConfigError::InvalidOption(
+            "--otel-interval must be greater than zero".into(),
+        )));
+    }
+    let service_name = cli
+        .otel_service_name
+        .clone()
+        .or_else(|| std::env::var("OTEL_SERVICE_NAME").ok())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "wsblast".to_string());
+    Ok(crate::export::otel::OtelSettings {
+        metrics_url: crate::export::otel::metrics_url(endpoint)?,
+        interval,
+        service_name,
+        target_host: config.target_url.host_str().unwrap_or_default().to_string(),
+        mode: config
+            .mode
+            .to_possible_value()
+            .map(|value| value.get_name().to_string())
+            .unwrap_or_default(),
+        defer_warning: config.tui,
+    })
 }
 
 async fn run_app() -> Result<()> {
@@ -290,7 +349,7 @@ async fn run_app() -> Result<()> {
     let _token_refresh = apply_auth(&mut config)?;
 
     let live_metrics = LiveMetrics::new();
-    let live_export = LiveExport::start(&cli, &live_metrics).await?;
+    let live_export = LiveExport::start(&cli, &config, &live_metrics).await?;
 
     // For scenario mode, run the ScenarioExecutor instead of single Runner.
     // The block's result is held until the live exporters have stopped, so
@@ -311,7 +370,7 @@ async fn run_app() -> Result<()> {
                     cli.resolve_url(),
                 )?
                 .with_live_metrics(Arc::clone(&live_metrics));
-                #[cfg(feature = "prometheus")]
+                #[cfg(any(feature = "prometheus", feature = "otel"))]
                 let executor = executor.with_export(live_export.source());
                 let outcome = executor.run().await?;
                 Ok((outcome.metrics, outcome.phase_targets))
@@ -325,7 +384,7 @@ async fn run_app() -> Result<()> {
         } else {
             // Normal single-phase run
             let runner = Runner::new(config.clone()).with_live_metrics(Arc::clone(&live_metrics));
-            #[cfg(feature = "prometheus")]
+            #[cfg(any(feature = "prometheus", feature = "otel"))]
             let runner = runner.with_export(live_export.source());
 
             if config.tui {

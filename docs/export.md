@@ -1,30 +1,35 @@
 # Live metrics export
 
-wsblast can publish its live metrics while a run is in progress, so a long soak or a staged ramp can be watched on the same dashboards as the system under test. `--prometheus-listen ADDR` serves `GET /metrics` for Prometheus to scrape. It is part of the default build (`prometheus` feature).
+wsblast can publish its live metrics while a run is in progress, so a long soak or a staged ramp can be watched on the same dashboards as the system under test:
 
-[METHODOLOGY.md, section 6.4](../METHODOLOGY.md#64-live-export) defines each metric precisely. The report printed at the end of the run is still the record of the run: live values are for watching it happen.
+- `--prometheus-listen ADDR` serves `GET /metrics` for Prometheus to scrape. It is part of the default build (`prometheus` feature).
+- `--otel-endpoint URL` pushes the same metrics to an OpenTelemetry collector over OTLP/HTTP with protobuf bodies. It needs the opt-in `otel` feature.
+
+Both export the same set of metrics. [METHODOLOGY.md, section 6.4](../METHODOLOGY.md#64-live-export) defines each one precisely. The report printed at the end of the run is still the record of the run: live values are for watching it happen.
 
 Contents:
 
 1. [Exported metrics](#1-exported-metrics)
 2. [Prometheus](#2-prometheus)
+3. [OpenTelemetry](#3-opentelemetry)
+4. [Both at once](#4-both-at-once)
 
 ## 1. Exported metrics
 
-| Metric | Type |
-| :--- | :--- |
-| `wsblast_messages_sent_total` | counter |
-| `wsblast_messages_received_total` | counter |
-| `wsblast_bytes_sent_total` | counter |
-| `wsblast_bytes_received_total` | counter |
-| `wsblast_errors_total` | counter |
-| `wsblast_connections_established_total` | counter |
-| `wsblast_connections_failed_total` | counter |
-| `wsblast_reconnects_total` | counter |
-| `wsblast_active_connections` | gauge |
-| `wsblast_run_elapsed_seconds` | gauge |
-| `wsblast_latency_seconds{basis,quantile}` | gauge |
-| `wsblast_latency_samples{basis}` | gauge |
+| Prometheus | OpenTelemetry | Type |
+| :--- | :--- | :--- |
+| `wsblast_messages_sent_total` | `wsblast.messages.sent` | counter |
+| `wsblast_messages_received_total` | `wsblast.messages.received` | counter |
+| `wsblast_bytes_sent_total` | `wsblast.bytes.sent` | counter |
+| `wsblast_bytes_received_total` | `wsblast.bytes.received` | counter |
+| `wsblast_errors_total` | `wsblast.errors` | counter |
+| `wsblast_connections_established_total` | `wsblast.connections.established` | counter |
+| `wsblast_connections_failed_total` | `wsblast.connections.failed` | counter |
+| `wsblast_reconnects_total` | `wsblast.reconnects` | counter |
+| `wsblast_active_connections` | `wsblast.connections.active` | gauge |
+| `wsblast_run_elapsed_seconds` | `wsblast.run.elapsed` | gauge |
+| `wsblast_latency_seconds{basis,quantile}` | `wsblast.latency` | gauge |
+| `wsblast_latency_samples{basis}` | `wsblast.latency.samples` | gauge |
 
 The latency gauges hold p50, p90 and p99 (`quantile="0.5"`, `"0.9"`, `"0.99"`) of the most recently completed time-series interval, 1 second for runs of up to 10 minutes. `basis` is `response_time` for paced echo runs (`--rate`) and `rtt` otherwise. Until the first interval has ended, the latency families have no samples.
 
@@ -110,6 +115,86 @@ docker run --rm -p 9464:9464 wsblast ws://target:9001/ws -d 5m --no-progress \
   --prometheus-listen 0.0.0.0:9464
 ```
 
-### Scenarios
+## 3. OpenTelemetry
 
-In a scenario (`--scenario`), the endpoint serves for the whole scenario. The counters keep counting across phases, and the latency gauges follow the phase in progress.
+The `otel` feature is not in the default build because it adds the OpenTelemetry SDK and an HTTP client. Build with it:
+
+```bash
+cargo install wsblast --locked --features otel
+```
+
+Then point wsblast at a collector's OTLP/HTTP receiver, usually on port 4318:
+
+```bash
+wsblast ws://127.0.0.1:9001/ws -c 200 -r 20 -d 10m --no-progress \
+  --otel-endpoint http://localhost:4318 \
+  --otel-interval 5s \
+  --otel-service-name checkout-soak
+```
+
+| Flag | Default | Meaning |
+| :--- | :--- | :--- |
+| `--otel-endpoint URL` | none (export off) | OTLP/HTTP base URL. wsblast posts to `URL/v1/metrics`; a URL that already ends in `/v1/metrics` is used as given. `http://` and `https://` are accepted; HTTPS uses the platform's root certificates, or `SSL_CERT_FILE` / `SSL_CERT_DIR`. |
+| `--otel-interval DURATION` | `10s` | Time between exports. One more export is sent when the run ends, so a run shorter than the interval still exports its final values. |
+| `--otel-service-name NAME` | `$OTEL_SERVICE_NAME`, else `wsblast` | The `service.name` resource attribute. |
+
+Every data point carries `server.address` (the target URL's host) and `wsblast.mode` (`echo`, `stream`, `listen` or `graphql-ws`); the latency points also carry `basis` and `quantile`. Counters are cumulative. `OTEL_EXPORTER_OTLP_HEADERS` adds request headers, for example an API key for a hosted backend, and `OTEL_RESOURCE_ATTRIBUTES` adds resource attributes:
+
+```bash
+OTEL_EXPORTER_OTLP_HEADERS="x-api-key=${OTLP_KEY}" \
+OTEL_RESOURCE_ATTRIBUTES="deployment.environment=staging" \
+  wsblast wss://api.example.com/ws -d 5m --otel-endpoint https://otlp.example.com
+```
+
+`OTEL_EXPORTER_OTLP_ENDPOINT` is not read: export is on only when `--otel-endpoint` is given.
+
+An export that fails (collector down, wrong URL, rejected request) prints one warning and the run carries on; its report and exit code are unaffected. Each export is given at most 5 seconds (or the interval, if shorter) and is not retried, because the next export carries the cumulative values again.
+
+### Collector configuration
+
+A collector that receives OTLP/HTTP and exposes the metrics to Prometheus:
+
+```yaml
+# otel-collector.yaml
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus, debug]
+```
+
+```bash
+docker run --rm -p 4318:4318 -p 8889:8889 \
+  -v "$PWD/otel-collector.yaml:/etc/otelcol-contrib/config.yaml" \
+  otel/opentelemetry-collector-contrib:latest
+```
+
+The collector's Prometheus exporter turns the dotted names into Prometheus names and adds unit and `_total` suffixes, so `wsblast.messages.sent` appears as `wsblast_messages_sent_total` and `wsblast.bytes.sent` as `wsblast_bytes_sent_bytes_total`. Names from the collector can therefore differ slightly from those of `--prometheus-listen`.
+
+## 4. Both at once
+
+The two exporters are independent and can run together; both read the same values:
+
+```bash
+wsblast ws://127.0.0.1:9001/ws -d 30m --no-progress \
+  --prometheus-listen 127.0.0.1:9464 \
+  --otel-endpoint http://localhost:4318
+```
+
+In a scenario (`--scenario`), both run for the whole scenario. The counters keep counting across phases, and the latency gauges follow the phase in progress.

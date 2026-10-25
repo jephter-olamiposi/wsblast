@@ -44,6 +44,9 @@ complete -c wsblast -l compare -d 'Compare two JSON reports for regression detec
 complete -c wsblast -l compare-threshold -d 'Regression threshold percentage (default: 10%)' -r
 complete -c wsblast -s o -l output -d 'Write output report to the specified file path' -r -F
 complete -c wsblast -l prometheus-listen -d 'Serve live metrics at http://ADDR/metrics in the Prometheus text format while the run lasts (e.g. \'127.0.0.1:9464\'; port 0 picks a free port)' -r
+complete -c wsblast -l otel-endpoint -d 'Export live metrics over OTLP/HTTP with protobuf bodies to this base URL, e.g. \'http://localhost:4318\' (needs the otel feature)' -r
+complete -c wsblast -l otel-interval -d 'How often metrics are exported over OTLP; the final values are also exported when the run ends' -r
+complete -c wsblast -l otel-service-name -d 'OpenTelemetry service.name resource attribute [default: $OTEL_SERVICE_NAME, else wsblast]' -r
 complete -c wsblast -l scenario -d 'Path to scenario YAML file defining multi-phase test (conflicts with individual flags)' -r -F
 complete -c wsblast -l phase -d 'Run only a specific phase from the scenario by name' -r
 complete -c wsblast -l binary -d 'Send payload as WebSocket binary frames instead of text frames'

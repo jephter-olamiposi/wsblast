@@ -71,12 +71,17 @@ url = { version = "2.5", features = ["serde"] }
 http = "1.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
+opentelemetry = { version = "0.33.1", default-features = false, features = ["metrics"], optional = true }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["metrics"], optional = true }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "metrics", "reqwest-blocking-client"], optional = true }
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls-no-provider"], optional = true }
 
 [features]
-# Every feature is on by default, so `cargo install wsblast` and the release
-# binaries ship the whole CLI. `auth`, `graphql-ws`, `compare` and `prometheus`
-# add no dependencies; `scenario` adds the YAML parser. Library users can opt
-# out with `default-features = false`.
+# Every feature except `otel` is on by default, so `cargo install wsblast` and
+# the release binaries ship the whole CLI. `auth`, `graphql-ws`, `compare` and
+# `prometheus` add no dependencies; `scenario` adds the YAML parser. `otel`
+# pulls in the OpenTelemetry SDK and an HTTP client, so it is opt-in. Library
+# users can opt out with `default-features = false`.
 default = ["scenario", "compare", "auth", "graphql-ws", "prometheus"]
 scenario = ["dep:serde_norway"]
 auth = []
@@ -84,6 +89,8 @@ graphql-ws = []
 compare = []
 # `--prometheus-listen`: a /metrics endpoint served for the length of a run.
 prometheus = ["tokio/io-util"]
+# `--otel-endpoint`: periodic OTLP/HTTP export to an OpenTelemetry collector.
+otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:reqwest"]
 # Kept so existing `--features full` invocations keep working.
 full = ["scenario", "auth", "graphql-ws", "compare", "prometheus"]
 

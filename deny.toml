@@ -27,6 +27,11 @@ allow = [
     "MPL-2.0",
 ]
 confidence-threshold = 0.8
+# Mozilla's root certificates, which rustls-platform-verifier (under reqwest,
+# `otel` feature) depends on only for wasm32. No wsblast target builds it.
+exceptions = [
+    { crate = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
+]
 
 [bans]
 # Duplicate versions are common in a tokio/tonic/ratatui tree; report them

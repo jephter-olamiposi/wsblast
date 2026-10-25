@@ -3,14 +3,16 @@
 //! [`ExportSource`] reads the run's live counters and the latency of the most
 //! recently completed time-series interval into an [`ExportSnapshot`], and
 //! [`COUNTERS`] and the other [`MetricInfo`] constants name and describe every
-//! exported value. Exporters render from these rather than reading the run
-//! themselves, so every exporter publishes the same values under the same
-//! definitions. METHODOLOGY.md section 6.4 defines each value.
+//! exported value. Both exporters render from these, so the Prometheus
+//! endpoint and the OTLP exporter cannot disagree on what a metric means.
+//! METHODOLOGY.md section 6.4 defines each value.
 //!
 //! Nothing here runs on the measurement path: workers keep updating the same
 //! relaxed counters and interval histograms they always do, and an export
 //! reads them.
 
+#[cfg(feature = "otel")]
+pub(crate) mod otel;
 #[cfg(feature = "prometheus")]
 pub(crate) mod prometheus;
 
@@ -19,12 +21,19 @@ use crate::timeseries::IntervalStore;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Name and description of one exported metric.
+/// Name, unit and description of one exported metric.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MetricInfo {
     /// Prometheus metric name, with the `_total` suffix for counters.
+    #[cfg_attr(not(feature = "prometheus"), allow(dead_code))]
     pub(crate) prometheus: &'static str,
-    /// HELP text.
+    /// OpenTelemetry instrument name.
+    #[cfg_attr(not(feature = "otel"), allow(dead_code))]
+    pub(crate) otel: &'static str,
+    /// UCUM unit of the OpenTelemetry instrument.
+    #[cfg_attr(not(feature = "otel"), allow(dead_code))]
+    pub(crate) unit: &'static str,
+    /// HELP text and instrument description.
     pub(crate) help: &'static str,
 }
 
@@ -40,6 +49,8 @@ pub(crate) const COUNTERS: [CounterDef; 8] = [
     CounterDef {
         info: MetricInfo {
             prometheus: "wsblast_messages_sent_total",
+            otel: "wsblast.messages.sent",
+            unit: "{message}",
             help: "Data frames written successfully.",
         },
         read: |s| s.messages_sent,
@@ -47,6 +58,8 @@ pub(crate) const COUNTERS: [CounterDef; 8] = [
     CounterDef {
         info: MetricInfo {
             prometheus: "wsblast_messages_received_total",
+            otel: "wsblast.messages.received",
+            unit: "{message}",
             help: "Data frames counted as received.",
         },
         read: |s| s.messages_received,
@@ -54,6 +67,8 @@ pub(crate) const COUNTERS: [CounterDef; 8] = [
     CounterDef {
         info: MetricInfo {
             prometheus: "wsblast_bytes_sent_total",
+            otel: "wsblast.bytes.sent",
+            unit: "By",
             help: "Payload bytes of the data frames sent.",
         },
         read: |s| s.bytes_sent,
@@ -61,6 +76,8 @@ pub(crate) const COUNTERS: [CounterDef; 8] = [
     CounterDef {
         info: MetricInfo {
             prometheus: "wsblast_bytes_received_total",
+            otel: "wsblast.bytes.received",
+            unit: "By",
             help: "Payload bytes of the data frames received.",
         },
         read: |s| s.bytes_received,
@@ -68,6 +85,8 @@ pub(crate) const COUNTERS: [CounterDef; 8] = [
     CounterDef {
         info: MetricInfo {
             prometheus: "wsblast_errors_total",
+            otel: "wsblast.errors",
+            unit: "{error}",
             help: "Errors recorded in every category.",
         },
         read: |s| s.total_errors,
@@ -75,6 +94,8 @@ pub(crate) const COUNTERS: [CounterDef; 8] = [
     CounterDef {
         info: MetricInfo {
             prometheus: "wsblast_connections_established_total",
+            otel: "wsblast.connections.established",
+            unit: "{connection}",
             help: "Connection slots that completed their first handshake.",
         },
         read: |s| s.connections_established,
@@ -82,6 +103,8 @@ pub(crate) const COUNTERS: [CounterDef; 8] = [
     CounterDef {
         info: MetricInfo {
             prometheus: "wsblast_connections_failed_total",
+            otel: "wsblast.connections.failed",
+            unit: "{attempt}",
             help: "Failed handshake attempts, including failed reconnect attempts.",
         },
         read: |s| s.connections_failed,
@@ -89,6 +112,8 @@ pub(crate) const COUNTERS: [CounterDef; 8] = [
     CounterDef {
         info: MetricInfo {
             prometheus: "wsblast_reconnects_total",
+            otel: "wsblast.reconnects",
+            unit: "{connection}",
             help: "Handshakes that re-established a connection slot after it lost its connection.",
         },
         read: |s| s.reconnects,
@@ -98,24 +123,32 @@ pub(crate) const COUNTERS: [CounterDef; 8] = [
 /// Gauge: connections open now.
 pub(crate) const ACTIVE_CONNECTIONS: MetricInfo = MetricInfo {
     prometheus: "wsblast_active_connections",
+    otel: "wsblast.connections.active",
+    unit: "{connection}",
     help: "WebSocket connections currently open.",
 };
 
 /// Gauge: time since the run's clock started.
 pub(crate) const RUN_ELAPSED: MetricInfo = MetricInfo {
     prometheus: "wsblast_run_elapsed_seconds",
+    otel: "wsblast.run.elapsed",
+    unit: "s",
     help: "Seconds since the run's clock started; frozen when the run ends.",
 };
 
 /// Gauge family: latency percentiles of the last completed interval.
 pub(crate) const LATENCY: MetricInfo = MetricInfo {
     prometheus: "wsblast_latency_seconds",
+    otel: "wsblast.latency",
+    unit: "s",
     help: "Latency percentiles of the most recently completed time-series interval.",
 };
 
 /// Gauge: samples behind [`LATENCY`].
 pub(crate) const LATENCY_SAMPLES: MetricInfo = MetricInfo {
     prometheus: "wsblast_latency_samples",
+    otel: "wsblast.latency.samples",
+    unit: "{sample}",
     help: "Latency samples recorded in the most recently completed time-series interval.",
 };
 
@@ -256,6 +289,7 @@ impl ExportSource {
     }
 
     /// Reads every exported value.
+    #[cfg_attr(not(feature = "prometheus"), allow(dead_code))]
     pub(crate) fn snapshot(&self) -> ExportSnapshot {
         ExportSnapshot {
             counters: self.counters(),

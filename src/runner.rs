@@ -6,7 +6,7 @@ use crate::config::{LoadTestConfig, Stage};
 #[cfg(feature = "scenario")]
 use crate::config::{ScenarioConfig, ScenarioPhase};
 use crate::connect::ConnectTarget;
-#[cfg(feature = "prometheus")]
+#[cfg(any(feature = "prometheus", feature = "otel"))]
 use crate::export::ExportSource;
 use crate::metrics::{AggregatedMetrics, LiveMetrics, LiveSnapshot, WorkerMetrics};
 #[cfg(feature = "scenario")]
@@ -34,7 +34,7 @@ pub struct Runner {
     #[cfg(feature = "scenario")]
     scenario: Option<Arc<ScenarioPhase>>,
     /// Where the live exporters read the time series of this run.
-    #[cfg(feature = "prometheus")]
+    #[cfg(any(feature = "prometheus", feature = "otel"))]
     export: Option<Arc<ExportSource>>,
 }
 
@@ -48,7 +48,7 @@ impl Runner {
             handle_signals: true,
             #[cfg(feature = "scenario")]
             scenario: None,
-            #[cfg(feature = "prometheus")]
+            #[cfg(any(feature = "prometheus", feature = "otel"))]
             export: None,
         }
     }
@@ -74,7 +74,7 @@ impl Runner {
             cancel_token: CancellationToken::new(),
             handle_signals: true,
             scenario: Some(Arc::new(phase)),
-            #[cfg(feature = "prometheus")]
+            #[cfg(any(feature = "prometheus", feature = "otel"))]
             export: None,
         }
     }
@@ -129,7 +129,7 @@ impl Runner {
 
     /// Publishes this run's time series to the live exporters reading
     /// `export`.
-    #[cfg(feature = "prometheus")]
+    #[cfg(any(feature = "prometheus", feature = "otel"))]
     pub(crate) fn with_export(mut self, export: Option<Arc<ExportSource>>) -> Self {
         self.export = export;
         self
@@ -360,7 +360,7 @@ impl Runner {
         let start_time = Instant::now();
         let interval = interval_for(self.config.duration);
         let interval_store = IntervalStore::new(start_time, interval);
-        #[cfg(feature = "prometheus")]
+        #[cfg(any(feature = "prometheus", feature = "otel"))]
         if let Some(export) = &self.export {
             export.begin_phase(Arc::clone(&interval_store), self.latency_basis());
         }
@@ -435,7 +435,7 @@ impl Runner {
                 worker_metrics.push(metrics);
             }
         }
-        #[cfg(feature = "prometheus")]
+        #[cfg(any(feature = "prometheus", feature = "otel"))]
         if let Some(export) = &self.export {
             export.end_phase(elapsed);
         }
@@ -624,7 +624,7 @@ pub struct ScenarioExecutor {
     live_metrics: Arc<LiveMetrics>,
     cancel_token: CancellationToken,
     handle_signals: bool,
-    #[cfg(feature = "prometheus")]
+    #[cfg(any(feature = "prometheus", feature = "otel"))]
     export: Option<Arc<ExportSource>>,
 }
 
@@ -661,14 +661,14 @@ impl ScenarioExecutor {
             live_metrics: LiveMetrics::new(),
             cancel_token: CancellationToken::new(),
             handle_signals: true,
-            #[cfg(feature = "prometheus")]
+            #[cfg(any(feature = "prometheus", feature = "otel"))]
             export: None,
         })
     }
 
     /// Publishes every phase's time series to the live exporters reading
     /// `export`.
-    #[cfg(feature = "prometheus")]
+    #[cfg(any(feature = "prometheus", feature = "otel"))]
     pub(crate) fn with_export(mut self, export: Option<Arc<ExportSource>>) -> Self {
         self.export = export;
         self
@@ -752,7 +752,7 @@ impl ScenarioExecutor {
                 .with_live_metrics(Arc::clone(&self.live_metrics))
                 .with_cancel_token(self.cancel_token.child_token())
                 .with_signal_handling(false);
-            #[cfg(feature = "prometheus")]
+            #[cfg(any(feature = "prometheus", feature = "otel"))]
             let runner = runner.with_export(self.export.clone());
             let outcome = runner.run_and_collect().await?;
 

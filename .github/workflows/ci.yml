@@ -47,6 +47,7 @@ jobs:
           - graphql-ws
           - compare
           - prometheus
+          - otel
           - full
     steps:
       - uses: actions/checkout@v5
@@ -85,6 +86,9 @@ jobs:
         run: cargo test --locked --all-targets --features full
       - name: Doc tests
         run: cargo test --locked --doc --features full
+      # `otel` is not part of `full`, so its export tests run on their own.
+      - name: OpenTelemetry export tests
+        run: cargo test --locked --features full,otel --lib --test integration_test export
 
   msrv:
     name: MSRV (${{ matrix.features }})
@@ -92,7 +96,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: [none, default]
+        features: [none, default, otel]
     steps:
       - uses: actions/checkout@v5
       - name: Read rust-version from Cargo.toml

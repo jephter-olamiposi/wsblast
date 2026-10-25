@@ -55,20 +55,20 @@ impl IntervalStore {
     }
 
     /// When the run's clock started.
-    #[cfg(feature = "prometheus")]
+    #[cfg(any(feature = "prometheus", feature = "otel"))]
     pub(crate) fn start(&self) -> Instant {
         self.start
     }
 
     /// The length of one interval.
-    #[cfg(feature = "prometheus")]
+    #[cfg(any(feature = "prometheus", feature = "otel"))]
     pub(crate) fn interval(&self) -> Duration {
         self.interval
     }
 
     /// Latency of interval `bucket` from the samples workers have handed
     /// over so far. The lock is held only while the percentiles are read.
-    #[cfg(feature = "prometheus")]
+    #[cfg(any(feature = "prometheus", feature = "otel"))]
     pub(crate) fn latency_of(&self, bucket: u64) -> IntervalLatency {
         let buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
         IntervalLatency::from_histogram(buckets.get(&bucket))
