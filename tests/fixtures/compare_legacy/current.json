@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0.0",
+  "target_url": "ws://127.0.0.1:9001/",
+  "connections": 50,
+  "duration_secs": 30.004,
+  "mode": "echo",
+  "metrics": {
+    "total_connections_attempted": 50,
+    "total_connections_established": 48,
+    "total_connections_failed": 2,
+    "total_reconnects": 0,
+    "total_messages_sent": 120500,
+    "total_messages_recv": 120470,
+    "total_bytes_sent": 7712000,
+    "total_bytes_recv": 7710080,
+    "elapsed": {
+      "secs": 30,
+      "nanos": 4000000
+    },
+    "throughput_msg_per_sec": 4016.131182508999,
+    "throughput_bytes_per_sec": 514000.79989334755,
+    "error_rate": 0.00026548966249626655,
+    "handshake_latency": {
+      "count": 5000,
+      "min_us": 383,
+      "mean_us": 1380.0,
+      "max_us": 34500,
+      "std_dev_us": 460.0,
+      "p50_us": 1150,
+      "p75_us": 2300,
+      "p90_us": 3450,
+      "p95_us": 4600,
+      "p99_us": 10350,
+      "p999_us": 18400,
+      "p9999_us": 28750
+    },
+    "message_rtt": {
+      "count": 5000,
+      "min_us": 366,
+      "mean_us": 1320.0,
+      "max_us": 33000,
+      "std_dev_us": 440.0,
+      "p50_us": 1100,
+      "p75_us": 2200,
+      "p90_us": 3300,
+      "p95_us": 4400,
+      "p99_us": 9900,
+      "p999_us": 17600,
+      "p9999_us": 27500
+    },
+    "error_breakdown": {
+      "timeout": 30,
+      "tcp_connect": 2
+    }
+  },
+  "slo": {
+    "passed": true,
+    "checks": []
+  }
+}

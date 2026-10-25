@@ -1,0 +1,122 @@
+{
+  "schema_version": "1.1.0",
+  "threshold": 3.0,
+  "regressions": [
+    {
+      "metric": "handshake_latency.p50_us",
+      "baseline": 1150.0,
+      "current": 1200.0,
+      "pct_change": 4.3478260869565215
+    },
+    {
+      "metric": "handshake_latency.p95_us",
+      "baseline": 4600.0,
+      "current": 4800.0,
+      "pct_change": 4.3478260869565215
+    },
+    {
+      "metric": "handshake_latency.p999_us",
+      "baseline": 18400.0,
+      "current": 19200.0,
+      "pct_change": 4.3478260869565215
+    },
+    {
+      "metric": "handshake_latency.p99_us",
+      "baseline": 10350.0,
+      "current": 10800.0,
+      "pct_change": 4.3478260869565215
+    }
+  ],
+  "improvements": [
+    {
+      "metric": "error_rate",
+      "baseline": 0.00026548966249626655,
+      "current": 0.0,
+      "pct_change": -100.0
+    },
+    {
+      "metric": "errors.tcp_connect",
+      "baseline": 2.0,
+      "current": 0.0,
+      "pct_change": -100.0
+    },
+    {
+      "metric": "errors.timeout",
+      "baseline": 30.0,
+      "current": 0.0,
+      "pct_change": -100.0
+    },
+    {
+      "metric": "message_rtt.p50_us",
+      "baseline": 1100.0,
+      "current": 800.0,
+      "pct_change": -27.27272727272727
+    },
+    {
+      "metric": "message_rtt.p95_us",
+      "baseline": 4400.0,
+      "current": 3200.0,
+      "pct_change": -27.27272727272727
+    },
+    {
+      "metric": "message_rtt.p999_us",
+      "baseline": 17600.0,
+      "current": 12800.0,
+      "pct_change": -27.27272727272727
+    },
+    {
+      "metric": "message_rtt.p99_us",
+      "baseline": 9900.0,
+      "current": 7200.0,
+      "pct_change": -27.27272727272727
+    },
+    {
+      "metric": "throughput_bytes_per_sec",
+      "baseline": 514000.79989334755,
+      "current": 639872.0170643914,
+      "pct_change": 24.488525542598662
+    },
+    {
+      "metric": "throughput_msg_per_sec",
+      "baseline": 4016.131182508999,
+      "current": 4999.333422210371,
+      "pct_change": 24.48132780082986
+    },
+    {
+      "metric": "total_bytes_recv",
+      "baseline": 7710080.0,
+      "current": 9598720.0,
+      "pct_change": 24.495725076782602
+    },
+    {
+      "metric": "total_bytes_sent",
+      "baseline": 7712000.0,
+      "current": 9600000.0,
+      "pct_change": 24.481327800829874
+    },
+    {
+      "metric": "total_connections_established",
+      "baseline": 48.0,
+      "current": 50.0,
+      "pct_change": 4.166666666666666
+    },
+    {
+      "metric": "total_connections_failed",
+      "baseline": 2.0,
+      "current": 0.0,
+      "pct_change": -100.0
+    },
+    {
+      "metric": "total_messages_recv",
+      "baseline": 120470.0,
+      "current": 149980.0,
+      "pct_change": 24.495725076782602
+    },
+    {
+      "metric": "total_messages_sent",
+      "baseline": 120500.0,
+      "current": 150000.0,
+      "pct_change": 24.481327800829874
+    }
+  ]
+}
