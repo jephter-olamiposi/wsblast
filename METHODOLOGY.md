@@ -170,6 +170,8 @@ The progress bar and the TUI show a live "Msg/s" computed as received messages d
 
 The text and Markdown reports summarise the series in at most 10 rows. When a row covers several intervals, it shows their combined throughput and the highest p99 of any one interval: percentiles cannot be combined, so the row's latency is the worst interval, not a p99 over the whole row. The JSON report has every point.
 
+The HTML report (`--format html`, or `wsblast render` of a JSON report) plots the series without summarising it: every point is drawn, at the middle of its interval, exactly as defined above, so the worst-interval rule of the text and Markdown tables does not apply. The latency chart shows each interval's p99 of the basis named in `latency_basis`; an interval without replies has no latency and is drawn as a gap, as is the pause between scenario phases. When the p99 values span more than a factor of 50, the latency chart uses a log scale and says so.
+
 ### 6.4 Live export
 
 While a run is in progress, wsblast can publish its live counters and the latency of its time series ([section 6.3](#63-time-series)) to a monitoring system: `--prometheus-listen ADDR` serves them for scraping (`prometheus` feature, on by default) and `--otel-endpoint URL` pushes them to an OpenTelemetry collector over OTLP/HTTP (`otel` feature, opt-in). [docs/export.md](docs/export.md) shows how to set both up. Both read the same values from one place, so a value means the same thing in either system. In a scenario every phase shares the live counters, so the counters keep counting across phases.

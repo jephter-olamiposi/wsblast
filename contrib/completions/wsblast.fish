@@ -65,7 +65,8 @@ complete -c wsblast -n "__fish_wsblast_needs_command" -l graphql-ws-variables -d
 complete -c wsblast -n "__fish_wsblast_needs_command" -l graphql-ws-extensions -d 'GraphQL WS extensions (JSON)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l format -d 'Output report format' -r -f -a "text\t'Human-readable styled terminal tables'
 json\t'Schema-versioned JSON for CI parsing and metric archiving'
-markdown\t'GitHub Flavored Markdown table for PR comments and job summaries'"
+markdown\t'GitHub Flavored Markdown table for PR comments and job summaries'
+html\t'A self-contained HTML page with charts of the time series, to open in a browser or attach to a CI run'"
 complete -c wsblast -n "__fish_wsblast_needs_command" -l compare -d 'Compare two JSON reports for regression detection' -r -F
 complete -c wsblast -n "__fish_wsblast_needs_command" -l compare-threshold -d 'Regression threshold percentage (default: 10%)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l capture -d 'Record every data frame and connection event to FILE as JSON lines (see METHODOLOGY.md)' -r -F

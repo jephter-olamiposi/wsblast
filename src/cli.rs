@@ -491,4 +491,7 @@ pub enum OutputFormat {
     Json,
     /// GitHub Flavored Markdown table for PR comments and job summaries.
     Markdown,
+    /// A self-contained HTML page with charts of the time series, to open in
+    /// a browser or attach to a CI run.
+    Html,
 }

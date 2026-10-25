@@ -59,8 +59,8 @@
 //!   and [`LatencyStats`] for handshakes, echo round trips and, for paced
 //!   runs, response time.
 //! - **Gate**: [`evaluate_slos`] checks [`SloThresholds`] and returns an
-//!   [`SloEvaluation`]; [`render_report`] renders the same text, JSON or
-//!   Markdown report the CLI prints.
+//!   [`SloEvaluation`]; [`render_report`] renders the same text, JSON,
+//!   Markdown or HTML report the CLI prints.
 //! - **Scenarios** (`scenario` feature): [`ScenarioConfig`] loads a YAML
 //!   multi-phase scenario and [`ScenarioExecutor`] runs its phases in order.
 //!
@@ -143,6 +143,7 @@ mod base64;
 #[cfg(feature = "capture")]
 mod capture;
 mod cli;
+mod clock;
 mod config;
 mod connect;
 #[cfg(feature = "distributed")]
@@ -151,6 +152,7 @@ pub mod distributed;
 mod error;
 #[cfg(any(feature = "prometheus", feature = "otel"))]
 mod export;
+mod html;
 mod metrics;
 #[cfg(feature = "mock")]
 #[cfg_attr(docsrs, doc(cfg(feature = "mock")))]

@@ -200,7 +200,7 @@ _wsblast() {
                     return 0
                     ;;
                 --format)
-                    COMPREPLY=($(compgen -W "text json markdown" -- "${cur}"))
+                    COMPREPLY=($(compgen -W "text json markdown html" -- "${cur}"))
                     return 0
                     ;;
                 --compare)

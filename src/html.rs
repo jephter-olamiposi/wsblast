@@ -1,0 +1,1338 @@
+//! The `--format html` report: one self-contained page with inline CSS and
+//! inline SVG charts of the time series.
+//!
+//! The page needs no script, font, stylesheet or image from anywhere else,
+//! so it renders offline and as a CI artifact. Every string that comes from
+//! the report (target URLs, phase names, SLO check names and values) is
+//! HTML-escaped, because a saved JSON report can hold any text.
+
+use crate::report::{PercentileRow, ReportView, format_secs, format_us, latency_columns};
+use crate::timeseries::TimeSeriesPoint;
+use std::fmt::Write;
+
+/// Escapes text for use in HTML content and in quoted attribute values.
+pub(crate) fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+const STYLE: &str = r#"
+:root {
+  color-scheme: light dark;
+  --surface: #fcfcfb;
+  --panel: #ffffff;
+  --border: #e3e2de;
+  --text: #0b0b0b;
+  --text-2: #52514e;
+  --muted: #7a7974;
+  --grid: #ecebe7;
+  --axis: #b9b8b2;
+  --series: #2a78d6;
+  --series-2: #eb6834;
+  --hover: rgba(42, 120, 214, 0.10);
+  --good: #0ca30c;
+  --good-bg: #e9f7e9;
+  --bad: #d03b3b;
+  --bad-bg: #fbeaea;
+  --neutral-bg: #f0efec;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #1a1a19;
+    --panel: #222220;
+    --border: #383835;
+    --text: #f0efec;
+    --text-2: #c3c2b7;
+    --muted: #9a998f;
+    --grid: #2e2e2b;
+    --axis: #5a5953;
+    --series: #3987e5;
+    --series-2: #d95926;
+    --hover: rgba(57, 135, 229, 0.16);
+    --good-bg: #16301a;
+    --bad-bg: #3a1b1b;
+    --neutral-bg: #2b2b28;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--surface);
+  color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+main { max-width: 1000px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 1.5rem; margin: 0 0 4px; }
+h2 { font-size: 1.15rem; margin: 32px 0 12px; }
+h3 { font-size: 1rem; margin: 0 0 8px; }
+.subtitle { color: var(--text-2); margin: 0 0 16px; }
+.meta { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+.meta dt { color: var(--text-2); }
+.meta dd { margin: 0; overflow-wrap: anywhere; }
+.meta ul { margin: 0; padding-left: 18px; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+.banner { border-radius: 8px; padding: 16px; margin-top: 24px; border: 1px solid var(--border); }
+.banner.pass { background: var(--good-bg); border-color: var(--good); }
+.banner.fail { background: var(--bad-bg); border-color: var(--bad); }
+.banner.none { background: var(--neutral-bg); }
+.banner .verdict { font-size: 1.15rem; font-weight: 700; margin: 0; }
+.banner table { margin-top: 12px; }
+.ok { color: var(--good); font-weight: 600; }
+.ko { color: var(--bad); font-weight: 600; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-top: 24px; }
+.kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; }
+.kpi .label { color: var(--text-2); font-size: 0.85rem; margin: 0; }
+.kpi .value { font-size: 1.5rem; font-weight: 650; margin: 2px 0 0; font-variant-numeric: tabular-nums; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { color: var(--text-2); font-weight: 600; }
+td.num, th.num { text-align: right; }
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr)); gap: 16px; }
+figure { margin: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 12px 8px; min-width: 0; }
+figcaption { color: var(--text-2); font-size: 0.85rem; margin-top: 4px; }
+svg.chart { display: block; width: 100%; height: auto; }
+svg.chart text { fill: var(--muted); font-size: 11px; font-family: inherit; }
+svg.chart .grid { stroke: var(--grid); stroke-width: 1; }
+svg.chart .axis { stroke: var(--axis); stroke-width: 1; }
+svg.chart .line { fill: none; stroke: var(--series); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+svg.chart .dot { fill: var(--series); stroke: var(--panel); stroke-width: 2; }
+svg.chart .bar { fill: var(--series-2); }
+svg.chart .hit { fill: transparent; }
+svg.chart .hit:hover { fill: var(--hover); }
+svg.chart .empty { fill: var(--text-2); font-size: 13px; }
+details { margin-top: 6px; font-size: 0.85rem; }
+details table { margin-top: 6px; }
+details .scroll { max-height: 320px; overflow-y: auto; }
+summary { cursor: pointer; color: var(--text-2); }
+.note { color: var(--text-2); }
+footer { margin-top: 40px; color: var(--muted); font-size: 0.85rem; }
+"#;
+
+/// Renders the HTML report.
+pub(crate) fn render_html_report(view: &ReportView<'_>) -> String {
+    let mut html = String::with_capacity(64 * 1024);
+    let title_target = view
+        .phase_targets
+        .first()
+        .map_or(view.target_url, |phase| phase.target_url.as_str());
+    let _ = write!(
+        html,
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <meta name=\"color-scheme\" content=\"light dark\">\n\
+         <title>wsblast report: {}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n<main>\n",
+        escape(title_target)
+    );
+
+    render_header(&mut html, view);
+    render_slo_banner(&mut html, view);
+    render_key_numbers(&mut html, view);
+    render_latency_table(&mut html, view);
+    render_charts(&mut html, view);
+    render_errors(&mut html, view);
+    render_traffic(&mut html, view);
+
+    let _ = write!(
+        html,
+        "<footer>Generated by wsblast {}. The charts plot every point of the run's time series; \
+         see METHODOLOGY.md section 6.3 for how each interval is measured.</footer>\n\
+         </main>\n</body>\n</html>\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    html
+}
+
+fn render_header(html: &mut String, view: &ReportView<'_>) {
+    html.push_str("<header>\n<h1>wsblast WebSocket benchmark report</h1>\n");
+    html.push_str("<dl class=\"meta\">\n");
+    if view.phase_targets.is_empty() {
+        let _ = writeln!(
+            html,
+            "<dt>Target</dt><dd><code>{}</code></dd>",
+            escape(view.target_url)
+        );
+    } else {
+        html.push_str("<dt>Phases</dt><dd><ul>");
+        for phase in view.phase_targets {
+            let _ = write!(
+                html,
+                "<li>{}: <code>{}</code></li>",
+                escape(&phase.phase),
+                escape(phase.target_url.as_str())
+            );
+        }
+        html.push_str("</ul></dd>\n");
+    }
+    let _ = writeln!(html, "<dt>Mode</dt><dd>{}</dd>", escape(&view.mode));
+    if let Some((label, time)) = &view.timestamp {
+        let _ = writeln!(
+            html,
+            "<dt>{}</dt><dd>{}</dd>",
+            escape(label),
+            escape(&readable_timestamp(time))
+        );
+    }
+    let _ = writeln!(
+        html,
+        "<dt>Duration</dt><dd>{}</dd>",
+        escape(&format!("{:.2?}", view.metrics.elapsed))
+    );
+    let connections_label = if view.phase_targets.is_empty() {
+        "Connections"
+    } else {
+        "Connections (all phases)"
+    };
+    let _ = writeln!(
+        html,
+        "<dt>{connections_label}</dt><dd>{}</dd>",
+        view.connections
+    );
+    if let Some(stages) = &view.stages {
+        let _ = writeln!(
+            html,
+            "<dt>Load stages</dt><dd><code>{}</code></dd>",
+            escape(stages)
+        );
+    }
+    let rate = match view.rate_per_conn {
+        Some(0) => "Unthrottled".to_string(),
+        Some(rate) => format!("{rate} msg/s per connection"),
+        None => "Not recorded in the JSON report".to_string(),
+    };
+    let _ = writeln!(html, "<dt>Rate</dt><dd>{}</dd>", escape(&rate));
+    html.push_str("</dl>\n</header>\n");
+}
+
+/// `2026-10-25T14:03:07.123Z` as `2026-10-25 14:03:07 UTC`; other text is
+/// returned unchanged.
+fn readable_timestamp(time: &str) -> String {
+    match (time.get(..10), time.get(11..19)) {
+        (Some(date), Some(clock))
+            if time.ends_with('Z') && time.as_bytes().get(10) == Some(&b'T') =>
+        {
+            format!("{date} {clock} UTC")
+        }
+        _ => time.to_string(),
+    }
+}
+
+fn render_slo_banner(html: &mut String, view: &ReportView<'_>) {
+    let slo = view.slo;
+    let total = slo.checks.len();
+    let failed = slo.checks.iter().filter(|check| !check.passed).count();
+    let (class, verdict) = if total == 0 {
+        ("none", "No SLO thresholds were set".to_string())
+    } else if slo.passed && failed == 0 {
+        (
+            "pass",
+            format!(
+                "PASS: {} SLO check{} passed",
+                if total == 1 { "the" } else { "all" },
+                if total == 1 { "" } else { "s" }
+            ),
+        )
+    } else {
+        (
+            "fail",
+            format!("FAIL: {failed} of {total} SLO checks failed"),
+        )
+    };
+    let icon = match class {
+        "pass" => "\u{2713} ",
+        "fail" => "\u{2717} ",
+        _ => "",
+    };
+    let _ = write!(
+        html,
+        "<section class=\"banner {class}\" aria-label=\"SLO gate\">\n<p class=\"verdict\">{icon}{}</p>\n",
+        escape(&verdict)
+    );
+    if total > 0 {
+        html.push_str(
+            "<div class=\"scroll\"><table>\n<thead><tr><th scope=\"col\">Objective</th>\
+             <th scope=\"col\">Target</th><th scope=\"col\">Actual</th>\
+             <th scope=\"col\">Result</th></tr></thead>\n<tbody>\n",
+        );
+        for check in &slo.checks {
+            let result = if check.passed {
+                "<span class=\"ok\">\u{2713} Pass</span>"
+            } else {
+                "<span class=\"ko\">\u{2717} Fail</span>"
+            };
+            let _ = writeln!(
+                html,
+                "<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td><td>{result}</td></tr>",
+                escape(&check.name),
+                escape(&check.target),
+                escape(&check.actual)
+            );
+        }
+        html.push_str("</tbody></table></div>\n");
+    }
+    html.push_str("</section>\n");
+}
+
+/// The latency the SLO gate reads: response time for paced runs, RTT
+/// otherwise, as [`evaluate_slos`](crate::evaluate_slos) chooses it.
+fn gating_latency<'a>(view: &ReportView<'a>) -> (&'static str, &'a crate::LatencyStats) {
+    if view.metrics.response_time.count > 0 {
+        ("Response time", &view.metrics.response_time)
+    } else {
+        ("RTT", &view.metrics.message_rtt)
+    }
+}
+
+fn render_key_numbers(html: &mut String, view: &ReportView<'_>) {
+    let metrics = view.metrics;
+    let (basis, stats) = gating_latency(view);
+    let latency = |value: u64| {
+        if stats.count == 0 {
+            "no samples".to_string()
+        } else {
+            format_us(value)
+        }
+    };
+    let tiles = [
+        (
+            "Throughput".to_string(),
+            format!("{} msg/s", format_number(metrics.throughput_msg_per_sec)),
+        ),
+        (
+            "Error rate".to_string(),
+            format!("{:.2}%", metrics.error_rate * 100.0),
+        ),
+        (format!("{basis} p50"), latency(stats.p50_us)),
+        (format!("{basis} p99"), latency(stats.p99_us)),
+        (
+            "Connections established".to_string(),
+            format!(
+                "{} / {}",
+                metrics.total_connections_established, metrics.total_connections_attempted
+            ),
+        ),
+    ];
+    html.push_str("<section class=\"kpis\" aria-label=\"Key numbers\">\n");
+    for (label, value) in tiles {
+        let _ = writeln!(
+            html,
+            "<div class=\"kpi\"><p class=\"label\">{}</p><p class=\"value\">{}</p></div>",
+            escape(&label),
+            escape(&value)
+        );
+    }
+    html.push_str("</section>\n");
+}
+
+fn render_latency_table(html: &mut String, view: &ReportView<'_>) {
+    let columns = latency_columns(view.metrics);
+    html.push_str("<section>\n<h2>Latency percentiles</h2>\n<div class=\"scroll\"><table>\n<thead><tr><th scope=\"col\">Percentile</th>");
+    for (name, _) in &columns {
+        let _ = write!(
+            html,
+            "<th scope=\"col\" class=\"num\">{}</th>",
+            escape(name)
+        );
+    }
+    html.push_str("</tr></thead>\n<tbody>\n");
+    let rows: [PercentileRow; 9] = [
+        ("p50", |s| s.p50_us),
+        ("p75", |s| s.p75_us),
+        ("p90", |s| s.p90_us),
+        ("p95", |s| s.p95_us),
+        ("p99", |s| s.p99_us),
+        ("p99.9", |s| s.p999_us),
+        ("p99.99", |s| s.p9999_us),
+        ("Min", |s| s.min_us),
+        ("Max", |s| s.max_us),
+    ];
+    for (label, value) in rows {
+        let _ = write!(html, "<tr><th scope=\"row\">{label}</th>");
+        for (_, stats) in &columns {
+            let cell = if stats.count == 0 {
+                "n/a".to_string()
+            } else {
+                format_us(value(stats))
+            };
+            let _ = write!(html, "<td class=\"num\">{}</td>", escape(&cell));
+        }
+        html.push_str("</tr>\n");
+    }
+    html.push_str("<tr><th scope=\"row\">Mean</th>");
+    for (_, stats) in &columns {
+        let cell = if stats.count == 0 {
+            "n/a".to_string()
+        } else {
+            format_us(stats.mean_us.max(0.0) as u64)
+        };
+        let _ = write!(html, "<td class=\"num\">{}</td>", escape(&cell));
+    }
+    html.push_str("</tr>\n<tr><th scope=\"row\">Samples</th>");
+    for (_, stats) in &columns {
+        let _ = write!(html, "<td class=\"num\">{}</td>", stats.count);
+    }
+    html.push_str("</tr>\n</tbody></table></div>\n</section>\n");
+}
+
+fn render_errors(html: &mut String, view: &ReportView<'_>) {
+    html.push_str("<section>\n<h2>Errors</h2>\n");
+    let breakdown = &view.metrics.error_breakdown;
+    if breakdown.is_empty() {
+        html.push_str("<p class=\"note\">No errors were recorded.</p>\n</section>\n");
+        return;
+    }
+    let mut rows: Vec<(String, String, u64)> = breakdown
+        .iter()
+        .map(|(category, count)| {
+            let code = serde_json::to_value(category)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            (category.to_string(), code, *count)
+        })
+        .collect();
+    rows.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
+    let total: u64 = rows.iter().map(|row| row.2).sum();
+    html.push_str(
+        "<div class=\"scroll\"><table>\n<thead><tr><th scope=\"col\">Category</th>\
+         <th scope=\"col\">Code</th><th scope=\"col\" class=\"num\">Occurrences</th>\
+         <th scope=\"col\" class=\"num\">Share</th></tr></thead>\n<tbody>\n",
+    );
+    for (name, code, count) in rows {
+        let share = count as f64 / total.max(1) as f64 * 100.0;
+        let _ = writeln!(
+            html,
+            "<tr><td>{}</td><td><code>{}</code></td><td class=\"num\">{count}</td><td class=\"num\">{share:.1}%</td></tr>",
+            escape(&name),
+            escape(&code)
+        );
+    }
+    html.push_str("</tbody></table></div>\n</section>\n");
+}
+
+fn render_traffic(html: &mut String, view: &ReportView<'_>) {
+    let m = view.metrics;
+    let mut rows: Vec<(&str, String)> = vec![
+        (
+            "Connections attempted",
+            m.total_connections_attempted.to_string(),
+        ),
+        (
+            "Connections established",
+            m.total_connections_established.to_string(),
+        ),
+        ("Connections failed", m.total_connections_failed.to_string()),
+    ];
+    if m.total_connections_interrupted > 0 {
+        rows.push((
+            "Connections interrupted (still connecting at end of run)",
+            m.total_connections_interrupted.to_string(),
+        ));
+    }
+    if m.total_connections_not_started > 0 {
+        rows.push((
+            "Connections not started (ramp cut short by --duration)",
+            m.total_connections_not_started.to_string(),
+        ));
+    }
+    rows.push(("Reconnects", m.total_reconnects.to_string()));
+    rows.push((
+        "Messages sent / received",
+        format!("{} / {}", m.total_messages_sent, m.total_messages_recv),
+    ));
+    if m.total_unsolicited_frames > 0 {
+        rows.push((
+            "Unsolicited frames (skipped by --match)",
+            m.total_unsolicited_frames.to_string(),
+        ));
+    }
+    rows.push((
+        "Data sent / received",
+        format!(
+            "{:.2} MB / {:.2} MB",
+            m.total_bytes_sent as f64 / (1024.0 * 1024.0),
+            m.total_bytes_recv as f64 / (1024.0 * 1024.0)
+        ),
+    ));
+    rows.push((
+        "Bandwidth",
+        format!("{:.2} MB/s", m.throughput_bytes_per_sec / (1024.0 * 1024.0)),
+    ));
+    if let Some(capture) = &m.capture {
+        rows.push((
+            "Capture",
+            format!(
+                "{} frames written, {} dropped ({})",
+                capture.frames_written, capture.frames_dropped, capture.path
+            ),
+        ));
+    }
+    html.push_str(
+        "<section>\n<h2>Connections and traffic</h2>\n<div class=\"scroll\"><table>\n<tbody>\n",
+    );
+    for (label, value) in rows {
+        let _ = writeln!(
+            html,
+            "<tr><th scope=\"row\">{}</th><td class=\"num\">{}</td></tr>",
+            escape(label),
+            escape(&value)
+        );
+    }
+    html.push_str("</tbody></table></div>\n</section>\n");
+}
+
+fn render_charts(html: &mut String, view: &ReportView<'_>) {
+    let series = &view.metrics.time_series;
+    html.push_str("<section>\n<h2>Over time</h2>\n");
+    if series.points.is_empty() {
+        html.push_str(
+            "<p class=\"note\">This report has no time series. Reports written by wsblast 0.2 \
+             and earlier do not record one.</p>\n</section>\n",
+        );
+        return;
+    }
+    let basis = match series.latency_basis.as_str() {
+        "response_time" => "response time",
+        "mixed" => "latency (RTT or response time by phase)",
+        _ => "RTT",
+    };
+    let _ = writeln!(
+        html,
+        "<p class=\"note\">{} intervals{}. Each point is one interval of the time series; \
+         hover a chart for the value of an interval, or open its data table.</p>",
+        series.points.len(),
+        if series.interval_secs > 0.0 {
+            format!(" of {}", format_secs(series.interval_secs))
+        } else {
+            String::new()
+        }
+    );
+    html.push_str("<div class=\"charts\">\n");
+    let points = &series.points;
+    let charts = [
+        Chart {
+            id: "throughput",
+            title: "Throughput per interval".to_string(),
+            unit: "msg/s",
+            kind: ChartKind::Line,
+            integer: false,
+            allow_log: false,
+            values: points
+                .iter()
+                .map(|p| finite(p.throughput_msg_per_sec))
+                .collect(),
+            caption: "The larger of messages sent and received, per second of the interval."
+                .to_string(),
+        },
+        Chart {
+            id: "latency",
+            title: format!("p99 {basis} per interval"),
+            unit: "ms",
+            kind: ChartKind::Line,
+            integer: false,
+            allow_log: true,
+            values: points
+                .iter()
+                .map(|p| (p.latency.count > 0).then(|| p.latency.p99_us as f64 / 1_000.0))
+                .collect(),
+            caption: "Latency of the replies that arrived in each interval; intervals \
+                      without replies are left as gaps."
+                .to_string(),
+        },
+        Chart {
+            id: "connections",
+            title: "Active connections".to_string(),
+            unit: "connections",
+            kind: ChartKind::Line,
+            integer: true,
+            allow_log: false,
+            values: points
+                .iter()
+                .map(|p| Some(p.active_connections as f64))
+                .collect(),
+            caption: "Connections open at the end of each interval.".to_string(),
+        },
+        Chart {
+            id: "errors",
+            title: "Errors per interval".to_string(),
+            unit: "errors",
+            kind: ChartKind::Bars,
+            integer: true,
+            allow_log: false,
+            values: points.iter().map(|p| Some(p.errors as f64)).collect(),
+            caption: "Errors of every category recorded in each interval.".to_string(),
+        },
+    ];
+    for chart in &charts {
+        render_chart(html, chart, points);
+    }
+    html.push_str("</div>\n</section>\n");
+}
+
+fn finite(value: f64) -> Option<f64> {
+    value.is_finite().then_some(value.max(0.0))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChartKind {
+    Line,
+    Bars,
+}
+
+/// One chart: a value (or a gap) per time series point.
+struct Chart {
+    id: &'static str,
+    title: String,
+    unit: &'static str,
+    kind: ChartKind,
+    /// Counts: ticks are whole numbers.
+    integer: bool,
+    /// Switches to a log scale when the values span more than
+    /// [`LOG_SPAN`] times, so a stall does not flatten the rest.
+    allow_log: bool,
+    values: Vec<Option<f64>>,
+    caption: String,
+}
+
+const WIDTH: f64 = 640.0;
+const HEIGHT: f64 = 240.0;
+const LEFT: f64 = 56.0;
+const RIGHT: f64 = 14.0;
+const TOP: f64 = 22.0;
+const BOTTOM: f64 = 30.0;
+/// The ratio of largest to smallest value above which a chart that allows
+/// it uses a log scale.
+const LOG_SPAN: f64 = 50.0;
+
+/// A y scale from data values to SVG coordinates.
+enum Scale {
+    Linear { max: f64, step: f64 },
+    Log { lo: f64, hi: f64 },
+}
+
+impl Scale {
+    fn y(&self, value: f64) -> f64 {
+        let plot = HEIGHT - TOP - BOTTOM;
+        let fraction = match *self {
+            Self::Linear { max, .. } => value / max,
+            Self::Log { lo, hi } => {
+                (value.max(lo).log10() - lo.log10()) / (hi.log10() - lo.log10())
+            }
+        };
+        TOP + plot * (1.0 - fraction.clamp(0.0, 1.0))
+    }
+
+    fn ticks(&self) -> Vec<f64> {
+        match *self {
+            Self::Linear { max, step } => (0..)
+                .map(|i| f64::from(i) * step)
+                .take_while(|tick| *tick <= max * (1.0 + 1e-9))
+                .take(20)
+                .collect(),
+            Self::Log { lo, hi } => {
+                let mut ticks = Vec::new();
+                let mut tick = lo;
+                while tick <= hi * (1.0 + 1e-9) {
+                    ticks.push(tick);
+                    tick *= 10.0;
+                }
+                ticks
+            }
+        }
+    }
+}
+
+fn scale_for(chart: &Chart) -> Scale {
+    let present = chart.values.iter().flatten().copied();
+    let max = present.clone().fold(0.0_f64, f64::max);
+    let min_positive = present.filter(|v| *v > 0.0).fold(f64::INFINITY, f64::min);
+    if chart.allow_log && min_positive.is_finite() && max / min_positive > LOG_SPAN {
+        let lo = 10f64.powf(min_positive.log10().floor());
+        let mut hi = 10f64.powf(max.log10().ceil());
+        if hi <= lo {
+            hi = lo * 10.0;
+        }
+        return Scale::Log { lo, hi };
+    }
+    // An all-zero series gets a 0 to 1 axis.
+    let span = if max > 0.0 { max } else { 1.0 };
+    let mut step = nice_step(span, 4.0);
+    if chart.integer {
+        step = step.max(1.0);
+    }
+    Scale::Linear {
+        max: ((span / step).ceil() * step).max(step),
+        step,
+    }
+}
+
+/// A 1, 2 or 5 times a power of ten step that divides `span` into about
+/// `count` parts.
+fn nice_step(span: f64, count: f64) -> f64 {
+    if !(span.is_finite() && span > 0.0) {
+        return 1.0;
+    }
+    let raw = span / count;
+    let magnitude = 10f64.powf(raw.log10().floor());
+    let normalized = raw / magnitude;
+    let nice = if normalized <= 1.0 {
+        1.0
+    } else if normalized <= 2.0 {
+        2.0
+    } else if normalized <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    nice * magnitude
+}
+
+/// A short axis label: `0`, `0.25`, `12`, `1.5k`, `2M`.
+fn format_tick(value: f64) -> String {
+    let trim = |text: String| {
+        if text.contains('.') {
+            text.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            text
+        }
+    };
+    let abs = value.abs();
+    if abs == 0.0 {
+        "0".to_string()
+    } else if abs >= 1e6 {
+        format!("{}M", trim(format!("{:.2}", value / 1e6)))
+    } else if abs >= 1e4 {
+        format!("{}k", trim(format!("{:.1}", value / 1e3)))
+    } else if abs >= 10.0 {
+        format!("{value:.0}")
+    } else if abs >= 1.0 {
+        trim(format!("{value:.2}"))
+    } else {
+        trim(format!("{value:.3}"))
+    }
+}
+
+/// A value for tooltips, tables and descriptions.
+fn format_number(value: f64) -> String {
+    if value >= 100.0 {
+        format!("{value:.0}")
+    } else if value >= 10.0 {
+        format!("{value:.1}")
+    } else {
+        format!("{value:.2}")
+    }
+}
+
+fn format_value(chart: &Chart, value: f64) -> String {
+    if chart.integer {
+        format!("{value:.0} {}", chart.unit)
+    } else {
+        format!("{} {}", format_number(value), chart.unit)
+    }
+}
+
+/// The time axis: seconds, or minutes for runs longer than ten minutes.
+struct TimeAxis {
+    x0: f64,
+    span: f64,
+}
+
+impl TimeAxis {
+    fn new(points: &[TimeSeriesPoint]) -> Self {
+        let x0 = points
+            .iter()
+            .map(|p| p.start_secs)
+            .filter(|v| v.is_finite())
+            .fold(f64::INFINITY, f64::min);
+        let x0 = if x0.is_finite() { x0 } else { 0.0 };
+        let x1 = points
+            .iter()
+            .map(|p| p.start_secs + p.duration_secs.max(0.0))
+            .filter(|v| v.is_finite())
+            .fold(x0, f64::max);
+        let span = x1 - x0;
+        Self {
+            x0,
+            span: if span > 0.0 { span } else { 1.0 },
+        }
+    }
+
+    fn x(&self, secs: f64) -> f64 {
+        let fraction = if secs.is_finite() {
+            ((secs - self.x0) / self.span).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        LEFT + (WIDTH - LEFT - RIGHT) * fraction
+    }
+
+    fn ticks(&self) -> Vec<(f64, String)> {
+        let minutes = self.span > 600.0;
+        let unit = if minutes { 60.0 } else { 1.0 };
+        let step = nice_step(self.span / unit, 5.0) * unit;
+        let first = (self.x0 / step).ceil() * step;
+        (0..)
+            .map(|i| first + f64::from(i) * step)
+            .take_while(|tick| *tick <= self.x0 + self.span * (1.0 + 1e-9))
+            .take(50)
+            .map(|tick| {
+                let label = if minutes {
+                    format!("{}m", format_tick(tick / 60.0))
+                } else {
+                    format!("{}s", format_tick(tick))
+                };
+                (tick, label)
+            })
+            .collect()
+    }
+}
+
+/// Whether `next` starts noticeably later than `previous` ends, as across
+/// the pause between scenario phases.
+fn is_time_gap(previous: &TimeSeriesPoint, next: &TimeSeriesPoint) -> bool {
+    let end = previous.start_secs + previous.duration_secs.max(0.0);
+    next.start_secs - end > 0.25 * previous.duration_secs.max(0.001)
+}
+
+/// The unit suffix of a chart heading, left out when the title already
+/// names the unit.
+fn heading_unit(chart: &Chart, log: bool) -> String {
+    let named = chart.title.to_lowercase().contains(chart.unit);
+    match (named, log) {
+        (true, false) => String::new(),
+        (true, true) => " (log scale)".to_string(),
+        (false, false) => format!(" ({})", chart.unit),
+        (false, true) => format!(" ({}, log scale)", chart.unit),
+    }
+}
+
+fn render_chart(html: &mut String, chart: &Chart, points: &[TimeSeriesPoint]) {
+    let axis = TimeAxis::new(points);
+    let scale = scale_for(chart);
+    let log = matches!(scale, Scale::Log { .. });
+    let title_id = format!("chart-{}-title", chart.id);
+    let desc_id = format!("chart-{}-desc", chart.id);
+    let description = describe(chart, points);
+
+    let _ = write!(
+        html,
+        "<figure>\n<h3 id=\"chart-{id}-heading\">{title}{unit}</h3>\n\
+         <svg class=\"chart\" viewBox=\"0 0 {WIDTH} {HEIGHT}\" role=\"img\" \
+         aria-labelledby=\"{title_id} {desc_id}\">\n\
+         <title id=\"{title_id}\">{title}</title>\n<desc id=\"{desc_id}\">{desc}</desc>\n",
+        id = chart.id,
+        title = escape(&chart.title),
+        unit = escape(&heading_unit(chart, log)),
+        desc = escape(&description),
+    );
+
+    // Grid lines and y labels.
+    for tick in scale.ticks() {
+        let y = scale.y(tick);
+        let _ = writeln!(
+            html,
+            "<line class=\"grid\" x1=\"{LEFT}\" x2=\"{:.1}\" y1=\"{y:.1}\" y2=\"{y:.1}\"/>\
+             <text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\">{}</text>",
+            WIDTH - RIGHT,
+            LEFT - 6.0,
+            y + 4.0,
+            escape(&format_tick(tick))
+        );
+    }
+    let _ = writeln!(
+        html,
+        "<text x=\"{LEFT}\" y=\"12\">{}</text>",
+        escape(chart.unit)
+    );
+    // The time axis.
+    let baseline = HEIGHT - BOTTOM;
+    let _ = writeln!(
+        html,
+        "<line class=\"axis\" x1=\"{LEFT}\" x2=\"{:.1}\" y1=\"{baseline:.1}\" y2=\"{baseline:.1}\"/>",
+        WIDTH - RIGHT
+    );
+    for (tick, label) in axis.ticks() {
+        let x = axis.x(tick);
+        let _ = writeln!(
+            html,
+            "<line class=\"axis\" x1=\"{x:.1}\" x2=\"{x:.1}\" y1=\"{baseline:.1}\" y2=\"{:.1}\"/>\
+             <text x=\"{x:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text>",
+            baseline + 4.0,
+            baseline + 17.0,
+            escape(&label)
+        );
+    }
+
+    let present = chart.values.iter().flatten().count();
+    if present == 0 {
+        let _ = writeln!(
+            html,
+            "<text class=\"empty\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">No data in any interval</text>",
+            LEFT + (WIDTH - LEFT - RIGHT) / 2.0,
+            TOP + (HEIGHT - TOP - BOTTOM) / 2.0
+        );
+    }
+
+    match chart.kind {
+        ChartKind::Line => render_line(html, chart, points, &axis, &scale),
+        ChartKind::Bars => render_bars(html, chart, points, &axis, &scale),
+    }
+
+    // Hover targets: one transparent column per interval with its value.
+    for (point, value) in points.iter().zip(&chart.values) {
+        let x0 = axis.x(point.start_secs);
+        let x1 = axis.x(point.start_secs + point.duration_secs.max(0.0));
+        let label = match value {
+            Some(value) => format_value(chart, *value),
+            None => "no replies".to_string(),
+        };
+        let _ = writeln!(
+            html,
+            "<rect class=\"hit\" x=\"{x0:.1}\" y=\"{TOP}\" width=\"{:.1}\" height=\"{:.1}\">\
+             <title>{} to {}: {}</title></rect>",
+            (x1 - x0).max(1.0),
+            HEIGHT - TOP - BOTTOM,
+            escape(&format_secs(point.start_secs)),
+            escape(&format_secs(point.start_secs + point.duration_secs)),
+            escape(&label)
+        );
+    }
+    html.push_str("</svg>\n");
+    let _ = writeln!(html, "<figcaption>{}</figcaption>", escape(&chart.caption));
+    render_chart_table(html, chart, points);
+    html.push_str("</figure>\n");
+}
+
+/// Draws a line through the middle of each interval, broken at intervals
+/// without a value and at gaps in time. A point with no neighbour to join
+/// is drawn as a dot.
+fn render_line(
+    html: &mut String,
+    chart: &Chart,
+    points: &[TimeSeriesPoint],
+    axis: &TimeAxis,
+    scale: &Scale,
+) {
+    let mut runs: Vec<Vec<(f64, f64)>> = Vec::new();
+    let mut current: Vec<(f64, f64)> = Vec::new();
+    let mut previous: Option<&TimeSeriesPoint> = None;
+    for (point, value) in points.iter().zip(&chart.values) {
+        let gap = previous.is_some_and(|prev| is_time_gap(prev, point));
+        if (value.is_none() || gap) && !current.is_empty() {
+            runs.push(std::mem::take(&mut current));
+        }
+        if let Some(value) = value {
+            let x = axis.x(point.start_secs + point.duration_secs.max(0.0) / 2.0);
+            current.push((x, scale.y(*value)));
+        }
+        previous = Some(point);
+    }
+    if !current.is_empty() {
+        runs.push(current);
+    }
+    let mut path = String::new();
+    let mut dots = String::new();
+    for run in &runs {
+        if let [(x, y)] = run.as_slice() {
+            let _ = write!(
+                dots,
+                "<circle class=\"dot\" cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"4\"/>"
+            );
+            continue;
+        }
+        for (i, (x, y)) in run.iter().enumerate() {
+            let _ = write!(path, "{}{x:.1} {y:.1}", if i == 0 { "M" } else { "L" });
+        }
+    }
+    if !path.is_empty() {
+        let _ = writeln!(html, "<path class=\"line\" d=\"{path}\"/>");
+    }
+    if !dots.is_empty() {
+        let _ = writeln!(html, "{dots}");
+    }
+}
+
+fn render_bars(
+    html: &mut String,
+    chart: &Chart,
+    points: &[TimeSeriesPoint],
+    axis: &TimeAxis,
+    scale: &Scale,
+) {
+    let baseline = scale.y(0.0);
+    for (point, value) in points.iter().zip(&chart.values) {
+        let Some(value) = value.filter(|v| *v > 0.0) else {
+            continue;
+        };
+        let x0 = axis.x(point.start_secs);
+        let x1 = axis.x(point.start_secs + point.duration_secs.max(0.0));
+        // A 1-unit gap between neighbouring bars when they are wide enough.
+        let inset = if x1 - x0 > 3.0 { 0.5 } else { 0.0 };
+        let y = scale.y(value).min(baseline - 1.0);
+        let _ = writeln!(
+            html,
+            "<rect class=\"bar\" x=\"{:.1}\" y=\"{y:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"1\"/>",
+            x0 + inset,
+            (x1 - x0 - 2.0 * inset).max(0.8),
+            baseline - y
+        );
+    }
+}
+
+fn render_chart_table(html: &mut String, chart: &Chart, points: &[TimeSeriesPoint]) {
+    let _ = write!(
+        html,
+        "<details>\n<summary>Data table ({} interval{})</summary>\n<div class=\"scroll\"><table>\n\
+         <thead><tr><th scope=\"col\">Start</th><th scope=\"col\">End</th>\
+         <th scope=\"col\" class=\"num\">{} ({})</th></tr></thead>\n<tbody>\n",
+        points.len(),
+        if points.len() == 1 { "" } else { "s" },
+        escape(&chart.title),
+        escape(chart.unit)
+    );
+    for (point, value) in points.iter().zip(&chart.values) {
+        let cell = match value {
+            Some(value) if chart.integer => format!("{value:.0}"),
+            Some(value) => format_number(*value),
+            None => "no replies".to_string(),
+        };
+        let _ = writeln!(
+            html,
+            "<tr><td>{}</td><td>{}</td><td class=\"num\">{}</td></tr>",
+            escape(&format_secs(point.start_secs)),
+            escape(&format_secs(point.start_secs + point.duration_secs)),
+            escape(&cell)
+        );
+    }
+    html.push_str("</tbody></table></div>\n</details>\n");
+}
+
+/// The chart's text alternative: the extent of the series and its extremes.
+fn describe(chart: &Chart, points: &[TimeSeriesPoint]) -> String {
+    let axis = TimeAxis::new(points);
+    let mut text = format!(
+        "{} interval{} from {} to {}.",
+        points.len(),
+        if points.len() == 1 { "" } else { "s" },
+        format_secs(axis.x0),
+        format_secs(axis.x0 + axis.span)
+    );
+    let present: Vec<(&TimeSeriesPoint, f64)> = points
+        .iter()
+        .zip(&chart.values)
+        .filter_map(|(point, value)| value.map(|v| (point, v)))
+        .collect();
+    let Some(&(max_point, max)) = present.iter().max_by(|a, b| a.1.total_cmp(&b.1)) else {
+        text.push_str(" No interval has a value.");
+        return text;
+    };
+    if max == 0.0 {
+        text.push_str(" Every value is zero.");
+        return text;
+    }
+    let &(min_point, min) = present
+        .iter()
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .expect("present is not empty");
+    let _ = write!(
+        text,
+        " Highest {} in the interval starting at {}; lowest {} at {}.",
+        format_value(chart, max),
+        format_secs(max_point.start_secs),
+        format_value(chart, min),
+        format_secs(min_point.start_secs)
+    );
+    let missing = points.len() - present.len();
+    if missing > 0 {
+        let _ = write!(
+            text,
+            " {missing} interval{} had no replies.",
+            if missing == 1 { "" } else { "s" }
+        );
+    }
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::{AggregatedMetrics, LatencyStats};
+    use crate::report::{PhaseTarget, SloCheck, SloEvaluation};
+    use crate::timeseries::{IntervalLatency, TimeSeries};
+    use std::borrow::Cow;
+    use std::time::Duration;
+
+    fn metrics_with(points: Vec<TimeSeriesPoint>) -> AggregatedMetrics {
+        let mut metrics =
+            AggregatedMetrics::merge(Vec::new(), Duration::from_secs(10), 0).expect("merge");
+        metrics.time_series = TimeSeries {
+            interval_secs: 1.0,
+            latency_basis: "rtt".into(),
+            points,
+        };
+        metrics
+    }
+
+    fn point(i: usize, value: u64) -> TimeSeriesPoint {
+        TimeSeriesPoint {
+            start_secs: i as f64,
+            duration_secs: 1.0,
+            active_connections: value,
+            messages_sent: value * 10,
+            messages_recv: value * 10,
+            errors: value % 3,
+            throughput_msg_per_sec: (value * 10) as f64,
+            latency: IntervalLatency {
+                count: value,
+                p50_us: value * 100,
+                p90_us: value * 200,
+                p99_us: value * 300,
+                max_us: value * 400,
+            },
+            ..TimeSeriesPoint::default()
+        }
+    }
+
+    fn view<'a>(
+        metrics: &'a AggregatedMetrics,
+        slo: &'a SloEvaluation,
+        phases: &'a [PhaseTarget],
+        target: &'a str,
+    ) -> ReportView<'a> {
+        ReportView {
+            target_url: target,
+            connections: 4,
+            mode: Cow::Borrowed("Echo"),
+            rate_per_conn: Some(10),
+            stages: None,
+            phase_targets: phases,
+            timestamp: Some(("Finished", "2026-10-25T10:00:00.000Z".into())),
+            metrics,
+            slo,
+        }
+    }
+
+    fn no_slo() -> SloEvaluation {
+        SloEvaluation {
+            passed: true,
+            checks: Vec::new(),
+        }
+    }
+
+    /// Structural checks every rendered page must pass.
+    fn assert_well_formed(html: &str) {
+        assert!(
+            html.starts_with("<!doctype html>\n<html lang=\"en\">"),
+            "{html}"
+        );
+        assert!(html.trim_end().ends_with("</html>"));
+        assert_eq!(html.matches("<svg").count(), html.matches("</svg>").count());
+        assert!(!html.contains("<script"), "no script allowed");
+        for external in ["http://", "https://", "@import", "url("] {
+            assert!(!html.contains(external), "found {external}");
+        }
+        assert!(!html.contains("NaN") && !html.contains("inf"), "{html}");
+        assert!(!html.contains('\u{2014}'), "no em dash");
+    }
+
+    fn svg_count(html: &str) -> usize {
+        html.matches("<svg class=\"chart\"").count()
+    }
+
+    #[test]
+    fn page_is_self_contained_with_one_svg_per_chart() {
+        let metrics = metrics_with((0..25).map(|i| point(i, 5 + i as u64)).collect());
+        let slo = no_slo();
+        let html = render_html_report(&view(&metrics, &slo, &[], "ws://127.0.0.1:9001/"));
+        assert_well_formed(&html);
+        assert_eq!(svg_count(&html), 4);
+        assert_eq!(html.matches("<title id=\"chart-").count(), 4);
+        assert_eq!(html.matches("<desc id=\"chart-").count(), 4);
+        assert_eq!(html.matches("<details>").count(), 4);
+        assert!(html.contains("prefers-color-scheme: dark"));
+        assert!(html.contains("No SLO thresholds were set"));
+        assert!(html.contains("2026-10-25 10:00:00 UTC"));
+        assert!(html.contains("10 msg/s per connection"));
+    }
+
+    #[test]
+    fn charts_handle_zero_one_and_six_hundred_points() {
+        let slo = no_slo();
+        for count in [0usize, 1, 2, 600] {
+            let metrics = metrics_with((0..count).map(|i| point(i, i as u64 % 7)).collect());
+            let html = render_html_report(&view(&metrics, &slo, &[], "ws://h/"));
+            assert_well_formed(&html);
+            if count == 0 {
+                assert_eq!(svg_count(&html), 0);
+                assert!(html.contains("no time series"));
+                continue;
+            }
+            assert_eq!(svg_count(&html), 4, "{count} points");
+            assert_eq!(
+                html.matches("<rect class=\"hit\"").count(),
+                4 * count,
+                "{count} points"
+            );
+            assert_eq!(
+                html.matches("<tr><td>").count(),
+                4 * count,
+                "one table row per point and chart"
+            );
+        }
+
+        // A single point with a value is drawn as a dot, not a path.
+        let metrics = metrics_with(vec![point(0, 3)]);
+        let html = render_html_report(&view(&metrics, &slo, &[], "ws://h/"));
+        assert!(html.contains("<circle class=\"dot\""));
+        assert!(!html.contains("<path class=\"line\""));
+    }
+
+    #[test]
+    fn all_zero_series_and_gaps_render_without_dividing_by_zero() {
+        let slo = no_slo();
+        let zero = metrics_with((0..10).map(|i| point(i, 0)).collect());
+        let html = render_html_report(&view(&zero, &slo, &[], "ws://h/"));
+        assert_well_formed(&html);
+        assert!(html.contains("Every value is zero."));
+        assert!(
+            html.contains("No data in any interval"),
+            "latency has no replies"
+        );
+        let errors_svg = &html[html.find("id=\"chart-errors-title\"").unwrap()..];
+        let errors_svg = &errors_svg[..errors_svg.find("</svg>").unwrap()];
+        assert!(
+            !errors_svg.contains(">0.5<"),
+            "counts have whole-number ticks"
+        );
+        assert!(errors_svg.contains(">1</text>"));
+
+        // Zero-length intervals at one instant, a pause between phases, and
+        // an interval without replies in the middle of the latency line.
+        let mut points: Vec<TimeSeriesPoint> = (0..6).map(|i| point(i, 4)).collect();
+        points[2].latency = IntervalLatency::default();
+        for p in &mut points[4..] {
+            p.start_secs += 10.0;
+        }
+        points.push(TimeSeriesPoint {
+            start_secs: 16.0,
+            duration_secs: 0.0,
+            ..TimeSeriesPoint::default()
+        });
+        let gappy = metrics_with(points);
+        let html = render_html_report(&view(&gappy, &slo, &[], "ws://h/"));
+        assert_well_formed(&html);
+        let latency_svg = &html[html.find("id=\"chart-latency-title\"").unwrap()..];
+        let latency_svg = &latency_svg[..latency_svg.find("</svg>").unwrap()];
+        let path = latency_svg
+            .split("<path class=\"line\" d=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("latency path");
+        // Points 0-1, 3 alone (a dot), 4-5: two subpaths and one dot.
+        assert_eq!(path.matches('M').count(), 2, "{path}");
+        assert_eq!(latency_svg.matches("<circle").count(), 1);
+        assert!(html.contains("no replies"));
+
+        // Degenerate time: every point at the same instant.
+        let instant = metrics_with(vec![TimeSeriesPoint::default(), TimeSeriesPoint::default()]);
+        assert_well_formed(&render_html_report(&view(&instant, &slo, &[], "ws://h/")));
+    }
+
+    #[test]
+    fn latency_spanning_orders_of_magnitude_uses_a_log_scale() {
+        let mut points: Vec<TimeSeriesPoint> = (0..10).map(|i| point(i, 5)).collect();
+        points[4].latency.p99_us = 900_000;
+        let metrics = metrics_with(points);
+        let slo = no_slo();
+        let html = render_html_report(&view(&metrics, &slo, &[], "ws://h/"));
+        assert!(html.contains("(ms, log scale)"), "{html}");
+        assert_eq!(html.matches("log scale").count(), 1);
+    }
+
+    #[test]
+    fn report_strings_are_escaped() {
+        let evil = "\"><script>alert(1)</script><img src=x onerror=alert(2)>";
+        let metrics = metrics_with((0..3).map(|i| point(i, 2)).collect());
+        let slo = SloEvaluation {
+            passed: false,
+            checks: vec![SloCheck {
+                name: format!("p99 {evil}"),
+                target: "<= 5ms".into(),
+                actual: "<b>7ms</b>".into(),
+                passed: false,
+            }],
+        };
+        let phases = [PhaseTarget {
+            phase: format!("warm{evil}up & 'go'"),
+            target_url: url::Url::parse("wss://h.test/a?q=%3Cscript%3E").unwrap(),
+        }];
+        let target = format!("ws://h.test/{evil}");
+        for phases in [&phases[..], &[]] {
+            let mut v = view(&metrics, &slo, phases, &target);
+            v.mode = Cow::Owned(format!("Echo{evil}"));
+            v.stages = Some(evil.to_string());
+            v.timestamp = Some(("Saved", evil.to_string()));
+            let html = render_html_report(&v);
+            assert_well_formed(&html);
+            assert!(!html.contains("<img"), "{html}");
+            assert!(!html.contains("<b>"), "{html}");
+            assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+            assert!(html.contains("&quot;&gt;"));
+            assert!(html.contains("FAIL: 1 of 1 SLO checks failed"));
+            if !phases.is_empty() {
+                assert!(html.contains("warm&quot;&gt;&lt;script&gt;"));
+                assert!(html.contains("up &amp; &#39;go&#39;"));
+            }
+        }
+    }
+
+    #[test]
+    fn missing_distributions_and_breakdown_render_as_absent() {
+        let mut metrics = metrics_with(Vec::new());
+        metrics.handshake_latency = LatencyStats::default();
+        metrics
+            .error_breakdown
+            .insert(crate::error::ErrorCategory::Timeout, 3);
+        metrics
+            .error_breakdown
+            .insert(crate::error::ErrorCategory::TcpConnect, 9);
+        let slo = no_slo();
+        let html = render_html_report(&view(&metrics, &slo, &[], "ws://h/"));
+        assert_well_formed(&html);
+        assert!(html.contains("n/a"));
+        assert!(html.contains("RTT p99</p><p class=\"value\">no samples"));
+        assert!(!html.contains("Response Time (from schedule)"));
+        let tcp = html.find("tcp_connect").unwrap();
+        let timeout = html.find("<code>timeout</code>").unwrap();
+        assert!(tcp < timeout, "sorted by count");
+    }
+
+    #[test]
+    fn nice_steps_and_ticks() {
+        assert_eq!(nice_step(0.0, 4.0), 1.0);
+        assert_eq!(nice_step(f64::NAN, 4.0), 1.0);
+        assert_eq!(nice_step(400.0, 4.0), 100.0);
+        assert_eq!(nice_step(7.0, 4.0), 2.0);
+        assert_eq!(format_tick(0.0), "0");
+        assert_eq!(format_tick(0.25), "0.25");
+        assert_eq!(format_tick(2.5), "2.5");
+        assert_eq!(format_tick(400.0), "400");
+        assert_eq!(format_tick(15_000.0), "15k");
+        assert_eq!(format_tick(2_000_000.0), "2M");
+        assert_eq!(
+            readable_timestamp("2026-10-25T14:03:07.123Z"),
+            "2026-10-25 14:03:07 UTC"
+        );
+        assert_eq!(readable_timestamp("yesterday"), "yesterday");
+    }
+}

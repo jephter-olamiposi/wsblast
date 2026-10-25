@@ -1,0 +1,98 @@
+{
+  "schema_version": "1.0.0",
+  "target_url": "ws://127.0.0.1:9001/",
+  "connections": 50,
+  "duration_secs": 1.0,
+  "mode": "Echo",
+  "phase_targets": [
+    {
+      "phase": "warmup",
+      "target_url": "ws://first.test/ws"
+    },
+    {
+      "phase": "spike",
+      "target_url": "wss://second.test/ws?a=1&b=2"
+    }
+  ],
+  "metrics": {
+    "total_connections_attempted": 10,
+    "total_connections_established": 10,
+    "total_connections_failed": 0,
+    "total_connections_interrupted": 0,
+    "total_connections_not_started": 0,
+    "total_reconnects": 0,
+    "total_unsolicited_frames": 0,
+    "total_messages_sent": 100,
+    "total_messages_recv": 100,
+    "total_bytes_sent": 1000,
+    "total_bytes_recv": 1000,
+    "elapsed": {
+      "secs": 1,
+      "nanos": 0
+    },
+    "throughput_msg_per_sec": 100.0,
+    "throughput_bytes_per_sec": 2000.0,
+    "error_rate": 0.0,
+    "handshake_latency": {
+      "count": 1,
+      "min_us": 500,
+      "mean_us": 500.0,
+      "max_us": 500,
+      "std_dev_us": 0.0,
+      "p50_us": 500,
+      "p75_us": 500,
+      "p90_us": 500,
+      "p95_us": 500,
+      "p99_us": 500,
+      "p999_us": 500,
+      "p9999_us": 500
+    },
+    "message_rtt": {
+      "count": 1,
+      "min_us": 250,
+      "mean_us": 250.0,
+      "max_us": 250,
+      "std_dev_us": 0.0,
+      "p50_us": 250,
+      "p75_us": 250,
+      "p90_us": 250,
+      "p95_us": 250,
+      "p99_us": 250,
+      "p999_us": 250,
+      "p9999_us": 250
+    },
+    "response_time": {
+      "count": 0,
+      "min_us": 0,
+      "mean_us": 0.0,
+      "max_us": 0,
+      "std_dev_us": 0.0,
+      "p50_us": 0,
+      "p75_us": 0,
+      "p90_us": 0,
+      "p95_us": 0,
+      "p99_us": 0,
+      "p999_us": 0,
+      "p9999_us": 0
+    },
+    "time_series": {
+      "interval_secs": 0.0,
+      "latency_basis": "",
+      "points": []
+    },
+    "error_breakdown": {
+      "timeout": 3
+    }
+  },
+  "slo": {
+    "passed": true,
+    "checks": [
+      {
+        "name": "Latency p99",
+        "target": "<= 1ms",
+        "actual": "250µs",
+        "passed": true
+      }
+    ]
+  }
+}

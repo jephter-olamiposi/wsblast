@@ -1,0 +1,557 @@
+{
+  "schema_version": "1.0.0",
+  "target_url": "ws://127.0.0.1:9001/ws",
+  "connections": 20,
+  "duration_secs": 25.004,
+  "mode": "Echo",
+  "metrics": {
+    "total_connections_attempted": 20,
+    "total_connections_established": 18,
+    "total_connections_failed": 1,
+    "total_connections_interrupted": 1,
+    "total_connections_not_started": 0,
+    "total_reconnects": 3,
+    "total_unsolicited_frames": 5,
+    "total_messages_sent": 10000,
+    "total_messages_recv": 9950,
+    "total_bytes_sent": 100000,
+    "total_bytes_recv": 99500,
+    "elapsed": {
+      "secs": 25,
+      "nanos": 4000000
+    },
+    "throughput_msg_per_sec": 399.84,
+    "throughput_bytes_per_sec": 7978.2,
+    "error_rate": 0.0049,
+    "handshake_latency": {
+      "count": 1000,
+      "min_us": 600,
+      "mean_us": 1320.0,
+      "max_us": 24000,
+      "std_dev_us": 400.0,
+      "p50_us": 1200,
+      "p75_us": 2400,
+      "p90_us": 3600,
+      "p95_us": 4800,
+      "p99_us": 9600,
+      "p999_us": 18000,
+      "p9999_us": 22800
+    },
+    "message_rtt": {
+      "count": 1000,
+      "min_us": 400,
+      "mean_us": 880.0000000000001,
+      "max_us": 16000,
+      "std_dev_us": 266.6666666666667,
+      "p50_us": 800,
+      "p75_us": 1600,
+      "p90_us": 2400,
+      "p95_us": 3200,
+      "p99_us": 6400,
+      "p999_us": 12000,
+      "p9999_us": 15200
+    },
+    "response_time": {
+      "count": 1000,
+      "min_us": 475,
+      "mean_us": 1045.0,
+      "max_us": 19000,
+      "std_dev_us": 316.6666666666667,
+      "p50_us": 950,
+      "p75_us": 1900,
+      "p90_us": 2850,
+      "p95_us": 3800,
+      "p99_us": 7600,
+      "p999_us": 14250,
+      "p9999_us": 18050
+    },
+    "time_series": {
+      "interval_secs": 1.0,
+      "latency_basis": "response_time",
+      "points": [
+        {
+          "start_secs": 0.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 1.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 2.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 3.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 4.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 5.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 6.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 7.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 0,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 8.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 9.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 10.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 11.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 12.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 2,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 310000,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 13.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 14.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 15.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 16.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 17.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 18.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 19.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 20.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 21.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 22.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 23.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        },
+        {
+          "start_secs": 24.0,
+          "duration_secs": 1.0,
+          "active_connections": 20,
+          "messages_sent": 400,
+          "messages_recv": 398,
+          "bytes_sent": 4000,
+          "bytes_recv": 3980,
+          "errors": 0,
+          "throughput_msg_per_sec": 400.0,
+          "latency": {
+            "count": 398,
+            "p50_us": 900,
+            "p90_us": 1500,
+            "p99_us": 2400,
+            "max_us": 3000
+          }
+        }
+      ]
+    },
+    "error_breakdown": {
+      "timeout": 49
+    },
+    "capture": {
+      "path": "run.jsonl",
+      "frames_written": 20000,
+      "frames_dropped": 7,
+      "limit": 100000
+    }
+  },
+  "slo": {
+    "passed": false,
+    "checks": [
+      {
+        "name": "Response time p99",
+        "target": "<= 5ms",
+        "actual": "7.6ms",
+        "passed": false
+      },
+      {
+        "name": "Error Rate",
+        "target": "<= 1.00%",
+        "actual": "0.49%",
+        "passed": true
+      },
+      {
+        "name": "Throughput (msg/s)",
+        "target": ">= 500.0",
+        "actual": "399.8",
+        "passed": false
+      }
+    ]
+  }
+}

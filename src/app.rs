@@ -167,6 +167,12 @@ fn run_compare(cli: &Cli) -> Result<()> {
         })
     })?;
 
+    if cli.format == crate::cli::OutputFormat::Html {
+        return Err(WsBlastError::Config(ConfigError::UnsupportedOption(
+            "--compare writes text, json or markdown; --format html is for run reports".into(),
+        )));
+    }
+
     if !cli.compare_threshold.is_finite() || cli.compare_threshold < 0.0 {
         return Err(WsBlastError::Config(ConfigError::InvalidThreshold(
             format!(

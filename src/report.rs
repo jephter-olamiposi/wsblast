@@ -8,6 +8,7 @@ use colored::Colorize;
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, Color, Row, Table};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 #[cfg(feature = "compare")]
 use std::collections::BTreeMap;
 use std::fs;
@@ -302,7 +303,11 @@ pub(crate) fn render_comparison_report(
     match format {
         OutputFormat::Text => render_text_comparison(comparison, threshold),
         OutputFormat::Json => render_json_comparison(comparison, threshold),
-        OutputFormat::Markdown => render_markdown_comparison(comparison, threshold),
+        // The command line rejects --compare with --format html; Markdown
+        // is the closest readable format for any other caller.
+        OutputFormat::Markdown | OutputFormat::Html => {
+            render_markdown_comparison(comparison, threshold)
+        }
     }
 }
 
@@ -591,9 +596,19 @@ fn stages_label(config: &LoadTestConfig) -> String {
         .join(", ")
 }
 
+/// The text report's rate row: the per-connection rate, `Unthrottled`, or a
+/// note that a saved report does not record it.
+fn rate_label(rate_per_conn: Option<u64>) -> String {
+    match rate_per_conn {
+        Some(0) => "Unthrottled".to_string(),
+        Some(rate) => format!("{rate} msg/sec per connection"),
+        None => "not recorded in the JSON report".to_string(),
+    }
+}
+
 /// Formats seconds since the run started, with one decimal only when the
 /// value is not a whole number of seconds.
-fn format_secs(secs: f64) -> String {
+pub(crate) fn format_secs(secs: f64) -> String {
     if (secs - secs.round()).abs() < 0.05 {
         format!("{:.0}s", secs.round())
     } else {
@@ -601,7 +616,7 @@ fn format_secs(secs: f64) -> String {
     }
 }
 
-fn latency_basis_label(metrics: &AggregatedMetrics) -> &'static str {
+pub(crate) fn latency_basis_label(metrics: &AggregatedMetrics) -> &'static str {
     match metrics.time_series.latency_basis.as_str() {
         "response_time" => "Response Time",
         "mixed" => "Latency",
@@ -610,11 +625,11 @@ fn latency_basis_label(metrics: &AggregatedMetrics) -> &'static str {
 }
 
 /// A report row label and the percentile it reads from a distribution.
-type PercentileRow = (&'static str, fn(&LatencyStats) -> u64);
+pub(crate) type PercentileRow = (&'static str, fn(&LatencyStats) -> u64);
 
 /// The latency distributions a report shows, by column name. Response time
 /// appears only when the run recorded it.
-fn latency_columns(metrics: &AggregatedMetrics) -> Vec<(&'static str, &LatencyStats)> {
+pub(crate) fn latency_columns(metrics: &AggregatedMetrics) -> Vec<(&'static str, &LatencyStats)> {
     let mut columns = vec![
         ("Handshake Latency", &metrics.handshake_latency),
         ("Message RTT Latency", &metrics.message_rtt),
@@ -642,13 +657,67 @@ fn latency_check(name: &str, target: Duration, actual: Duration, samples: u64) -
     }
 }
 
+/// What a report shows about the run besides its metrics and SLO result.
+///
+/// A live run builds it from its [`LoadTestConfig`]
+/// ([`ReportView::from_config`]). It holds only what the JSON report also
+/// records, plus optional fields for the settings it does not record, so a
+/// report read back from JSON can be rendered by the same code.
+pub(crate) struct ReportView<'a> {
+    /// Target URL after parsing; for a scenario, the first phase's.
+    pub(crate) target_url: &'a str,
+    /// Configured connection count; for a scenario, the sum over phases.
+    pub(crate) connections: usize,
+    /// Session mode, in Rust Debug formatting (`Echo`), as the JSON report writes it.
+    pub(crate) mode: Cow<'a, str>,
+    /// Messages per second per connection, 0 for unthrottled; `None` when
+    /// the source does not record it.
+    pub(crate) rate_per_conn: Option<u64>,
+    /// The `--stages` profile as `DURATION:TARGET` pairs, if the run had one
+    /// and the source records it.
+    pub(crate) stages: Option<String>,
+    /// Every executed scenario phase; empty outside scenarios.
+    pub(crate) phase_targets: &'a [PhaseTarget],
+    /// A labelled wall-clock time for the HTML header, such as when the run
+    /// finished.
+    pub(crate) timestamp: Option<(&'static str, String)>,
+    pub(crate) metrics: &'a AggregatedMetrics,
+    pub(crate) slo: &'a SloEvaluation,
+}
+
+impl<'a> ReportView<'a> {
+    /// The view of a live run.
+    pub(crate) fn from_config(
+        config: &'a LoadTestConfig,
+        metrics: &'a AggregatedMetrics,
+        slo: &'a SloEvaluation,
+        phase_targets: &'a [PhaseTarget],
+    ) -> Self {
+        Self {
+            target_url: config.target_url.as_str(),
+            connections: config.connections,
+            mode: Cow::Owned(format!("{:?}", config.mode)),
+            rate_per_conn: Some(config.rate_per_conn),
+            stages: (!config.stages.is_empty()).then(|| stages_label(config)),
+            phase_targets,
+            timestamp: Some((
+                "Finished",
+                crate::clock::rfc3339_utc(std::time::SystemTime::now()),
+            )),
+            metrics,
+            slo,
+        }
+    }
+}
+
 /// Renders the run report in the configuration's
 /// [`output_format`](LoadTestConfig::output_format).
 ///
 /// This is the report the CLI prints: terminal tables for
 /// [`OutputFormat::Text`], the schema 1.0 document for [`OutputFormat::Json`],
-/// and a GitHub Flavored Markdown summary for [`OutputFormat::Markdown`]. The
-/// JSON schema is published in the repository as
+/// a GitHub Flavored Markdown summary for [`OutputFormat::Markdown`], and a
+/// self-contained HTML page with charts of the time series for
+/// [`OutputFormat::Html`]. The JSON schema is published in the repository as
 /// [`schema/report-v1.json`](https://github.com/jephter-olamiposi/wsblast/blob/main/schema/report-v1.json).
 pub fn render_report(
     config: &LoadTestConfig,
@@ -666,10 +735,19 @@ pub(crate) fn render_scenario_report(
     slo: &SloEvaluation,
     phase_targets: &[PhaseTarget],
 ) -> String {
-    match config.output_format {
-        OutputFormat::Text => render_text_report(config, metrics, slo, phase_targets),
-        OutputFormat::Json => render_json_report(config, metrics, slo, phase_targets),
-        OutputFormat::Markdown => render_markdown_report(config, metrics, slo, phase_targets),
+    render_view(
+        &ReportView::from_config(config, metrics, slo, phase_targets),
+        config.output_format,
+    )
+}
+
+/// Renders `view` in `format`.
+pub(crate) fn render_view(view: &ReportView<'_>, format: OutputFormat) -> String {
+    match format {
+        OutputFormat::Text => render_text_report(view),
+        OutputFormat::Json => render_json_report(view),
+        OutputFormat::Markdown => render_markdown_report(view),
+        OutputFormat::Html => crate::html::render_html_report(view),
     }
 }
 
@@ -695,12 +773,8 @@ pub(crate) fn emit_scenario_report(
     Ok(())
 }
 
-fn render_text_report(
-    config: &LoadTestConfig,
-    metrics: &AggregatedMetrics,
-    slo: &SloEvaluation,
-    phase_targets: &[PhaseTarget],
-) -> String {
+fn render_text_report(view: &ReportView<'_>) -> String {
+    let (metrics, slo, phase_targets) = (view.metrics, view.slo, view.phase_targets);
     let mut out = String::new();
 
     out.push('\n');
@@ -714,7 +788,7 @@ fn render_text_report(
     meta_table.load_preset(UTF8_FULL);
     meta_table.set_header(vec!["Configuration Parameter", "Value"]);
     if phase_targets.is_empty() {
-        meta_table.add_row(vec!["Target URL", config.target_url.as_str()]);
+        meta_table.add_row(vec!["Target URL", view.target_url]);
     }
     for target in phase_targets {
         meta_table.add_row(vec![
@@ -724,24 +798,17 @@ fn render_text_report(
     }
     meta_table.add_row(vec![
         "Connections (Concurrency)",
-        &config.connections.to_string(),
+        &view.connections.to_string(),
     ]);
-    if !config.stages.is_empty() {
-        meta_table.add_row(vec!["Load Stages", &stages_label(config)]);
+    if let Some(stages) = &view.stages {
+        meta_table.add_row(vec!["Load Stages", stages]);
     }
     meta_table.add_row(vec![
         "Elapsed Duration",
         &format!("{:.2?}", metrics.elapsed),
     ]);
-    meta_table.add_row(vec![
-        "Rate Control",
-        &if config.rate_per_conn > 0 {
-            format!("{} msg/sec per connection", config.rate_per_conn)
-        } else {
-            "Unthrottled".to_string()
-        },
-    ]);
-    meta_table.add_row(vec!["Mode", &format!("{:?}", config.mode)]);
+    meta_table.add_row(vec!["Rate Control", &rate_label(view.rate_per_conn)]);
+    meta_table.add_row(vec!["Mode", &view.mode]);
     if let Some(distributed) = &metrics.distributed {
         meta_table.add_row(vec![
             "Agents",
@@ -939,37 +1006,27 @@ struct JsonReport<'a> {
     slo: &'a SloEvaluation,
 }
 
-fn render_json_report(
-    config: &LoadTestConfig,
-    metrics: &AggregatedMetrics,
-    slo: &SloEvaluation,
-    phase_targets: &[PhaseTarget],
-) -> String {
-    let mode_str = format!("{:?}", config.mode);
+fn render_json_report(view: &ReportView<'_>) -> String {
     let report = JsonReport {
         schema_version: "1.0.0",
-        target_url: config.target_url.as_str(),
-        connections: config.connections,
-        duration_secs: metrics.elapsed.as_secs_f64(),
-        mode: &mode_str,
-        phase_targets,
-        metrics,
-        slo,
+        target_url: view.target_url,
+        connections: view.connections,
+        duration_secs: view.metrics.elapsed.as_secs_f64(),
+        mode: &view.mode,
+        phase_targets: view.phase_targets,
+        metrics: view.metrics,
+        slo: view.slo,
     };
 
     serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into())
 }
 
-fn render_markdown_report(
-    config: &LoadTestConfig,
-    metrics: &AggregatedMetrics,
-    slo: &SloEvaluation,
-    phase_targets: &[PhaseTarget],
-) -> String {
+fn render_markdown_report(view: &ReportView<'_>) -> String {
+    let (metrics, slo, phase_targets) = (view.metrics, view.slo, view.phase_targets);
     let mut md = String::new();
     md.push_str("# `wsblast` WebSocket Benchmark Report\n\n");
     if phase_targets.is_empty() {
-        md.push_str(&format!("- **Target:** `{}`\n", config.target_url));
+        md.push_str(&format!("- **Target:** `{}`\n", view.target_url));
     } else {
         md.push_str("- **Targets:**\n");
         for target in phase_targets {
@@ -981,10 +1038,10 @@ fn render_markdown_report(
     }
     md.push_str(&format!(
         "- **Concurrency:** `{}` workers\n",
-        config.connections
+        view.connections
     ));
-    if !config.stages.is_empty() {
-        md.push_str(&format!("- **Load Stages:** `{}`\n", stages_label(config)));
+    if let Some(stages) = &view.stages {
+        md.push_str(&format!("- **Load Stages:** `{stages}`\n"));
     }
     if let Some(distributed) = &metrics.distributed {
         md.push_str(&format!(
@@ -1114,7 +1171,7 @@ fn capture_line(capture: &CaptureSummary) -> String {
     )
 }
 
-fn format_us(us: u64) -> String {
+pub(crate) fn format_us(us: u64) -> String {
     if us < 1_000 {
         format!("{us} µs")
     } else if us < 1_000_000 {
@@ -1709,6 +1766,64 @@ mod tests {
         let single = render_report(&report_config("json"), &sample_metrics(), &slo);
         let parsed: serde_json::Value = serde_json::from_str(&single).expect("json");
         assert!(parsed.get("phase_targets").is_none(), "{single}");
+    }
+
+    /// The scenario reports of a live run, compared byte for byte with the
+    /// files the renderers wrote before reports were rendered from a view
+    /// (`WSBLAST_BLESS=1` rewrites them). tests/report_render.rs covers the
+    /// single-run reports.
+    #[test]
+    fn live_scenario_reports_are_unchanged() {
+        let mut metrics = sample_metrics();
+        metrics
+            .error_breakdown
+            .insert(crate::error::ErrorCategory::Timeout, 3);
+        let slo = evaluate_slos(
+            &SloThresholds::new().with_max_p99(Duration::from_millis(1)),
+            &metrics,
+        );
+        let phases = [
+            PhaseTarget {
+                phase: "warmup".to_string(),
+                target_url: url::Url::parse("ws://first.test/ws").expect("url"),
+            },
+            PhaseTarget {
+                phase: "spike".to_string(),
+                target_url: url::Url::parse("wss://second.test/ws?a=1&b=2").expect("url"),
+            },
+        ];
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/live_report");
+        for (format, extension) in [("text", "txt"), ("json", "json"), ("markdown", "md")] {
+            let rendered = render_scenario_report(&report_config(format), &metrics, &slo, &phases);
+            let rendered: String = strip_ansi(&rendered);
+            let path = dir.join(format!("scenario.{extension}"));
+            if std::env::var_os("WSBLAST_BLESS").is_some() {
+                std::fs::write(&path, &rendered).unwrap();
+                continue;
+            }
+            let expected = std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .replace("\r\n", "\n");
+            assert_eq!(expected, rendered, "{}", path.display());
+        }
+    }
+
+    fn strip_ansi(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' && chars.peek() == Some(&'[') {
+                for next in chars.by_ref() {
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+            out.push(c);
+        }
+        out
     }
 
     #[cfg(feature = "compare")]
