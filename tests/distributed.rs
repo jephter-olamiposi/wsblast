@@ -1314,9 +1314,10 @@ async fn an_agent_of_another_protocol_version_gets_a_clear_error() {
         .headers_mut()
         .insert("authorization", format!("Bearer {TOKEN}").parse().unwrap());
     let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-    // A coordinator of the first protocol version.
+    // A coordinator of the previous protocol version, which could not
+    // send chaos settings.
     ws.send(Message::Text(
-        r#"{"type":"hello","protocol":1,"version":"0.2.0"}"#.into(),
+        r#"{"type":"hello","protocol":2,"version":"0.2.0"}"#.into(),
     ))
     .await
     .unwrap();
@@ -1327,5 +1328,310 @@ async fn an_agent_of_another_protocol_version_gets_a_clear_error() {
     assert_eq!(reply["type"], "error");
     let message = reply["message"].as_str().unwrap();
     assert!(message.contains("protocol version mismatch"), "{message}");
-    assert!(message.contains("speaking protocol 1"), "{message}");
+    assert!(message.contains("speaking protocol 2"), "{message}");
+    assert!(
+        message.contains(&format!("speaking protocol {PROTOCOL_VERSION}")),
+        "{message}"
+    );
+}
+
+#[cfg(feature = "chaos")]
+fn chaos_counts(metrics: &wsblast::AggregatedMetrics) -> [u64; 4] {
+    let chaos = metrics.chaos.as_ref().expect("the run injected faults");
+    [chaos.delayed, chaos.dropped, chaos.corrupted, chaos.closes]
+}
+
+#[cfg(feature = "chaos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chaos_counts_add_up_and_a_seed_repeats_every_agent() {
+    let harness = harness(2, None).await;
+    let seeded = |b: LoadTestConfigBuilder| {
+        b.connections(2)
+            .max_requests(400)
+            .duration(Duration::from_secs(20))
+            .chaos(
+                wsblast::ChaosConfig::new()
+                    .with_drop(30.0)
+                    .with_corrupt(20.0)
+                    .with_seed(2024),
+            )
+    };
+    let first = run(&harness, seeded).await.unwrap();
+    let second = run(&harness, seeded).await.unwrap();
+
+    let merged = first.metrics.chaos.as_ref().unwrap();
+    assert_eq!(merged.seed, 2024, "the report shows the run's seed");
+    let agents: Vec<&wsblast::AggregatedMetrics> = first
+        .agents
+        .iter()
+        .map(|agent| agent.metrics.as_ref().expect("no agent is lost"))
+        .collect();
+    let per_agent: Vec<[u64; 4]> = agents.iter().map(|m| chaos_counts(m)).collect();
+    for kind in 0..4 {
+        assert_eq!(
+            chaos_counts(&first.metrics)[kind],
+            per_agent.iter().map(|counts| counts[kind]).sum::<u64>(),
+            "{per_agent:?}"
+        );
+    }
+    // Each agent drew from a seed of its own: its slot 0 made other
+    // decisions than the other agent's slot 0.
+    let seeds: Vec<u64> = agents
+        .iter()
+        .map(|m| m.chaos.as_ref().unwrap().seed)
+        .collect();
+    assert_ne!(seeds[0], seeds[1]);
+    assert!(!seeds.contains(&2024), "{seeds:?}");
+    assert_ne!(per_agent[0], per_agent[1], "{per_agent:?}");
+    // Every one of the 400 claims was either sent or dropped.
+    assert_eq!(
+        first.metrics.total_messages_sent + merged.dropped,
+        400,
+        "{merged:?}"
+    );
+    assert!(merged.dropped > 0 && merged.corrupted > 0, "{merged:?}");
+
+    // The same seed repeats every agent's decisions.
+    let again: Vec<[u64; 4]> = second
+        .agents
+        .iter()
+        .map(|agent| chaos_counts(agent.metrics.as_ref().unwrap()))
+        .collect();
+    assert_eq!(again, per_agent);
+    assert_eq!(second.metrics.chaos, first.metrics.chaos);
+}
+
+#[cfg(all(feature = "chaos", feature = "scenario"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_scenario_phase_injects_its_own_chaos_on_every_agent() {
+    let harness = harness(2, None).await;
+    let scenario = wsblast::ScenarioConfig::from_yaml(&format!(
+        r#"
+version: "1.0"
+target: "{}"
+metadata:
+  name: "chaos"
+phases:
+  - name: "calm"
+    connections: 2
+    duration: "400ms"
+    rate_per_conn: 20
+  - name: "lossy"
+    connections: 2
+    duration: "800ms"
+    rate_per_conn: 50
+    chaos:
+      drop: 40
+      seed: 77
+"#,
+        harness.target
+    ))
+    .unwrap();
+    let base = LoadTestConfig::builder(&harness.target).build().unwrap();
+    let outcome = Coordinator::scenario(&scenario, base, None, None, &harness.agents, TOKEN)
+        .unwrap()
+        .with_signal_handling(false)
+        .agent_timeout(Duration::from_secs(10))
+        .run_scenario()
+        .await
+        .unwrap();
+    let phases = &outcome.scenario.phases;
+    assert_eq!(phases.len(), 2);
+    assert!(phases[0].metrics.chaos.is_none());
+    let lossy = phases[1].metrics.chaos.as_ref().unwrap();
+    assert_eq!(lossy.seed, 77);
+    assert!(lossy.dropped > 0, "{lossy:?}");
+    let parts: u64 = outcome.phases[1]
+        .iter()
+        .map(|agent| {
+            agent
+                .metrics
+                .as_ref()
+                .unwrap()
+                .chaos
+                .as_ref()
+                .unwrap()
+                .dropped
+        })
+        .sum();
+    assert_eq!(parts, lossy.dropped);
+    let total = outcome.scenario.metrics.chaos.as_ref().unwrap();
+    assert_eq!(total.seed, 77);
+    assert_eq!(total.dropped, lossy.dropped);
+}
+
+#[cfg(feature = "chaos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_injects_chaos_through_agents_and_reports_the_run_seed() {
+    let harness = harness(2, None).await;
+    let agents = harness.agents.join(",");
+    let finished = wsblast(
+        &[
+            &harness.target,
+            "-c",
+            "2",
+            "-n",
+            "200",
+            "-d",
+            "20s",
+            "--chaos-drop",
+            "25",
+            "--chaos-seed",
+            "31337",
+            "--no-progress",
+            "--agents",
+            &agents,
+        ],
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+    assert!(finished.stdout.contains("Chaos: "), "{}", finished.stdout);
+    assert!(
+        finished.stdout.contains("(seed 31337;"),
+        "{}",
+        finished.stdout
+    );
+}
+
+/// An agent on a runtime of its own, whose only thread a task blocks for
+/// 60 ms at a time until `stop`, as a load machine short of CPU would be.
+fn spawn_saturated_agent(stop: &CancellationToken) -> String {
+    let (address, received) = std::sync::mpsc::channel();
+    let stop = stop.clone();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let agent = AgentServer::bind(agent_config().build().unwrap())
+                .await
+                .unwrap();
+            address.send(agent.local_addr().to_string()).unwrap();
+            let blocker = tokio::spawn({
+                let stop = stop.clone();
+                async move {
+                    while !stop.is_cancelled() {
+                        std::thread::sleep(Duration::from_millis(60));
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                }
+            });
+            let _ = agent.run(stop).await;
+            blocker.abort();
+        });
+    });
+    received.recv().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_saturated_agent_fails_the_generator_lag_gate_and_is_named() {
+    let mut harness = harness(1, None).await;
+    let saturated = spawn_saturated_agent(&harness.stop);
+    harness.agents.push(saturated.clone());
+    let slo = wsblast::SloThresholds::new().with_max_generator_lag(Duration::from_millis(20));
+    let outcome = run(&harness, |b| {
+        b.connections(2)
+            .duration(Duration::from_millis(1_500))
+            .rate_per_connection(20)
+            .slo(slo.clone())
+    })
+    .await
+    .unwrap();
+
+    let summary = outcome.metrics.distributed.as_ref().unwrap();
+    assert_eq!(summary.generators.len(), 2);
+    let saturated_agents: Vec<&str> = summary.saturated_agents().collect();
+    assert_eq!(saturated_agents, [saturated.as_str()], "{summary:?}");
+    assert_eq!(
+        summary.generator_lag_agent.as_deref(),
+        Some(saturated.as_str())
+    );
+    let run_lag = outcome.metrics.generator_lag.as_ref().unwrap();
+    assert!(run_lag.saturated, "{run_lag:?}");
+    let own = outcome.agents[1].metrics.as_ref().unwrap();
+    assert_eq!(own.generator_lag.as_ref(), Some(run_lag));
+    let healthy = outcome.agents[0].metrics.as_ref().unwrap();
+    assert!(healthy.generator_lag.as_ref().unwrap().p99_us < run_lag.p99_us);
+    if cfg!(unix) {
+        assert!(outcome.metrics.open_file_limit.is_some());
+        assert!(
+            summary
+                .generators
+                .iter()
+                .all(|g| g.open_file_limit.is_some())
+        );
+    }
+    // Every interval shows the agent that lagged most in it.
+    assert!(
+        outcome
+            .metrics
+            .time_series
+            .points
+            .iter()
+            .filter_map(|point| point.generator_lag.as_ref())
+            .any(|lag| lag.p99_us >= 40_000),
+        "{:?}",
+        outcome.metrics.time_series
+    );
+
+    let evaluation = wsblast::evaluate_slos(&slo, &outcome.metrics);
+    assert!(!evaluation.passed, "{evaluation:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_gates_on_the_worst_agents_generator_lag() {
+    let mut harness = harness(1, None).await;
+    let healthy = harness.agents.join(",");
+    let common = |agents: &str, limit: &str| -> Vec<String> {
+        [
+            harness.target.as_str(),
+            "-c",
+            "2",
+            "-d",
+            "1500ms",
+            "-r",
+            "20",
+            "--no-progress",
+            "--max-generator-lag",
+            limit,
+            "--agents",
+            agents,
+        ]
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect()
+    };
+    let args = common(&healthy, "10s");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let finished = wsblast(&args, Some(TOKEN)).await;
+    assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+    assert!(
+        finished.stdout.contains("Generator: lag p99"),
+        "{}",
+        finished.stdout
+    );
+
+    let saturated = spawn_saturated_agent(&harness.stop);
+    harness.agents.push(saturated.clone());
+    let agents = harness.agents.join(",");
+    let args = common(&agents, "20ms");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let finished = wsblast(&args, Some(TOKEN)).await;
+    assert_eq!(finished.code, Some(2), "{}", finished.stderr);
+    assert!(
+        finished
+            .stdout
+            .contains(&format!("SATURATED on {saturated}")),
+        "{}",
+        finished.stdout
+    );
+    assert!(
+        finished.stderr.contains(&format!(
+            "The load generator of agent {saturated} was saturated"
+        )),
+        "{}",
+        finished.stderr
+    );
 }

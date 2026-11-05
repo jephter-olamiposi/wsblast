@@ -121,6 +121,11 @@ The format version stays 1: the `agent` field and the header's `agents` are addi
 
 With `--auth-token-cmd` and `--auth-token-refresh`, the token command runs on the coordinator only, at the start and then on its refresh schedule. Each `prepare` carries the current header value, and every new value is sent to every running agent in a `token` message within about 100 ms of the refresh. An agent keeps the value in a shared live header exactly as one machine does: every handshake from then on, first connection or reconnect, carries the new value, and established connections are not touched. A failed refresh keeps the previous value on the coordinator and therefore on every agent, with the usual warning. Neither side ever prints the value, and it is not part of any error message.
 
+Signed and fetched tokens travel the same way ([docs/ci.md, sections 2.2 and 2.3](ci.md#22-jwts-signed-by-wsblast)):
+
+- `--auth-type jwt` signs the shared token on the coordinator, which alone reads the key, and signs a new one before the current one expires; each new token reaches the agents in a `token` message. The agents' handshakes therefore carry tokens the server sees change over a long run, all signed by the coordinator. `--auth-jwt-per-connection` is rejected with `--agents`, since a token per connection attempt would need the key on every agent.
+- `--auth-type oauth2` requests the access token on the coordinator only, and requests a new one before it expires: the token endpoint sees one client, not one per agent, and every refreshed access token reaches the agents in a `token` message.
+
 ### 4.4 Live export
 
 `--prometheus-listen` and `--otel-endpoint` run on the coordinator and export the cluster's numbers, with the names and meanings of [METHODOLOGY.md, section 6.4](../METHODOLOGY.md#64-live-export):
