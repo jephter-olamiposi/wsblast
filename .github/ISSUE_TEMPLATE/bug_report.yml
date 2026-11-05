@@ -40,7 +40,7 @@ body:
     attributes:
       label: wsblast version
       description: Output of `wsblast --version`.
-      placeholder: wsblast 0.2.0
+      placeholder: wsblast 0.2.1
     validations:
       required: true
   - type: dropdown

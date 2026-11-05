@@ -357,8 +357,8 @@ pub(crate) fn compare_metrics_in(
             continue;
         }
 
-        // Response time exists only for paced runs and in reports from 0.3
-        // on, and the time series only in reports from 0.3 on; comparing
+        // Response time exists only for paced runs and in reports from 0.2.1
+        // on, and the time series only in reports from 0.2.1 on; comparing
         // either against a report without it would read as a regression
         // from zero. A time-series metric can also be undefined for one
         // report, such as the throughput CV of a single interval.

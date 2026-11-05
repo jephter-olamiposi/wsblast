@@ -5,7 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.1] - 2026-11-05
+
+0.2.1 brings back, rebuilt and tested, the features 0.2.0 removed: Prometheus and OpenTelemetry export, frame capture, the mock server, distributed load generation, chaos injection, and JWT and OAuth2 authentication. Only `compression` stays out, because the WebSocket library has no permessage-deflate support. It also corrects coordinated omission in paced runs, records a per-interval time series in every report, adds load stages, HTML reports and per-phase scenario SLOs, and rebuilds the live dashboard. The library API is a compatible superset of 0.2.0.
+
+### Migrating from 0.2.0
+
+- **SLO gates on paced runs.** With `--rate`, `--max-p50`, `--max-p95`, `--max-p99` and `--max-p999` now gate on response time from the send schedule, not round-trip time. A server that cannot keep up with `--rate` can now fail a gate it passed on 0.2.0. Raise the threshold, lower `--rate`, or drop `--rate` to keep gating on round-trip time.
+- **`-n, --requests` is exact.** A run sends at most the cap. 0.2.0 could overshoot by about one message per connection, so totals in a gate on `-n` runs may drop slightly.
+- **New report fields.** The JSON report adds `response_time`, `time_series`, `total_connections_interrupted`, `phases`, `capture`, `distributed` and `generator_lag`. Its schema version stays `1.0.0`, every new field is optional, and `wsblast render` and `--compare` still read 0.2.0 reports. A comparison of two 0.2.0 reports prints exactly what 0.2.0 printed.
+- **New default features.** `prometheus`, `capture`, `mock`, `distributed` and `chaos` are on by default; `otel`, `jwt` and `oauth2` are opt-in. Library users who want a smaller dependency set can use `default-features = false` and enable only what they need.
+- **DNS is resolved once.** The target is resolved before the run starts, so handshake latency no longer includes DNS, and a DNS change during a run is not picked up.
 
 ### Added
 - Coordinated omission correction for paced echo runs. With `--rate`, wsblast records a new `response_time` distribution: the time from when each request was due on the connection's schedule to its reply. When the server is slower than the configured rate, requests queue behind the slow replies, and response time shows that wait while round-trip time does not. The text and Markdown reports add a "Response Time (from schedule)" column, the JSON report a `response_time` object, and `--compare` compares its percentiles when both reports have them. See METHODOLOGY.md section 4.
@@ -44,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The live counters behind the progress bar, the TUI and the time series are split into cache-line-aligned shards, so workers on different CPU cores no longer contend for the same counters on every message. The final report is unchanged.
 - Paced echo sends follow a fixed schedule instead of skipping missed ticks. A request that is late because an earlier reply was slow is sent as soon as that reply arrives, so a connection keeps `--rate` on average while the server keeps up. Achieved rates at high `--rate` values now match the requested rate.
 - **Breaking for SLO gates:** in a paced echo run, `--max-p50`, `--max-p95`, `--max-p99` and `--max-p999` gate on response time instead of round-trip time, and the checks are named `Response time p99` and so on. A run whose server cannot keep up with `--rate` can now fail a latency gate it passed before. Unpaced runs still gate on round-trip time.
+- Help and usage errors name the binary `wsblast` on every platform. On Windows they said `wsblast.exe`.
 - A subcommand placed after load-test flags (`wsblast -c 2 mock`) now fails with a message saying subcommands go first, instead of "Invalid target URL 'mock'".
 - CI runs on pinned runner images (`ubuntu-24.04`, `macos-15`, `windows-2025`) and `actions/checkout@v5`.
 

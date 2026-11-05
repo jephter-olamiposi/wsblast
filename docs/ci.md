@@ -323,7 +323,7 @@ jobs:
 
 `--fail-on-regression` fails on any regressed metric, including counters and every percentile. The last step instead reads the comparison JSON and fails only on a chosen set of metrics: `jq -e` exits with 1 when the expression is false. Metric names are listed in [section 7](#7-baseline-comparison-rules).
 
-To gate on the steady state of the run instead, and catch a stall or an error burst that the totals average away, compare the time-series metrics over a window that leaves out the ramp and the ramp-down. This step fails only when the worst interval's p99 or the mean steady-state throughput regressed; both reports need a time series, so the baseline must come from wsblast 0.3 or later:
+To gate on the steady state of the run instead, and catch a stall or an error burst that the totals average away, compare the time-series metrics over a window that leaves out the ramp and the ramp-down. This step fails only when the worst interval's p99 or the mean steady-state throughput regressed; both reports need a time series, so the baseline must come from wsblast 0.2.1 or later:
 
 ```yaml
       - name: Compare steady state with baseline

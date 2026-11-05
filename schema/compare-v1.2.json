@@ -7,7 +7,7 @@
   "required": ["schema_version", "threshold", "regressions", "improvements"],
   "properties": {
     "schema_version": {
-      "description": "Comparison schema version. wsblast 0.1.x and 0.2.0 write \"1.1.0\". Later releases write \"1.2.0\" when the comparison includes the time-series metrics (both reports have a time series) or a --compare-window, and \"1.1.0\" otherwise.",
+      "description": "Comparison schema version. wsblast 0.1.x and 0.2.0 write \"1.1.0\". wsblast 0.2.1 and later write \"1.2.0\" when the comparison includes the time-series metrics (both reports have a time series) or a --compare-window, and \"1.1.0\" otherwise.",
       "type": "string",
       "pattern": "^1\\.[0-9]+\\.[0-9]+$",
       "examples": ["1.2.0", "1.1.0"]
