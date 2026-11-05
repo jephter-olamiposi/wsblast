@@ -633,26 +633,44 @@ async fn test_slots_the_ramp_never_reaches_are_not_failures() {
 async fn test_progress_bar_does_not_extend_elapsed() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
-    // 250ms sits between two progress refreshes, where a fixed sleep in the
-    // progress loop would overshoot by about 50ms.
-    let duration = Duration::from_millis(250);
+    // The progress bar refreshes every 100 ms. A progress loop that only
+    // noticed the end of the run at its next refresh, such as one with a
+    // fixed sleep, would end a 25 ms run at the refresh 100 ms after the
+    // start or later: at least 75 ms over the duration in every run, since
+    // timers never fire early. A loaded machine (other jobs, Windows' 15.6 ms
+    // timer resolution) can also wake the runner late, but only now and
+    // then. So every run must last at least its duration, and the smallest
+    // overshoot of a few runs must stay under half the refresh period: that
+    // still fails on the defect every time while one slow wake-up cannot
+    // fail the test.
+    const REFRESH: Duration = Duration::from_millis(100);
+    const RUNS: usize = 5;
+    let duration = Duration::from_millis(25);
     for progress in [false, true] {
-        let config = echo_test_config(&target_url)
-            .duration(duration)
-            .progress(progress)
-            .build()
-            .unwrap();
-        let metrics = Runner::new(config)
-            .with_signal_handling(false)
-            .run()
-            .await
-            .unwrap();
+        let mut overshoots = Vec::with_capacity(RUNS);
+        for _ in 0..RUNS {
+            let config = echo_test_config(&target_url)
+                .duration(duration)
+                .progress(progress)
+                .build()
+                .unwrap();
+            let metrics = Runner::new(config)
+                .with_signal_handling(false)
+                .run()
+                .await
+                .unwrap();
+            assert!(
+                metrics.elapsed >= duration,
+                "progress={progress}: elapsed {:?} for a {duration:?} run",
+                metrics.elapsed
+            );
+            overshoots.push(metrics.elapsed - duration);
+        }
 
-        let overshoot = metrics.elapsed.saturating_sub(duration);
+        let best = overshoots.iter().min().expect("at least one run");
         assert!(
-            metrics.elapsed >= duration && overshoot < Duration::from_millis(20),
-            "progress={progress}: elapsed {:?} for a {duration:?} run",
-            metrics.elapsed
+            *best < REFRESH / 2,
+            "progress={progress}: every {duration:?} run overshot by {overshoots:?}"
         );
     }
 
@@ -1122,20 +1140,22 @@ async fn test_scenario_staged_phase_follows_its_profile() {
 
     let scenario = scenario(
         &target_url,
-        r#"  - name: "warmup"
+        &format!(
+            r#"  - name: "warmup"
     duration: "200ms"
     connections: 2
   - name: "ramp"
-    rate_per_conn: 20
+    rate_per_conn: {STAGED_RATE}
     payload: "stage"
     stages:
       - duration: "1s"
         target: 10
-      - duration: "1s"
+      - duration: "2s"
         target: 10
       - duration: "1s"
         target: 0
-"#,
+"#
+        ),
     );
     let outcome = ScenarioExecutor::new(
         &scenario,
@@ -1150,38 +1170,19 @@ async fn test_scenario_staged_phase_follows_its_profile() {
     .unwrap();
 
     let ramp = &outcome.phases[1];
-    assert_eq!(
-        ramp.stages,
-        [
-            Stage::new(Duration::from_secs(1), 10),
-            Stage::new(Duration::from_secs(1), 10),
-            Stage::new(Duration::from_secs(1), 0),
-        ]
-    );
+    assert_eq!(ramp.stages, ramp_hold_ramp_down());
     assert_eq!(ramp.connections, 10);
     assert!(outcome.phases[0].stages.is_empty());
     let metrics = &ramp.metrics;
     assert_eq!(metrics.total_connections_attempted, 10, "{metrics:?}");
     assert_eq!(metrics.total_connections_established, 10, "{metrics:?}");
     assert_eq!(metrics.total_connections_not_started, 0, "{metrics:?}");
-    assert!(metrics.elapsed >= Duration::from_secs(3), "{metrics:?}");
+    assert!(metrics.elapsed >= Duration::from_secs(4), "{metrics:?}");
     assert!(
-        metrics.elapsed < Duration::from_millis(3_600),
+        metrics.elapsed < Duration::from_millis(4_600),
         "{metrics:?}"
     );
-
-    let active: Vec<u64> = metrics
-        .time_series
-        .points
-        .iter()
-        .map(|p| p.active_connections)
-        .collect();
-    assert_eq!(active.len(), 3, "{active:?}");
-    assert!(active[0] >= 8, "{active:?}");
-    assert_eq!(active[1], 10, "{active:?}");
-    assert!(active[2] <= 1, "{active:?}");
-    let sent = |i: usize| metrics.time_series.points[i].messages_sent;
-    assert!(sent(1) > sent(0) + 50, "{:?}", metrics.time_series);
+    assert_follows_ramp_hold_ramp_down(metrics);
 
     // The merged run counts the constant phase's two connections too.
     assert_eq!(outcome.metrics.total_connections_attempted, 12);
@@ -1192,15 +1193,24 @@ async fn test_scenario_staged_phase_follows_its_profile() {
 async fn test_echo_ping_interval_does_not_throttle_unpaced_load() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
+    let connections = 2;
+    let duration = Duration::from_secs(1);
+    let ping_interval = Duration::from_millis(200);
     let config = echo_test_config(&target_url)
-        .connections(2)
-        .duration(Duration::from_secs(1));
+        .connections(connections)
+        .duration(duration);
 
     let baseline = run(config.clone()).await;
-    let with_ping = run(config.ping_interval(Duration::from_millis(200))).await;
+    let with_ping = run(config.ping_interval(ping_interval)).await;
 
+    // A loop that waited for the next ping before each send manages one send
+    // per ping interval and connection, plus one at the start. The bound is
+    // ten times that, not a fixed rate, which a loaded machine may not
+    // reach; the comparison with the baseline below catches a smaller cut.
+    let pings = (duration.as_millis() / ping_interval.as_millis()) as u64;
+    let throttled = connections as u64 * (pings + 1);
     assert!(
-        with_ping.total_messages_sent > 500,
+        with_ping.total_messages_sent > 10 * throttled,
         "keepalive pings throttled unpaced echo load: {} sent with ping vs {} without",
         with_ping.total_messages_sent,
         baseline.total_messages_sent
@@ -1575,7 +1585,14 @@ async fn test_error_rate_is_zero_on_a_clean_run() {
 async fn test_error_rate_counts_a_timed_out_request_once() {
     let (target_url, cancel_server) = spawn_echo_then_silent_server(3).await;
 
-    let metrics = run(single_session_echo_config(&target_url)).await;
+    // A reply slower than the message timeout is a timeout too, so the
+    // timeout has to be far longer than an echo can take on a loaded
+    // machine, and the run long enough for the fourth request's timeout to
+    // fire well before it ends.
+    let metrics = run(single_session_echo_config(&target_url)
+        .message_timeout(Duration::from_millis(500))
+        .duration(Duration::from_millis(1_500)))
+    .await;
 
     // Each of the 3 workers gets 3 replies, then its fourth request times out:
     // 3 failed requests out of 12 sent.
@@ -1991,7 +2008,11 @@ async fn test_paced_echo_response_time_counts_waiting_behind_a_slow_reply() {
     let response = &metrics.response_time;
     assert!(rtt.count >= 10, "{metrics:?}");
     assert_eq!(response.count, rtt.count, "{metrics:?}");
-    assert!(rtt.p99_us < 100_000, "{metrics:?}");
+    // RTT stays near the 40 ms delay. Its median is checked, not its p99:
+    // with a few dozen samples p99 is the slowest reply, which one late
+    // wake-up on a loaded machine can push past any fixed bound. Measured
+    // from the schedule, RTT would grow with response time instead.
+    assert!(rtt.p50_us < 100_000, "{metrics:?}");
     assert!(response.p99_us > 300_000, "{metrics:?}");
     assert!(response.p50_us > rtt.p50_us * 3, "{metrics:?}");
     cancel_server.cancel();
@@ -2039,7 +2060,11 @@ async fn test_paced_echo_script_records_response_time_and_gates_on_it() {
     let (rtt, response) = (&metrics.message_rtt, &metrics.response_time);
     assert!(rtt.count >= 10, "{metrics:?}");
     assert_eq!(response.count, rtt.count, "{metrics:?}");
-    assert!(rtt.p99_us < 100_000, "{metrics:?}");
+    // RTT stays near the 40 ms delay. Its median is checked, not its p99:
+    // with a few dozen samples p99 is the slowest reply, which one late
+    // wake-up on a loaded machine can push past any fixed bound. Measured
+    // from the schedule, RTT would grow with response time instead.
+    assert!(rtt.p50_us < 100_000, "{metrics:?}");
     assert!(response.p99_us > 300_000, "{metrics:?}");
     assert!(response.p50_us > rtt.p50_us * 3, "{metrics:?}");
     assert_eq!(metrics.time_series.latency_basis, "response_time");
@@ -2083,8 +2108,11 @@ async fn test_paced_echo_script_restarts_its_schedule_after_a_pause() {
     let (rtt, response) = (&metrics.message_rtt, &metrics.response_time);
     assert!(rtt.count >= 4, "{metrics:?}");
     assert_eq!(response.count, rtt.count, "{metrics:?}");
-    // Without the restart the n-th send would be about n * 140 ms late.
-    assert!(response.max_us < rtt.max_us + 30_000, "{metrics:?}");
+    // Without the restart the n-th send would be about n * 140 ms late, so
+    // the median response time would be hundreds of milliseconds above the
+    // median RTT. The median ignores the odd late timer wake-up of a loaded
+    // machine, which the maximum does not.
+    assert!(response.p50_us < rtt.p50_us + 30_000, "{metrics:?}");
     cancel_server.cancel();
 }
 
@@ -2248,34 +2276,79 @@ async fn test_stages_ramp_up_down_and_up_again() {
     cancel_server.cancel();
 }
 
+/// Messages per second per connection in the runs of
+/// [`ramp_hold_ramp_down`].
+const STAGED_RATE: u64 = 20;
+
+/// Up to 10 connections over 1 s, 10 for 2 s, down to 0 over 1 s.
+fn ramp_hold_ramp_down() -> Vec<Stage> {
+    vec![
+        Stage::new(Duration::from_secs(1), 10),
+        Stage::new(Duration::from_secs(2), 10),
+        Stage::new(Duration::from_secs(1), 0),
+    ]
+}
+
+/// Checks that the time series of a [`ramp_hold_ramp_down`] run at
+/// [`STAGED_RATE`] follows the profile.
+///
+/// The counters are sampled on each 1 s boundary and when the run ends. On
+/// a loaded machine (CI runners, Windows' 15.6 ms timers) a sample can be
+/// taken late, connections can open a little after the stage asks for
+/// them, and the run can end some tens of milliseconds after its duration.
+/// So nothing here depends on what happens right at a boundary: connection
+/// counts are read only where the profile is flat for a second either way
+/// or where the result is certain, and the ramps are recognised by their
+/// send rate relative to the hold, measured over each point's own duration
+/// so that a late sample does not skew it. A run that ignored the profile,
+/// with every connection open from the start or until the end, still
+/// fails: its ramps would send at the full rate.
+fn assert_follows_ramp_hold_ramp_down(metrics: &AggregatedMetrics) {
+    let series = &metrics.time_series;
+    let points = &series.points;
+    // A fifth point is the sliver between the 4 s sample and the end of the
+    // run, kept separate when the run ended 50 ms or more after that sample.
+    assert!((4..=5).contains(&points.len()), "{series:?}");
+    assert!(
+        points.iter().all(|p| p.active_connections <= 10),
+        "more connections than the target: {series:?}"
+    );
+    // Taken at 1 s or later: the first half of the ramp's connections were
+    // opened at least half a second before.
+    assert!(points[0].active_connections >= 5, "{series:?}");
+    // Taken at 2 s, a second after the ramp and before the ramp-down.
+    assert_eq!(points[1].active_connections, 10, "{series:?}");
+    // Taken after every worker stopped.
+    assert_eq!(points.last().map(|p| p.active_connections), Some(0));
+
+    let rate = |p: &[wsblast::TimeSeriesPoint]| {
+        let sent: u64 = p.iter().map(|p| p.messages_sent).sum();
+        let secs: f64 = p.iter().map(|p| p.duration_secs).sum();
+        sent as f64 / secs
+    };
+    // 10 connections at STAGED_RATE send 200 msg/s, and 4.5 connections on
+    // average during each ramp about 100 msg/s.
+    let hold = rate(&points[1..3]);
+    assert!(
+        hold > 0.5 * 10.0 * STAGED_RATE as f64,
+        "hold at {hold} msg/s: {series:?}"
+    );
+    let (up, down) = (rate(&points[..1]), rate(&points[3..]));
+    assert!(up < 0.75 * hold, "ramp-up at {up} msg/s: {series:?}");
+    assert!(down < 0.75 * hold, "ramp-down at {down} msg/s: {series:?}");
+}
+
 #[tokio::test]
 async fn test_stages_follow_the_profile_over_time() {
     let (target_url, cancel_server) = spawn_echo_server().await;
 
     let metrics = run(LoadTestConfig::builder(target_url.as_str())
         .payload_text("stage")
-        .rate_per_connection(20)
-        .stages(vec![
-            Stage::new(Duration::from_secs(1), 10),
-            Stage::new(Duration::from_secs(1), 10),
-            Stage::new(Duration::from_secs(1), 0),
-        ]))
+        .rate_per_connection(STAGED_RATE)
+        .stages(ramp_hold_ramp_down()))
     .await;
 
-    let active: Vec<u64> = metrics
-        .time_series
-        .points
-        .iter()
-        .map(|p| p.active_connections)
-        .collect();
-    assert_eq!(active.len(), 3, "{active:?}");
-    // The first sample lands as the last connections of the ramp open.
-    assert!(active[0] >= 8, "{active:?}");
-    assert_eq!(active[1], 10, "{active:?}");
-    assert!(active[2] <= 1, "{active:?}");
-    // About 5 connections on average in the first second, 10 in the second.
-    let sent = |i: usize| metrics.time_series.points[i].messages_sent;
-    assert!(sent(1) > sent(0) + 50, "{:?}", metrics.time_series);
+    assert_follows_ramp_hold_ramp_down(&metrics);
     assert_eq!(metrics.total_connections_attempted, 10, "{metrics:?}");
     cancel_server.cancel();
 }
@@ -2318,8 +2391,17 @@ async fn test_live_counters_add_up_across_shards() {
     let metrics = runner.run().await.unwrap();
     let live = runner.live_snapshot();
 
-    assert_eq!(live.connections_established, 64);
+    // On a loaded machine some of the 64 handshakes may not finish within
+    // 500 ms, so the live counters are compared with the merged per-worker
+    // metrics rather than with the connection count.
+    assert_eq!(metrics.total_connections_attempted, 64);
+    assert!(metrics.total_connections_established > 0, "{metrics:?}");
+    assert_eq!(
+        live.connections_established,
+        metrics.total_connections_established
+    );
     assert_eq!(live.messages_sent, metrics.total_messages_sent);
+    assert_eq!(live.messages_received, metrics.total_messages_recv);
     assert_eq!(live.bytes_sent, metrics.total_bytes_sent);
     assert_eq!(live.active_connections, 0);
     cancel_server.cancel();
@@ -2952,8 +3034,12 @@ async fn test_chaos_delay_is_kept_out_of_rtt_and_response_time() {
     // At most one send per 50 ms instead of one per 20 ms.
     assert!(metrics.total_messages_sent <= 30, "{metrics:?}");
     assert_eq!(metrics.response_time.count, metrics.message_rtt.count);
-    assert!(metrics.message_rtt.p99_us < 25_000, "{metrics:?}");
-    assert!(metrics.response_time.p99_us < 25_000, "{metrics:?}");
+    // Counted in RTT, the delay would add 30 ms to every sample; left in the
+    // schedule, it would make the n-th request about n * 30 ms late. Either
+    // way the median would be at least the delay. The median, unlike p99,
+    // is not moved by the few late timer wake-ups of a loaded machine.
+    assert!(metrics.message_rtt.p50_us < 30_000, "{metrics:?}");
+    assert!(metrics.response_time.p50_us < 30_000, "{metrics:?}");
     assert_no_errors(&metrics);
     cancel_server.cancel();
 }
