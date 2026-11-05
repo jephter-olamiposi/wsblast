@@ -680,7 +680,7 @@ impl LoadTestConfigBuilder {
 /// mode, unless an action script sends them. `prefix` names where the
 /// chaos comes from, such as a scenario phase.
 #[cfg(feature = "chaos")]
-fn validate_chaos_mode(mode: TestMode, has_actions: bool, prefix: &str) -> Result<()> {
+pub(crate) fn validate_chaos_mode(mode: TestMode, has_actions: bool, prefix: &str) -> Result<()> {
     let sends_data = has_actions || matches!(mode, TestMode::Echo | TestMode::Stream);
     if !sends_data {
         return Err(ConfigError::UnsupportedOption(format!(

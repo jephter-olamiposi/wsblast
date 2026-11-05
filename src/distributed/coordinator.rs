@@ -269,6 +269,20 @@ struct PhaseRun {
     parts: Vec<Part>,
     /// When the last result arrived.
     last_result: Option<Instant>,
+    /// The seed of the phase's chaos decisions, which every agent's seed
+    /// is derived from; `None` without chaos.
+    chaos_seed: Option<u64>,
+}
+
+/// The seed of the chaos decisions of a run of `config`.
+#[cfg(feature = "chaos")]
+fn chaos_seed(config: &LoadTestConfig) -> Option<u64> {
+    config.chaos.as_ref().and_then(|chaos| chaos.seed)
+}
+
+#[cfg(not(feature = "chaos"))]
+fn chaos_seed(_config: &LoadTestConfig) -> Option<u64> {
+    None
 }
 
 /// The state of a run across its phases.
@@ -301,9 +315,8 @@ impl Coordinator {
     /// # Errors
     ///
     /// Returns a configuration error for an invalid or repeated agent
-    /// address, a token shorter than 16 characters, a setting distributed
-    /// runs do not support (the TUI), or a configuration that cannot be
-    /// split, such as fewer connections than agents.
+    /// address, a token shorter than 16 characters, or a configuration that
+    /// cannot be split, such as fewer connections than agents.
     pub fn new<I, S>(config: LoadTestConfig, agents: I, token: impl Into<String>) -> Result<Self>
     where
         I: IntoIterator<Item = S>,
@@ -367,7 +380,6 @@ impl Coordinator {
             targets: scenario.resolve_phase_targets(target_override, phase)?,
             phases: scenario.compile(phase)?,
         };
-        super::protocol::check_supported(&base_config)?;
         for (phase, target) in plan_.phases.iter().zip(&plan_.targets) {
             let mut config = crate::runner::phase_config(base_config.clone(), phase);
             config.target_url = target.clone();
@@ -841,6 +853,7 @@ impl Coordinator {
                 start: Instant::now(),
                 parts,
                 last_result: None,
+                chaos_seed: chaos_seed(&spec.config),
             }));
         }
         let skew_bound = session
@@ -1008,6 +1021,7 @@ impl Coordinator {
             start,
             parts,
             last_result,
+            chaos_seed: chaos_seed(&spec.config),
         };
         if let Some(intervals) = &self.intervals {
             let elapsed = run
@@ -1172,10 +1186,15 @@ impl Coordinator {
             )));
         };
         let elapsed = last_result.saturating_duration_since(run.start);
-        let metrics = totals
+        let mut metrics = totals
             .finish(elapsed, connections)
             .with_not_started(not_started)
             .with_time_series(TimeSeries::merge_parallel(parts));
+        // The agents' counts add up; their seeds were derived from the
+        // run's, which is the one that repeats the run.
+        if let (Some(chaos), Some(seed)) = (metrics.chaos.as_mut(), run.chaos_seed) {
+            chaos.seed = seed;
+        }
         Ok((metrics, agents))
     }
 
@@ -1202,11 +1221,15 @@ impl Coordinator {
         let mut per_agent: Vec<Option<AgentTotals>> =
             (0..self.agents.len()).map(|_| None).collect();
         let mut started_at: Vec<Option<u64>> = vec![None; self.agents.len()];
+        let mut first_chaos_seed: Option<u64> = None;
 
         for (index, run) in runs {
             let phase = &scenario.phases[*index];
             let target = &scenario.targets[*index];
             let (phase_metrics, agents) = self.merge_phase(run)?;
+            if first_chaos_seed.is_none() {
+                first_chaos_seed = phase_metrics.chaos.as_ref().map(|chaos| chaos.seed);
+            }
             let offset = run.start.saturating_duration_since(scenario_start);
             for (slot, part) in run.parts.iter().enumerate() {
                 let Part::Finished(result) = part else {
@@ -1279,12 +1302,17 @@ impl Coordinator {
                 },
             )
             .collect();
-        let metrics = totals
+        let mut metrics = totals
             .finish(total_elapsed, total_connections)
             .with_not_started(total_not_started)
             .with_time_series(time_series)
             .with_capture(capture)
             .with_distributed(self.summary(&agents));
+        // As on one machine, the scenario reports the seed of the first
+        // phase that injected faults.
+        if let (Some(chaos), Some(seed)) = (metrics.chaos.as_mut(), first_chaos_seed) {
+            chaos.seed = seed;
+        }
         let overall =
             crate::report::evaluate_slos(&self.config.slo.or_from(&scenario.slo), &metrics);
         let slo = crate::report::scenario_slo_evaluation(

@@ -308,6 +308,18 @@ impl XorShift64 {
     }
 }
 
+/// The seed agent `agent` (its position in `--agents`, from 0) of a
+/// distributed run draws its decisions from, derived from the run's seed.
+///
+/// Every agent numbers its connection slots from 0, so with the run's seed
+/// itself every agent would make the same decisions on its slot 0, its slot
+/// 1 and so on. Mixing in the agent's position gives each agent sequences of
+/// its own, and a seeded run still repeats every agent's decisions.
+#[cfg(feature = "distributed")]
+pub(crate) fn agent_seed(seed: u64, agent: usize) -> u64 {
+    splitmix64(seed ^ splitmix64((agent as u64).wrapping_add(1)).rotate_left(17))
+}
+
 /// Spreads a seed's bits so nearby seeds give unrelated sequences.
 fn splitmix64(seed: u64) -> u64 {
     let mut z = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -401,6 +413,30 @@ mod tests {
             (Duration::from_millis(1)..=Duration::from_millis(5)).contains(&p.delay)
         }));
         assert!(delays.iter().any(|(_, close)| *close == Some(true)));
+    }
+
+    #[cfg(feature = "distributed")]
+    #[test]
+    fn agents_derive_distinct_repeatable_seeds() {
+        let seeds: Vec<u64> = (0..64).map(|agent| agent_seed(42, agent)).collect();
+        assert_eq!(
+            seeds,
+            (0..64)
+                .map(|agent| agent_seed(42, agent))
+                .collect::<Vec<_>>()
+        );
+        let distinct: std::collections::HashSet<u64> = seeds.iter().copied().collect();
+        assert_eq!(distinct.len(), seeds.len());
+        assert!(!seeds.contains(&42));
+        assert_ne!(agent_seed(42, 0), agent_seed(43, 0));
+
+        // Slot 0 of two agents draws different sequences.
+        let config = ChaosConfig::new().with_drop(50.0);
+        let draws = |agent| {
+            let mut chaos = ChaosState::new(&config.clone().with_seed(agent_seed(7, agent)), 0);
+            (0..64).map(|_| chaos.plan_send().drop).collect::<Vec<_>>()
+        };
+        assert_ne!(draws(0), draws(1));
     }
 
     #[test]

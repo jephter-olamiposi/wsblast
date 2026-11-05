@@ -11,7 +11,7 @@
 use crate::cli::TestMode;
 use crate::config::{LoadTestConfig, PayloadConfig, ReplyMatch, Stage};
 use crate::error::{ConfigError, ErrorCategory, Result, WsBlastError};
-use crate::metrics::{LiveSnapshot, MetricsTotals};
+use crate::metrics::{ChaosSummary, LiveSnapshot, MetricsTotals};
 use crate::timeseries::{SeriesPart, TimeSeries, interval_histogram};
 use clap::ValueEnum;
 use hdrhistogram::Histogram;
@@ -24,8 +24,9 @@ use std::time::Duration;
 ///
 /// Version 2 added scenario phases (several `prepare` to `result` rounds on
 /// one connection), capture records, refreshed authentication tokens and
-/// interval latency in snapshots.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// interval latency in snapshots. Version 3 added chaos injection to the
+/// configuration and the agent's counts of injected faults to its result.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// The shortest agent token accepted.
 pub const MIN_TOKEN_LEN: usize = 16;
@@ -264,6 +265,60 @@ pub(crate) struct WireCapture {
     pub(crate) limit: Option<u64>,
 }
 
+/// Chaos settings on the wire: the `--chaos-*` options of a run, or the
+/// `chaos:` mapping of a scenario phase as the coordinator resolved it, with
+/// the seed of this agent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct WireChaos {
+    pub(crate) delay: Duration,
+    pub(crate) jitter: Duration,
+    pub(crate) drop_percent: f64,
+    pub(crate) corrupt_percent: f64,
+    pub(crate) close_percent: f64,
+    /// The `--chaos-close-mode` value, as spelled on the command line.
+    pub(crate) close_mode: String,
+    /// This agent's seed, derived from the run's seed and the agent's
+    /// position, so every agent draws decisions of its own.
+    pub(crate) seed: u64,
+}
+
+#[cfg(feature = "chaos")]
+impl WireChaos {
+    /// The settings of `chaos`, with `seed` in place of its own.
+    fn new(chaos: &crate::chaos::ChaosConfig, seed: u64) -> Self {
+        Self {
+            delay: chaos.delay,
+            jitter: chaos.jitter,
+            drop_percent: chaos.drop_percent,
+            corrupt_percent: chaos.corrupt_percent,
+            close_percent: chaos.close_percent,
+            close_mode: chaos
+                .close_mode
+                .to_possible_value()
+                .map(|value| value.get_name().to_string())
+                .unwrap_or_default(),
+            seed,
+        }
+    }
+
+    /// The chaos configuration an agent runs with, checked as the command
+    /// line checks it. `scripted` says whether the phase has an action
+    /// script, which sends data frames in any mode.
+    fn into_config(self, mode: TestMode, scripted: bool) -> Result<crate::chaos::ChaosConfig> {
+        let close_mode = crate::chaos::ChaosCloseMode::from_str(&self.close_mode, false)
+            .map_err(|_| unsupported(format!("unknown chaos close mode '{}'", self.close_mode)))?;
+        let chaos = crate::chaos::ChaosConfig::new()
+            .with_delay(self.delay, self.jitter)
+            .with_drop(self.drop_percent)
+            .with_corrupt(self.corrupt_percent)
+            .with_close(self.close_percent, close_mode)
+            .with_seed(self.seed);
+        chaos.validate()?;
+        crate::config::validate_chaos_mode(mode, scripted, "")?;
+        Ok(chaos)
+    }
+}
+
 /// A header on the wire: name and value.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WireHeader {
@@ -331,26 +386,13 @@ pub(crate) struct WireConfig {
     /// refreshes; later values arrive in `token` messages.
     #[serde(default)]
     pub(crate) live_auth: Option<WireHeader>,
+    /// The faults this agent injects, when the run or phase injects any.
+    #[serde(default)]
+    pub(crate) chaos: Option<WireChaos>,
 }
 
 fn unsupported(message: impl Into<String>) -> WsBlastError {
     ConfigError::UnsupportedOption(message.into()).into()
-}
-
-/// Rejects settings a distributed run does not support in this version.
-pub(crate) fn check_supported(config: &LoadTestConfig) -> Result<()> {
-    if config.tui {
-        return Err(unsupported(
-            "--tui is not supported with --agents; the coordinator prints progress lines instead",
-        ));
-    }
-    #[cfg(feature = "chaos")]
-    if config.chaos.is_some() {
-        return Err(unsupported(
-            "--chaos-* options are not supported with --agents",
-        ));
-    }
-    Ok(())
 }
 
 /// Splits `config` between `agents` agents, in `--agents` order.
@@ -358,7 +400,8 @@ pub(crate) fn check_supported(config: &LoadTestConfig) -> Result<()> {
 /// Connections, `--requests` and `--ramp-rate` are divided with [`split`];
 /// the message rate per connection is unchanged, so the total rate is the
 /// same as on one machine. A staged run sends every agent the whole profile
-/// and its [`Share`].
+/// and its [`Share`]. With chaos, every agent gets a seed of its own,
+/// derived from the run's seed and its position.
 ///
 /// # Errors
 ///
@@ -369,7 +412,6 @@ pub(crate) fn plan(config: &LoadTestConfig, agents: usize) -> Result<Vec<WireCon
     if agents == 0 {
         return Err(ConfigError::InvalidOption("--agents lists no agent".to_string()).into());
     }
-    check_supported(config)?;
     if config.connections < agents {
         let what = if config.stages.is_empty() {
             format!("{} connections", config.connections)
@@ -408,6 +450,11 @@ pub(crate) fn plan(config: &LoadTestConfig, agents: usize) -> Result<Vec<WireCon
                 .max_requests
                 .map(|requests| split(requests, index, agents));
             wire.stage_share = (!config.stages.is_empty()).then_some(share);
+            #[cfg(feature = "chaos")]
+            if let Some(chaos) = &config.chaos {
+                let seed = crate::chaos::agent_seed(chaos.seed.unwrap_or_default(), index);
+                wire.chaos = Some(WireChaos::new(chaos, seed));
+            }
             wire
         })
         .collect())
@@ -492,6 +539,8 @@ impl WireConfig {
             phase: None,
             capture: None,
             live_auth,
+            // Set per agent by `plan`, with the agent's own seed.
+            chaos: None,
         })
     }
 
@@ -513,6 +562,10 @@ impl WireConfig {
             ))
         })?;
         let reply_match: ReplyMatch = self.reply_match.parse()?;
+        let scripted = self
+            .phase
+            .as_ref()
+            .is_some_and(|phase| !phase.actions.is_empty());
         let mut builder = LoadTestConfig::builder(self.target)
             .mode(mode)
             .connections(self.connections)
@@ -586,6 +639,21 @@ impl WireConfig {
                 ));
             }
         }
+        if let Some(chaos) = self.chaos {
+            #[cfg(feature = "chaos")]
+            {
+                config.chaos = Some(chaos.into_config(mode, scripted)?);
+            }
+            #[cfg(not(feature = "chaos"))]
+            {
+                let _ = (chaos, scripted);
+                return Err(unsupported(
+                    "chaos injection needs the 'chaos' feature, which this agent's build of wsblast does not include",
+                ));
+            }
+        }
+        #[cfg(not(feature = "chaos"))]
+        let _ = scripted;
         if let Some(share) = self.stage_share {
             if share.agents == 0 || share.index >= share.agents {
                 return Err(ConfigError::InvalidOption(format!(
@@ -765,10 +833,14 @@ impl WirePhase {
             actions,
             slo: crate::config::SloThresholds::default(),
             stages: config.stages.clone(),
-            // Chaos is not sent to agents in this protocol version; the
-            // coordinator rejects it with --agents.
+            // The coordinator resolved the phase's chaos (its own mapping
+            // or the command line's, and the seed) into the share's
+            // configuration, with this agent's seed. The phase carries
+            // exactly that, so the runner neither falls back to other
+            // settings nor picks another seed; no chaos at all is an empty
+            // mapping, which turns chaos off.
             #[cfg(feature = "chaos")]
-            chaos: None,
+            chaos: Some(config.chaos.clone().unwrap_or_default()),
         })
     }
 }
@@ -868,6 +940,9 @@ pub(crate) struct WireTotals {
     pub(crate) handshake: Sparse,
     pub(crate) rtt: Sparse,
     pub(crate) response: Sparse,
+    /// The faults the agent injected, with its own seed.
+    #[serde(default)]
+    pub(crate) chaos: Option<ChaosSummary>,
 }
 
 impl From<&MetricsTotals> for WireTotals {
@@ -885,6 +960,7 @@ impl From<&MetricsTotals> for WireTotals {
             handshake: to_sparse(&totals.handshake),
             rtt: to_sparse(&totals.rtt),
             response: to_sparse(&totals.response),
+            chaos: totals.chaos.clone(),
         }
     }
 }
@@ -906,7 +982,7 @@ impl WireTotals {
             sent_message_errors: self.sent_message_errors,
             interrupted: self.interrupted,
             errors: self.errors,
-            chaos: None,
+            chaos: self.chaos,
         })
     }
 }
@@ -1343,6 +1419,113 @@ phases:
             reason: String::new(),
         }];
         assert!(bad.into_phase(&agent).is_err());
+    }
+
+    #[cfg(feature = "chaos")]
+    #[test]
+    fn chaos_travels_with_a_seed_per_agent() {
+        use crate::chaos::{ChaosCloseMode, ChaosConfig};
+        let chaos = ChaosConfig::new()
+            .with_delay(Duration::from_millis(2), Duration::from_millis(3))
+            .with_drop(10.0)
+            .with_corrupt(5.5)
+            .with_close(2.0, ChaosCloseMode::Graceful)
+            .with_seed(99);
+        let whole = config(
+            LoadTestConfig::builder("ws://127.0.0.1:9/")
+                .connections(3)
+                .chaos(chaos.clone()),
+        );
+        let shares = plan(&whole, 3).unwrap();
+        let seeds: Vec<u64> = shares
+            .iter()
+            .map(|share| share.chaos.as_ref().unwrap().seed)
+            .collect();
+        let expected: Vec<u64> = (0..3).map(|i| crate::chaos::agent_seed(99, i)).collect();
+        assert_eq!(seeds, expected);
+
+        let message = Message::Prepare {
+            config: Box::new(shares[1].clone()),
+            start_timeout: Duration::from_secs(1),
+        };
+        let Message::Prepare { config: wire, .. } = Message::decode(&message.encode()).unwrap()
+        else {
+            panic!("not a prepare message");
+        };
+        let agent = wire.into_config().unwrap();
+        assert_eq!(
+            agent.chaos,
+            Some(chaos.with_seed(crate::chaos::agent_seed(99, 1)))
+        );
+
+        let mut bad = shares[0].clone();
+        bad.chaos.as_mut().unwrap().drop_percent = 101.0;
+        assert!(bad.into_config().is_err());
+        let mut listen = shares[0].clone();
+        listen.mode = "listen".to_string();
+        listen.reply_match = "first".to_string();
+        let err = listen.into_config().unwrap_err().to_string();
+        assert!(err.contains("chaos injection needs data sends"), "{err}");
+
+        // Totals carry the agent's counts.
+        let mut totals = MetricsTotals::new().unwrap();
+        totals.chaos = Some(ChaosSummary {
+            seed: 5,
+            delayed: 1,
+            dropped: 2,
+            corrupted: 3,
+            closes: 4,
+        });
+        let json = serde_json::to_string(&WireTotals::from(&totals)).unwrap();
+        let back: WireTotals = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.into_totals().unwrap().chaos, totals.chaos);
+    }
+
+    #[cfg(all(feature = "chaos", feature = "scenario"))]
+    #[test]
+    fn a_phase_carries_the_chaos_the_coordinator_resolved() {
+        let scenario = crate::ScenarioConfig::from_yaml(
+            r#"
+version: "1.0"
+target: "ws://127.0.0.1:9/"
+metadata:
+  name: "chaos"
+phases:
+  - name: "scripted"
+    connections: 4
+    duration: "1s"
+    chaos:
+      drop: 25
+      seed: 11
+    actions:
+      - type: Send
+        payload: "x"
+        count: 2
+"#,
+        )
+        .unwrap();
+        let phase = scenario.compile(None).unwrap().remove(0);
+        // Listen mode sends nothing itself; the action script does.
+        let base = config(
+            LoadTestConfig::builder("ws://127.0.0.1:9/")
+                .mode(TestMode::Listen)
+                .reply_match(ReplyMatch::First),
+        );
+        let whole = crate::runner::phase_config(base, &phase);
+        let mut share = plan(&whole, 2).unwrap().remove(1);
+        share.phase = Some(WirePhase::from_phase(&phase));
+        let wire_phase = share.phase.clone().unwrap();
+        let agent = share.clone().into_config().unwrap();
+        let seed = crate::chaos::agent_seed(11, 1);
+        assert_eq!(agent.chaos.as_ref().and_then(|c| c.seed), Some(seed));
+        let rebuilt = wire_phase.into_phase(&agent).unwrap();
+        assert_eq!(rebuilt.chaos, agent.chaos);
+        let runs = crate::runner::phase_config(agent.clone(), &rebuilt);
+        assert_eq!(runs.chaos, agent.chaos);
+
+        let mut unscripted = share;
+        unscripted.phase.as_mut().unwrap().actions.clear();
+        assert!(unscripted.into_config().is_err());
     }
 
     #[test]

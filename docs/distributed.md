@@ -12,11 +12,12 @@ Contents:
 2. [Flags](#2-flags)
 3. [How the load is split](#3-how-the-load-is-split)
 4. [Scenarios, capture, refreshed tokens and live export](#4-scenarios-capture-refreshed-tokens-and-live-export)
-5. [Architecture and protocol](#5-architecture-and-protocol)
-6. [Security model](#6-security-model)
-7. [Failures and exit codes](#7-failures-and-exit-codes)
-8. [Limitations](#8-limitations)
-9. [Using it from Rust](#9-using-it-from-rust)
+5. [Chaos injection](#5-chaos-injection)
+6. [Architecture and protocol](#6-architecture-and-protocol)
+7. [Security model](#7-security-model)
+8. [Failures and exit codes](#8-failures-and-exit-codes)
+9. [Limitations](#9-limitations)
+10. [Using it from Rust](#10-using-it-from-rust)
 
 ## 1. Running on N machines
 
@@ -32,7 +33,7 @@ Contents:
    wsblast agent --listen 0.0.0.0:7700
    ```
 
-   The agent prints `wsblast agent listening on ws://0.0.0.0:7700 (protocol 2, one test at a time)` and then one line per test it runs, naming the coordinator, the target and the connection count. Raise the open-file limit on the agent machines (`ulimit -n 65535`) as you would for a single-machine run.
+   The agent prints `wsblast agent listening on ws://0.0.0.0:7700 (protocol 3, one test at a time)` and then one line per test it runs, naming the coordinator, the target and the connection count. Raise the open-file limit on the agent machines (`ulimit -n 65535`) as you would for a single-machine run.
 
 3. On the coordinator, run the test as usual and add `--agents`:
 
@@ -42,7 +43,7 @@ Contents:
      --max-p99 200ms --format json -o report.json
    ```
 
-   Each agent opens 10,000 of the 30,000 connections. The coordinator prints one progress bar for the whole run (summed from the agents' live counters), then the merged report, and evaluates the SLOs on the merged metrics with the usual exit codes ([section 7](#7-failures-and-exit-codes)).
+   Each agent opens 10,000 of the 30,000 connections. The coordinator prints one progress bar for the whole run (summed from the agents' live counters), then the merged report, and evaluates the SLOs on the merged metrics with the usual exit codes ([section 7](#8-failures-and-exit-codes)).
 
 An agent serves one test after another for as long as it runs; stop it with Ctrl+C or SIGTERM. A test in progress is then stopped and still sends its result.
 
@@ -65,7 +66,7 @@ The coordinator is the normal command plus:
 | `--agent-timeout DURATION` | `30s` | Time the agents get to connect, authenticate, validate the test and become ready (the start barrier), and time each agent gets after the end of the run, or after a stop, to send its result. |
 | `--agent-ca PEM` | off | CA certificates to trust for `wss://` agents, in addition to the platform's roots (which `SSL_CERT_FILE` and `SSL_CERT_DIR` also override). Use it for a private CA or a self-signed agent certificate. |
 
-Every other flag of a normal run keeps its meaning: target, mode, rate, payload, headers, subprotocol, timeouts, pings, `--match`, `--no-reconnect`, GraphQL options, `--auth-*` including `--auth-token-refresh`, `--scenario` and `--phase`, `--capture` and `--capture-limit`, `--prometheus-listen`, `--otel-*`, SLOs, `--format` and `-o`. [Section 4](#4-scenarios-capture-refreshed-tokens-and-live-export) describes how the scenario, capture, token refresh and export flags work across machines. Only `--tui` is not supported with `--agents` in this version; it is rejected with exit code 1.
+Every other flag of a normal run keeps its meaning: target, mode, rate, payload, headers, subprotocol, timeouts, pings, `--match`, `--no-reconnect`, GraphQL options, `--auth-*` including `--auth-token-refresh`, `--scenario` and `--phase`, `--capture` and `--capture-limit`, `--prometheus-listen`, `--otel-*`, `--chaos-*`, SLOs, `--format` and `-o`. [Section 4](#4-scenarios-capture-refreshed-tokens-and-live-export) describes how the scenario, capture, token refresh and export flags work across machines, and [section 5](#5-chaos-injection) how chaos does. Only `--tui` is not supported with `--agents` in this version; it is rejected with exit code 1.
 
 ## 3. How the load is split
 
@@ -130,13 +131,22 @@ With `--auth-token-cmd` and `--auth-token-refresh`, the token command runs on th
 
 The coordinator keeps these cluster totals in a live-metrics registry of its own whether or not an exporter runs, so a display that reads live counters (as the TUI does on one machine) can read them too.
 
-## 5. Architecture and protocol
+## 5. Chaos injection
+
+The `--chaos-*` options, and a scenario phase's `chaos:` mapping, work with `--agents` as on one machine ([METHODOLOGY.md, section 13](../METHODOLOGY.md#13-chaos-injection)): every agent injects the faults into its own connections, with the same percentages, delay and close mode.
+
+- **Seeds.** The run has one seed: `--chaos-seed`, the phase's `seed`, or one the coordinator picks. Each agent draws its decisions from a seed of its own, derived from the run's seed and the agent's position in `--agents` with SplitMix64. Every agent numbers its connection slots from 0, so with the run's seed itself the agents would all make the same decisions on the same slots; with their own seeds they do not, and a run with the same seed and the same `--agents` order repeats every agent's decisions. Moving an agent to another position in `--agents` gives it another seed.
+- **Scenarios.** The coordinator resolves each phase's chaos (the phase's mapping, or the command line's options when it has none, and the seed) and sends every agent its share of it with the agent's seed, so the agents do not fall back on settings of their own.
+- **Counts.** Each agent's result carries its counts of delayed, dropped and corrupted sends and of closes. The coordinator adds them up, so `metrics.chaos` holds the counts of every agent and the run's seed, the one to give `--chaos-seed` to repeat the run; a scenario reports the seed of its first phase that injected faults, as on one machine. Each agent's own counts and seed are in its [`AgentOutcome`](#10-using-it-from-rust) when the coordinator runs from Rust.
+- The counts of a whole run repeat when the number of sends does, as on one machine: with `-n` and one connection per agent they repeat exactly.
+
+## 6. Architecture and protocol
 
 The coordinator opens one WebSocket control connection to each agent, sending the token as `Authorization: Bearer TOKEN` in the handshake. Every message is a JSON text frame with a `type` field:
 
 | Message | Direction | Content |
 | :--- | :--- | :--- |
-| `hello` | both | `protocol` (the protocol version, currently 2) and `version` (the wsblast version). The coordinator sends first and the agent answers. |
+| `hello` | both | `protocol` (the protocol version, currently 3) and `version` (the wsblast version). The coordinator sends first and the agent answers. |
 | `prepare` | coordinator to agent | `config`: the agent's share of the test or of one scenario phase, and `start_timeout`: how long the agent waits for `start`. |
 | `ready` | agent to coordinator | `connections`: the agent validated the configuration, resolved the target, built its TLS settings and waits. Nothing has connected to the target yet. |
 | `start` | coordinator to agent | Start the run now. |
@@ -158,11 +168,11 @@ A test goes through these steps:
 7. **Next phase.** For a scenario, the coordinator sends the next phase's `prepare` on the same connection, and steps 3 to 6 repeat. An agent waits for it for the phase's duration plus `start_timeout` plus 60 seconds.
 8. **Merge.** The coordinator closes the control connections, merges every result that arrived and prints the report.
 
-The `config` of `prepare` is a dedicated wire structure, not a serialised `LoadTestConfig`: the target, the mode, the connections, ramp rate and request limit of this agent, the duration, the stages and the agent's share of them, the rate, the payload (text as is, binary as base64), the handshake headers (including resolved `--auth-*` credentials), the subprotocol, the timeouts, the ping interval, `--match`, the reconnect setting and the GraphQL settings; and, when they apply, `phase` (the scenario phase's name, think time and actions), `capture` (how many records the agent may still queue) and `live_auth` (the refreshed header's name and current value). SLOs, the report format and file paths stay on the coordinator.
+The `config` of `prepare` is a dedicated wire structure, not a serialised `LoadTestConfig`: the target, the mode, the connections, ramp rate and request limit of this agent, the duration, the stages and the agent's share of them, the rate, the payload (text as is, binary as base64), the handshake headers (including resolved `--auth-*` credentials), the subprotocol, the timeouts, the ping interval, `--match`, the reconnect setting and the GraphQL settings; and, when they apply, `phase` (the scenario phase's name, think time and actions), `capture` (how many records the agent may still queue), `live_auth` (the refreshed header's name and current value) and `chaos` (the faults to inject, with the agent's seed). SLOs, the report format and file paths stay on the coordinator.
 
-Version 2 of the protocol added scenario phases, the `capture` and `token` messages and the snapshot's `intervals`. A wsblast speaking protocol 1 and one speaking protocol 2 reject each other at the hello, with an error naming both versions.
+Version 2 of the protocol added scenario phases, the `capture` and `token` messages and the snapshot's `intervals`. Version 3 added `chaos` to the configuration and the agent's counts of injected faults to its result. Builds speaking different versions reject each other at the hello, with an error naming both wsblast versions: an agent of an earlier release cannot be given chaos settings it would ignore.
 
-A `result` carries the agent's counters, its error breakdown, its interrupted and not-started slot counts, its handshake, RTT and response-time histograms as `[value, count]` pairs of every non-empty bucket, its time series, and the latency histogram of every time-series interval in the same form. A histogram rebuilt from these pairs has exactly the agent's buckets, so merging rebuilt histograms gives the same percentiles as merging the agents' own.
+A `result` carries the agent's counters, its error breakdown, its interrupted and not-started slot counts, its handshake, RTT and response-time histograms as `[value, count]` pairs of every non-empty bucket, its time series, the latency histogram of every time-series interval in the same form, and, when it injected faults, its chaos counts. A histogram rebuilt from these pairs has exactly the agent's buckets, so merging rebuilt histograms gives the same percentiles as merging the agents' own.
 
 Example `prepare` and `result` messages, abbreviated:
 
@@ -171,7 +181,7 @@ Example `prepare` and `result` messages, abbreviated:
 {"type":"result","result":{"elapsed":{"secs":300,"nanos":1200000},"started_at_unix_ms":1761400000123,"connections":4,"not_started":0,"totals":{"messages_sent":2400,"rtt":[[812,3],[815,9],"..."],"...":"..."},"time_series":{"...":"..."},"intervals":[{"index":0,"values":[[810,4],"..."]},"..."]}}
 ```
 
-## 6. Security model
+## 7. Security model
 
 An agent opens connections to whatever target an authenticated coordinator names, with whatever headers it sends, so the token is what stands between the agent and anyone who can reach its port.
 
@@ -184,7 +194,7 @@ An agent opens connections to whatever target an authenticated coordinator names
 - **One coordinator at a time.** An agent runs one test at a time and turns other coordinators away with `HTTP 409` until it is done, so a second coordinator cannot hijack or disturb a running test.
 - The coordinator does not authenticate agents beyond TLS: with `ws://`, anyone who can redirect traffic to an agent address can receive the token and the test's headers.
 
-## 7. Failures and exit codes
+## 8. Failures and exit codes
 
 | Situation | What happens | Exit code |
 | :--- | :--- | :--- |
@@ -198,7 +208,7 @@ An agent opens connections to whatever target an authenticated coordinator names
 
 A lost agent's work is never re-run on another agent, so nothing is counted twice; its share of connections and messages is simply missing from the report, which is why a run with a lost agent exits with 1. Other exit codes follow [METHODOLOGY.md, section 9](../METHODOLOGY.md#9-slo-evaluation-and-exit-codes).
 
-## 8. Limitations
+## 9. Limitations
 
 - The TUI (`--tui`) is not supported with `--agents` in this version and is rejected with exit code 1.
 - Live export trails a single machine's by up to one second ([section 4.4](#44-live-export)).
@@ -208,6 +218,6 @@ A lost agent's work is never re-run on another agent, so nothing is counted twic
 - The coordinator does not check that the agents are not saturated. Watch their CPU as you would for a single machine.
 - The agents' wall clocks are not used for any measurement; `started_at_unix_ms` in the library's per-agent outcome is informational.
 
-## 9. Using it from Rust
+## 10. Using it from Rust
 
 `wsblast::distributed` has the same agent and coordinator as the command line. `AgentConfig::builder()` and `AgentServer::bind` start an agent in-process (port 0 works); `Coordinator::new(config, agents, token)` takes a `LoadTestConfig`, and `run()` returns a `DistributedOutcome` with the merged `AggregatedMetrics` and, for each agent, its own metrics or the reason it was lost. A configuration built with `.capture(path)` captures across the agents. `Coordinator::scenario(scenario, base_config, phase, target, agents, token)` takes a `ScenarioConfig` like `ScenarioExecutor::new`, and `run_scenario()` returns a `DistributedScenarioOutcome`: the `ScenarioOutcome` a single machine would return (merged metrics, every phase with its merged metrics and SLO result, and the SLO gate of the run), each agent over the whole scenario, and each agent's part of every phase. `Coordinator::live_snapshot()` reads the cluster's live counters while a run is in progress. The crate's `tests/distributed.rs` runs agents and a coordinator against the mock server in one process.

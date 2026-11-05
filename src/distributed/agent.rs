@@ -599,7 +599,9 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let closed = |_| String::new();
-    let phase = wire.phase.take();
+    // The phase stays in the share too: whether it has an action script
+    // decides whether chaos may act in a mode that sends no data itself.
+    let phase = wire.phase.clone();
     let capture = wire.capture.take();
     #[cfg(not(feature = "capture"))]
     if capture.is_some() {

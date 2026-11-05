@@ -505,19 +505,10 @@ fn check_distributed_options(cli: &Cli) -> Result<()> {
                 .to_string(),
         )));
     }
-    #[cfg(feature = "chaos")]
-    if cli.chaos_delay.is_some()
-        || cli.chaos_drop.is_some()
-        || cli.chaos_corrupt.is_some()
-        || cli.chaos_close.is_some()
-    {
-        return Err(WsBlastError::Config(ConfigError::UnsupportedOption(
-            "--chaos-* cannot be used with --agents in this version of wsblast".to_string(),
-        )));
-    }
     // A token re-signed before expiry, or an OAuth2 token refreshed before
-    // it expires, is pushed to the agents like a refreshed token command. A token signed per connection attempt would need the
-    // signing key on every agent, and the key stays on the coordinator.
+    // it expires, is pushed to the agents like a refreshed token command. A
+    // token signed per connection attempt would need the signing key on
+    // every agent, and the key stays on the coordinator.
     #[cfg(feature = "auth")]
     if cli.auth_jwt_per_connection {
         return Err(WsBlastError::Config(ConfigError::UnsupportedOption(
