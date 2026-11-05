@@ -366,14 +366,18 @@ where
 type Sink<S> = SplitSink<WebSocketStream<S>, WsMessage>;
 type Stream<S> = SplitStream<WebSocketStream<S>>;
 
+/// Sends `message` on the control channel. The error is boxed because
+/// `tungstenite::Error` is large and every caller only reports it.
 pub(crate) async fn send<S>(
     sink: &mut Sink<S>,
     message: &Message,
-) -> std::result::Result<(), tokio_tungstenite::tungstenite::Error>
+) -> std::result::Result<(), Box<tokio_tungstenite::tungstenite::Error>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    sink.send(WsMessage::Text(message.encode().into())).await
+    sink.send(WsMessage::Text(message.encode().into()))
+        .await
+        .map_err(Box::new)
 }
 
 /// Why the next message could not be read.

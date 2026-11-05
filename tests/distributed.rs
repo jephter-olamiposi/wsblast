@@ -1074,6 +1074,7 @@ async fn a_scenario_capture_spans_every_phase() {
 /// An echo server that records the `Authorization` header of every
 /// handshake and closes each connection after `replies` echoes, so workers
 /// reconnect.
+#[cfg(unix)]
 async fn spawn_recording_target(
     stop: &CancellationToken,
     replies: usize,

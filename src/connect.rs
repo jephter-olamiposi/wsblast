@@ -80,7 +80,7 @@ impl ConnectTarget {
             .collect();
         let tcp = connect_tcp(&order)
             .await
-            .map_err(|err| ConnectError::Tungstenite(err.into()))?;
+            .map_err(|err| ConnectError::Tungstenite(Box::new(err.into())))?;
         if let Ok(peer) = tcp.peer_addr()
             && let Some(i) = addrs.iter().position(|addr| *addr == peer)
         {
@@ -93,7 +93,7 @@ impl ConnectTarget {
             Some(self.connector.clone()),
         )
         .await
-        .map_err(ConnectError::Tungstenite)?;
+        .map_err(|err| ConnectError::Tungstenite(Box::new(err)))?;
         Ok(ws_stream)
     }
 }
@@ -103,8 +103,9 @@ pub(crate) enum ConnectError {
     /// A failure that every retry would repeat, such as a host that did not
     /// resolve before the run started.
     Static(ErrorCategory),
-    /// A failure of this attempt.
-    Tungstenite(tokio_tungstenite::tungstenite::Error),
+    /// A failure of this attempt, boxed because `tungstenite::Error` is
+    /// large and this is returned on every connection attempt.
+    Tungstenite(Box<tokio_tungstenite::tungstenite::Error>),
 }
 
 async fn resolve(url: &Url) -> Result<Arc<[SocketAddr]>, ErrorCategory> {
