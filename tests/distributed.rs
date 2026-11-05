@@ -538,14 +538,20 @@ async fn cli_reports_a_lost_agent_and_exits_with_1() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cli_rejects_unsupported_combinations_and_missing_tokens() {
-    for extra in [&["--tui"][..]] {
-        let mut args = vec!["ws://127.0.0.1:9/", "--agents", "127.0.0.1:9"];
-        args.extend_from_slice(extra);
+    // The signing key of per-connection tokens stays on the coordinator.
+    #[cfg(feature = "auth")]
+    {
+        let args = [
+            "ws://127.0.0.1:9/",
+            "--agents",
+            "127.0.0.1:9",
+            "--auth-jwt-per-connection",
+        ];
         let finished = wsblast(&args, Some(TOKEN)).await;
-        assert_eq!(finished.code, Some(1), "{extra:?}: {}", finished.stderr);
+        assert_eq!(finished.code, Some(1), "{}", finished.stderr);
         assert!(
             finished.stderr.contains("cannot be used with --agents"),
-            "{extra:?}: {}",
+            "{}",
             finished.stderr
         );
     }

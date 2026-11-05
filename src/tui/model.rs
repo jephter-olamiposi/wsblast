@@ -1,7 +1,7 @@
 //! Turns what a [`DashboardSource`] reports into the values one frame of the
 //! dashboard shows, and keeps the short histories behind its sparklines.
 
-use super::source::{DashboardSource, FinishedPhase, PhasePlan};
+use super::source::{AgentsView, DashboardSource, FinishedPhase, PhasePlan};
 use crate::config::{SloThresholds, Stage};
 use crate::metrics::LiveSnapshot;
 use std::collections::VecDeque;
@@ -43,6 +43,8 @@ pub(crate) struct DashboardView {
     pub(crate) slo: Vec<SloRow>,
     /// Finished scenario phases, in run order.
     pub(crate) finished: Vec<FinishedPhase>,
+    /// The agents of a distributed run.
+    pub(crate) agents: Option<AgentsView>,
 }
 
 /// The phase in progress.
@@ -284,6 +286,7 @@ impl Dashboard {
             slo_scope,
             slo,
             finished: progress.finished,
+            agents: source.agents(),
         }
     }
 

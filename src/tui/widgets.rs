@@ -131,7 +131,27 @@ fn render_header(f: &mut Frame, area: Rect, view: &DashboardView) {
         spans.push(Span::styled("  ", dim()));
         spans.push(Span::styled(label, bold(Color::Magenta)));
     }
+    spans.extend(agent_spans(view, "  "));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// `agents 3` for a distributed run, then `lost 1: HOST:PORT` in red once an
+/// agent is lost.
+fn agent_spans(view: &DashboardView, gap: &'static str) -> Vec<Span<'static>> {
+    let Some(agents) = &view.agents else {
+        return Vec::new();
+    };
+    let mut spans = vec![
+        Span::styled(format!("{gap}agents "), dim()),
+        Span::styled(agents.total.to_string(), bold(Color::White)),
+    ];
+    if !agents.lost.is_empty() {
+        spans.push(Span::styled(
+            format!("  lost {}: {}", agents.lost.len(), agents.lost.join(", ")),
+            bold(Color::Red),
+        ));
+    }
+    spans
 }
 
 fn render_progress(f: &mut Frame, area: Rect, view: &DashboardView) {
@@ -432,6 +452,7 @@ fn render_compact(f: &mut Frame, area: Rect, view: &DashboardView) {
     if let Some(label) = phase_label(view) {
         header.push(Span::styled(format!(" {label}"), bold(Color::Magenta)));
     }
+    header.extend(agent_spans(view, " "));
     lines.push(Line::from(header));
 
     if let Some(phase) = &view.phase

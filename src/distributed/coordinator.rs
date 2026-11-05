@@ -123,6 +123,10 @@ pub struct Coordinator {
     /// Where the live readers (exporters, TUI) read the latency the
     /// coordinator merges from the agents' interval histograms.
     intervals: Option<Arc<crate::timeseries::LiveIntervals>>,
+    /// Where the dashboard reads the plan and SLO result of each phase.
+    dashboard_progress: Option<Arc<crate::tui::RunProgress>>,
+    /// The agents and which of them are lost, for the dashboard.
+    board: Arc<super::dashboard::AgentBoard>,
 }
 
 impl std::fmt::Debug for Coordinator {
@@ -335,7 +339,6 @@ impl Coordinator {
             config,
             #[cfg(feature = "scenario")]
             scenario: None,
-            agents,
             token,
             agent_timeout: DEFAULT_AGENT_TIMEOUT,
             agent_ca: None,
@@ -343,6 +346,11 @@ impl Coordinator {
             cancel: CancellationToken::new(),
             live: LiveMetrics::new(),
             intervals: None,
+            dashboard_progress: None,
+            board: super::dashboard::AgentBoard::new(
+                agents.iter().map(|agent| agent.name.clone()).collect(),
+            ),
+            agents,
         })
     }
 
@@ -398,7 +406,6 @@ impl Coordinator {
             progress: base_config.progress(),
             config: base_config,
             scenario: Some(plan_),
-            agents,
             token,
             agent_timeout: DEFAULT_AGENT_TIMEOUT,
             agent_ca: None,
@@ -406,6 +413,11 @@ impl Coordinator {
             cancel: CancellationToken::new(),
             live: LiveMetrics::new(),
             intervals: None,
+            dashboard_progress: None,
+            board: super::dashboard::AgentBoard::new(
+                agents.iter().map(|agent| agent.name.clone()).collect(),
+            ),
+            agents,
         })
     }
 
@@ -464,6 +476,28 @@ impl Coordinator {
         self
     }
 
+    /// Keeps the plan and the SLO result of every phase in `progress`, for
+    /// the dashboard.
+    pub(crate) fn with_progress(mut self, progress: Arc<crate::tui::RunProgress>) -> Self {
+        self.dashboard_progress = Some(progress);
+        self
+    }
+
+    /// The dashboard's source: the cluster's live counters, the latency
+    /// merged from the agents, the phases and the agents. `None` unless
+    /// [`Coordinator::with_live_intervals`] and [`Coordinator::with_progress`]
+    /// gave it somewhere to read the latency and the phases.
+    pub(crate) fn dashboard(&self) -> Option<super::dashboard::ClusterFeed> {
+        Some(super::dashboard::ClusterFeed::new(
+            crate::tui::RunFeed::new(
+                Arc::clone(&self.live),
+                Arc::clone(self.intervals.as_ref()?),
+                Arc::clone(self.dashboard_progress.as_ref()?),
+            ),
+            Arc::clone(&self.board),
+        ))
+    }
+
     /// Publishes the latency merged from the agents to the live readers
     /// (exporters, TUI) of `intervals`.
     pub(crate) fn with_live_intervals(
@@ -495,6 +529,9 @@ impl Coordinator {
             .into());
         }
         let _signals = self.signals();
+        if let Some(progress) = &self.dashboard_progress {
+            progress.begin_phase(crate::tui::PhasePlan::for_run(&self.config));
+        }
         let deadline = tokio::time::Instant::now() + self.agent_timeout;
         let mut session = self.open(deadline).await?;
         let spec = PhaseSpec {
@@ -567,15 +604,32 @@ impl Coordinator {
             } else {
                 format!("stages {}", crate::report::stage_list_label(&phase.stages))
             };
-            eprintln!(
-                "{} Scenario '{}' phase {}/{}: '{}' ({load}) on {} agents",
-                if index > 0 { "→" } else { "▶" },
-                scenario.name,
-                index + 1,
-                scenario.phases.len(),
-                phase.name,
-                session.links.iter().flatten().count(),
-            );
+            // The dashboard shows the phase itself; a line on stderr would
+            // be drawn over it.
+            if !self.config.tui {
+                eprintln!(
+                    "{} Scenario '{}' phase {}/{}: '{}' ({load}) on {} agents",
+                    if index > 0 { "→" } else { "▶" },
+                    scenario.name,
+                    index + 1,
+                    scenario.phases.len(),
+                    phase.name,
+                    session.links.iter().flatten().count(),
+                );
+            }
+            if let Some(progress) = &self.dashboard_progress {
+                progress.begin_phase(crate::tui::PhasePlan {
+                    name: Some(phase.name.clone()),
+                    index,
+                    total: scenario.phases.len(),
+                    connections: phase.connections,
+                    ramp_rate: phase.ramp_rate,
+                    duration: phase.duration,
+                    stages: phase.stages.clone(),
+                    slo: phase.slo.clone(),
+                    run_slo: self.config.slo.or_from(&scenario.slo),
+                });
+            }
             let mut config = crate::runner::phase_config(self.config.clone(), phase);
             config.target_url = target.clone();
             let spec = PhaseSpec {
@@ -611,6 +665,11 @@ impl Coordinator {
                 .iter()
                 .any(|part| matches!(part, Part::Finished(_)));
             if any {
+                if let Some(progress) = &self.dashboard_progress {
+                    let (metrics, _) = self.merge_phase(&ran)?;
+                    let slo = crate::report::evaluate_slos(&phase.slo, &metrics);
+                    progress.end_phase(&phase.name, &slo);
+                }
                 runs.push((index, ran));
             }
             if !any || index + 1 == scenario.phases.len() {
@@ -845,6 +904,7 @@ impl Coordinator {
                     let reason = self.phase_reason(spec, &reason);
                     session.links[index] = None;
                     session.lost[index] = Some(reason.clone());
+                    self.board.mark_lost(index);
                     parts.push(Part::Lost(reason));
                 }
                 Some(Ok(())) => parts.push(Part::Absent),
@@ -953,6 +1013,8 @@ impl Coordinator {
                     let message = "Stopping: asking every agent for its result";
                     match &progress {
                         Some(bar) => bar.println(message),
+                        // The dashboard shows the run ending.
+                        None if self.config.tui => {}
                         None => eprintln!("{message}"),
                     }
                 }
@@ -1012,6 +1074,7 @@ impl Coordinator {
                 Err(reason) => {
                     let reason = self.phase_reason(spec, &reason);
                     session.lost[index] = Some(reason.clone());
+                    self.board.mark_lost(index);
                     let mut live = session.live.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(agent) = live.get_mut(index) {
                         agent.snapshot.active_connections = 0;

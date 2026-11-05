@@ -12,7 +12,7 @@ Contents:
 2. [Flags](#2-flags)
 3. [How the load is split](#3-how-the-load-is-split)
 4. [Scenarios, capture, refreshed tokens and live export](#4-scenarios-capture-refreshed-tokens-and-live-export)
-5. [Chaos injection and generator saturation](#5-chaos-injection-and-generator-saturation)
+5. [Chaos, generator saturation and the dashboard](#5-chaos-generator-saturation-and-the-dashboard)
 6. [Architecture and protocol](#6-architecture-and-protocol)
 7. [Security model](#7-security-model)
 8. [Failures and exit codes](#8-failures-and-exit-codes)
@@ -66,7 +66,7 @@ The coordinator is the normal command plus:
 | `--agent-timeout DURATION` | `30s` | Time the agents get to connect, authenticate, validate the test and become ready (the start barrier), and time each agent gets after the end of the run, or after a stop, to send its result. |
 | `--agent-ca PEM` | off | CA certificates to trust for `wss://` agents, in addition to the platform's roots (which `SSL_CERT_FILE` and `SSL_CERT_DIR` also override). Use it for a private CA or a self-signed agent certificate. |
 
-Every other flag of a normal run keeps its meaning: target, mode, rate, payload, headers, subprotocol, timeouts, pings, `--match`, `--no-reconnect`, GraphQL options, `--auth-*` including `--auth-token-refresh`, `--scenario` and `--phase`, `--capture` and `--capture-limit`, `--prometheus-listen`, `--otel-*`, `--chaos-*`, SLOs, `--format` and `-o`. [Section 4](#4-scenarios-capture-refreshed-tokens-and-live-export) describes how the scenario, capture, token refresh and export flags work across machines, and [section 5](#5-chaos-injection-and-generator-saturation) how chaos and `--max-generator-lag` do. Only `--tui` is not supported with `--agents` in this version; it is rejected with exit code 1.
+Every other flag of a normal run keeps its meaning: target, mode, rate, payload, headers, subprotocol, timeouts, pings, `--match`, `--no-reconnect`, GraphQL options, `--auth-*` including `--auth-token-refresh`, `--scenario` and `--phase`, `--capture` and `--capture-limit`, `--prometheus-listen`, `--otel-*`, `--chaos-*`, SLOs including `--max-generator-lag`, `--tui`, `--format` and `-o`. [Section 4](#4-scenarios-capture-refreshed-tokens-and-live-export) describes how the scenario, capture, token refresh and export flags work across machines, and [section 5](#5-chaos-generator-saturation-and-the-dashboard) how chaos, the generator lag and the dashboard do. Only `--auth-jwt-per-connection` is rejected with `--agents` (exit code 1): a token signed for every connection would need the signing key on every agent, and the key stays on the coordinator. Without it, the shared token is re-signed before it expires and pushed to the agents like a refreshed token ([section 4.3](#43-refreshed-tokens)).
 
 ## 3. How the load is split
 
@@ -129,9 +129,9 @@ With `--auth-token-cmd` and `--auth-token-refresh`, the token command runs on th
 - The latency is that of the last completed time-series interval merged from every agent's interval histogram: each snapshot carries the agent's two most recently completed intervals, and the coordinator exports an interval one second after it ended on its own clock, once every agent has had a tick to send it. So the latency lags the run by up to one interval plus one second; when a phase ends, the last interval that ended before it is exported from the agents' results.
 - `wsblast_run_elapsed_seconds` runs on the coordinator's clock from the first phase's start.
 
-The coordinator keeps these cluster totals in a live-metrics registry of its own whether or not an exporter runs, so a display that reads live counters (as the TUI does on one machine) can read them too.
+The coordinator keeps these cluster totals in a live-metrics registry of its own whether or not an exporter runs, and the dashboard reads them ([section 5.3](#53-the-dashboard)).
 
-## 5. Chaos injection and generator saturation
+## 5. Chaos, generator saturation and the dashboard
 
 ### 5.1 Chaos injection
 
@@ -151,6 +151,16 @@ Every agent watches its own load generator as a single run does ([METHODOLOGY.md
 - `--max-generator-lag D` compares that highest p99 lag with `D`: the gate fails if any agent's generator was saturated past the limit, and the run exits with 2.
 - The text, Markdown and HTML reports print the `Generator:` line with the agent whose lag and limit it shows and the agents that were saturated or short of descriptors, for example `lag p99 31.20 ms, max 64.00 ms over 150 wake-ups on agent 10.0.0.12:7700, the highest of 3 agents (threshold 20.00 ms; SATURATED on 10.0.0.12:7700: latency includes client-side delay)`. After the report the coordinator warns once for every saturated agent.
 - Each agent checks its lag against its own platform's threshold, so a cluster that mixes Windows and Linux agents flags each of them correctly.
+
+### 5.3 The dashboard
+
+`--tui` draws the same live dashboard on the coordinator as on one machine ([METHODOLOGY.md, section 6](../METHODOLOGY.md#6-counters-rates-and-formulas)), for a single run and for every phase of a scenario, from what the coordinator knows:
+
+- The counters, the open connections and the error and throughput windows are the cluster totals of [section 4.4](#44-live-export): the sum of every agent's latest snapshot, one second old at most.
+- p50, p90 and p99 are those of the last completed interval merged from every agent's interval histogram, the value the exporters publish, so they trail the run by up to one interval plus one second.
+- The progress bar, the stage and the target connection count follow the coordinator's clock from the start of each phase; the phase list shows each finished phase's SLO result on its merged metrics.
+- The header shows the number of agents, and in red each agent lost so far.
+- `q`, `Esc` and Ctrl+C stop the run exactly as Ctrl+C on a coordinator without the dashboard does: every agent is told to stop, each sends its result, and the merged report follows the dashboard with the usual exit code. The scenario phase lines and the stop message that the coordinator prints on stderr are left out while the dashboard is drawn.
 
 ## 6. Architecture and protocol
 
@@ -222,7 +232,7 @@ A lost agent's work is never re-run on another agent, so nothing is counted twic
 
 ## 9. Limitations
 
-- The TUI (`--tui`) is not supported with `--agents` in this version and is rejected with exit code 1.
+- The dashboard's latency trails a single machine's by up to one second, like the live export.
 - Live export trails a single machine's by up to one second ([section 4.4](#44-live-export)).
 - Run the same wsblast version everywhere. A different protocol version is rejected; the same protocol from another release works, but the agents then measure with their own release's rules.
 - `--auth-token-cmd` runs on the coordinator only, once at the start and again on every `--auth-token-refresh`, and the resulting header is sent to every agent.

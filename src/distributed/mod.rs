@@ -2,7 +2,8 @@
 //! [`Coordinator`] (`wsblast URL --agents ...`) that splits a run between
 //! them, starts them together and merges their results. A scenario runs
 //! phase by phase, each phase split, started and merged the same way; frame
-//! capture, refreshed authentication tokens and live export work across the
+//! capture, refreshed authentication tokens, chaos injection, the generator
+//! saturation check, live export and the live dashboard work across the
 //! agents too.
 //!
 //! The coordinator and the agents talk over a WebSocket control channel,
@@ -49,6 +50,7 @@
 
 mod agent;
 mod coordinator;
+mod dashboard;
 mod protocol;
 mod tls;
 

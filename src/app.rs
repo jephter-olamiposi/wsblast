@@ -11,7 +11,7 @@ use crate::runner::Runner;
 #[cfg(feature = "scenario")]
 use crate::runner::ScenarioExecutor;
 use crate::timeseries::LiveIntervals;
-use crate::tui::{PhasePlan, RunFeed, RunInfo, RunProgress, TuiApp};
+use crate::tui::{DashboardSource, PhasePlan, RunFeed, RunInfo, RunProgress, TuiApp};
 use clap::{CommandFactory, Parser};
 use colored::Colorize;
 use std::sync::Arc;
@@ -494,11 +494,6 @@ fn otel_settings(
 /// Rejects the options a distributed run does not support in this version.
 #[cfg(feature = "distributed")]
 fn check_distributed_options(cli: &Cli) -> Result<()> {
-    if cli.tui {
-        return Err(WsBlastError::Config(ConfigError::UnsupportedOption(
-            "--tui cannot be used with --agents in this version of wsblast; the coordinator prints progress lines instead".to_string(),
-        )));
-    }
     // A token re-signed before expiry, or an OAuth2 token refreshed before
     // it expires, is pushed to the agents like a refreshed token command. A
     // token signed per connection attempt would need the signing key on
@@ -509,7 +504,22 @@ fn check_distributed_options(cli: &Cli) -> Result<()> {
             "--auth-jwt-per-connection cannot be used with --agents: the signing key stays on the coordinator; without the flag the shared token is re-signed before expiry and pushed to the agents".to_string(),
         )));
     }
+    #[cfg(not(feature = "auth"))]
+    let _ = cli;
     Ok(())
+}
+
+/// The dashboard of a coordinator and the token that stops its run: the
+/// keys that quit the dashboard stop every agent, as Ctrl+C does, and the
+/// run still reports what the agents measured.
+#[cfg(feature = "distributed")]
+fn cluster_dashboard(
+    coordinator: &crate::distributed::Coordinator,
+) -> Result<(Arc<dyn DashboardSource>, CancellationToken)> {
+    let feed = coordinator.dashboard().ok_or_else(|| {
+        WsBlastError::Distributed("the dashboard has no live values to read".to_string())
+    })?;
+    Ok((Arc::new(feed), coordinator.cancel_token()))
 }
 
 /// What a distributed run, single or scenario, reports.
@@ -592,7 +602,16 @@ async fn run_distributed(cli: &Cli) -> Result<()> {
             if let Some(ca) = &cli.agent_ca {
                 coordinator = coordinator.agent_ca(ca);
             }
-            let outcome = coordinator.run_scenario().await?;
+            let outcome = if config.tui {
+                let coordinator = coordinator.with_progress(RunProgress::new());
+                let (feed, cancel_token) = cluster_dashboard(&coordinator)?;
+                run_with_tui(&config, feed, cancel_token, async move {
+                    coordinator.run_scenario().await
+                })
+                .await?
+            } else {
+                coordinator.run_scenario().await?
+            };
             let lost = outcome
                 .lost_agents()
                 .map(|agent| {
@@ -624,7 +643,16 @@ async fn run_distributed(cli: &Cli) -> Result<()> {
         if let Some(ca) = &cli.agent_ca {
             coordinator = coordinator.agent_ca(ca);
         }
-        let outcome = coordinator.run().await?;
+        let outcome = if config.tui {
+            let coordinator = coordinator.with_progress(RunProgress::new());
+            let (feed, cancel_token) = cluster_dashboard(&coordinator)?;
+            run_with_tui(&config, feed, cancel_token, async move {
+                coordinator.run().await
+            })
+            .await?
+        } else {
+            coordinator.run().await?
+        };
         let lost = outcome
             .lost_agents()
             .map(|agent| {
@@ -640,6 +668,7 @@ async fn run_distributed(cli: &Cli) -> Result<()> {
         })
     }
     .await;
+    live_intervals.finish();
     live_export.finish().await;
     let DistributedResult { run, lost } = outcome?;
     let RunResult {
@@ -771,13 +800,14 @@ impl RunResult {
 
 /// Runs `run` in its own task while the dashboard draws `feed`, and returns
 /// the run's result once it has returned. `cancel_token` is the run's: `q`
-/// and Ctrl+C cancel it, and the run still reports what it measured.
+/// and Ctrl+C cancel it, and the run still reports what it measured. For a
+/// coordinator, cancelling it stops every agent.
 ///
 /// When the terminal cannot host the dashboard, the error is printed and
 /// the run continues without it.
 async fn run_with_tui<T: Send + 'static>(
     config: &LoadTestConfig,
-    feed: RunFeed,
+    feed: Arc<dyn DashboardSource>,
     cancel_token: CancellationToken,
     run: impl std::future::Future<Output = Result<T>> + Send + 'static,
 ) -> Result<T> {
@@ -800,7 +830,7 @@ async fn run_with_tui<T: Send + 'static>(
             .map(|value| value.get_name().to_string())
             .unwrap_or_default(),
     };
-    let mut tui = TuiApp::new(info, Arc::new(feed), cancel_token, done);
+    let mut tui = TuiApp::new(info, feed, cancel_token, done);
     if let Err(e) = tui.run().await {
         eprintln!("TUI error: {e}");
     }
@@ -910,12 +940,9 @@ async fn run_app() -> Result<()> {
                         Arc::clone(&live_intervals),
                         progress,
                     );
-                    run_with_tui(
-                        &config,
-                        feed,
-                        cancel_token,
-                        async move { executor.run().await },
-                    )
+                    run_with_tui(&config, Arc::new(feed), cancel_token, async move {
+                        executor.run().await
+                    })
                     .await?
                 } else {
                     executor.run().await?
@@ -953,14 +980,10 @@ async fn run_app() -> Result<()> {
                     Arc::clone(&live_intervals),
                     progress,
                 );
-                let metrics =
-                    run_with_tui(
-                        &config,
-                        feed,
-                        cancel_token,
-                        async move { runner.run().await },
-                    )
-                    .await?;
+                let metrics = run_with_tui(&config, Arc::new(feed), cancel_token, async move {
+                    runner.run().await
+                })
+                .await?;
                 Ok(RunResult::single(metrics))
             } else {
                 Ok(RunResult::single(runner.run().await?))

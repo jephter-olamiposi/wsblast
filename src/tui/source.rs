@@ -15,20 +15,15 @@
 //! and the [`RunProgress`] the scenario executor (or the caller, for a single
 //! run) keeps up to date.
 //!
-//! The coordinator of a distributed run (`--agents`) can drive the same
-//! dashboard without any change to it, in either of two ways:
-//!
-//! - Build a [`RunFeed`] from its own parts: add the agents' counter deltas
-//!   into a [`LiveMetrics`] shard as their progress messages arrive, merge
-//!   their per-interval histograms into an
-//!   [`IntervalStore`](crate::timeseries::IntervalStore) registered once with
-//!   [`LiveIntervals::begin_phase`] (and ended with
-//!   [`LiveIntervals::end_phase`]), and give [`RunProgress::begin_phase`] the
-//!   run's [`PhasePlan::for_run`].
-//! - Or implement [`DashboardSource`] directly on whatever state it already
-//!   keeps, as the tests of this module do.
-//!
-//! Either way, it then passes the source to [`TuiApp`](super::TuiApp).
+//! The coordinator of a distributed run (`--agents`) builds a [`RunFeed`]
+//! from its own parts: the [`LiveMetrics`] it fills with the sum of the
+//! agents' latest counters, the [`LiveIntervals`] whose remote mode it fills
+//! with the latency merged from the agents' interval histograms
+//! ([`LiveIntervals::begin_remote_phase`]), and a [`RunProgress`] it keeps
+//! phase by phase. It wraps the feed in a source that also answers
+//! [`DashboardSource::agents`], so the header shows the agents and the ones
+//! lost so far. Any other source can implement [`DashboardSource`] directly,
+//! as the tests of this module do, and pass it to [`TuiApp`](super::TuiApp).
 
 use crate::config::{LoadTestConfig, SloThresholds, Stage};
 use crate::metrics::{LiveMetrics, LiveSnapshot};
@@ -57,6 +52,20 @@ pub(crate) trait DashboardSource: Send + Sync {
 
     /// The phase in progress and the phases that have finished.
     fn progress(&self) -> ProgressView;
+
+    /// The agents of a distributed run; `None` for a run in this process.
+    fn agents(&self) -> Option<AgentsView> {
+        None
+    }
+}
+
+/// The agents generating the load of a distributed run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AgentsView {
+    /// Number of agents in `--agents`.
+    pub(crate) total: usize,
+    /// The agents lost so far, in `--agents` order.
+    pub(crate) lost: Vec<String>,
 }
 
 /// What one run or scenario phase was configured to do.
