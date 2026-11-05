@@ -18,9 +18,6 @@ proptest-regressions/
 # Editor state
 .vscode/
 .idea/
-explanation.md
-launch_content.md
-breakdown.md
 
 # Secrets
 .env

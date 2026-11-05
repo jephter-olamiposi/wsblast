@@ -10,10 +10,3 @@ target
 **/mutants.out*/
 .env
 *.env
-breakdown.md
-explanation.md
-launch_content.md
-# Private planning notes; the published guides in docs/ are tracked.
-docs/EXECUTION_PLAN.md
-docs/adr/
-docs/design/

@@ -29,7 +29,7 @@ Pushing a tag `vX.Y.Z` whose version matches `version` in `Cargo.toml` runs
 3. publishes the crate to crates.io through `publish-crates.yml`, using
    trusted publishing.
 
-A tag with a prerelease suffix, such as `v0.2.0-rc.1`, creates a GitHub
+A tag with a prerelease suffix, such as `vX.Y.Z-rc.1`, creates a GitHub
 **prerelease** and skips the crates.io job (`publish-prereleases = false`).
 Prereleases are not returned by `releases/latest`, so `install.sh` and the
 `latest/download` installer URLs keep pointing at the last stable release.
@@ -99,10 +99,11 @@ push to it, enable the `homebrew` installer and publish job, then run
 
 ### Dry run with a release candidate
 
-For v0.2.0, ship `v0.2.0-rc.1` first:
+Before a release with large changes, ship a release candidate first. For
+version X.Y.Z:
 
-1. Set `version = "0.2.0-rc.1"` in `Cargo.toml`, add a `## [0.2.0-rc.1]`
-   changelog section, commit, tag `v0.2.0-rc.1` and push the tag.
+1. Set `version = "X.Y.Z-rc.1"` in `Cargo.toml`, add a `## [X.Y.Z-rc.1]`
+   changelog section, commit, tag `vX.Y.Z-rc.1` and push the tag.
 2. Confirm the GitHub prerelease has all five archives, their `.sha256`
    files and both installers, that the archives contain `wsblast.1` and
    `completions/`, and that the crates.io job was skipped.
@@ -110,14 +111,14 @@ For v0.2.0, ship `v0.2.0-rc.1` first:
 
    ```bash
    # dist shell installer for this exact prerelease
-   curl -fsSL https://github.com/jephter-olamiposi/wsblast/releases/download/v0.2.0-rc.1/wsblast-installer.sh | sh
+   curl -fsSL https://github.com/jephter-olamiposi/wsblast/releases/download/vX.Y.Z-rc.1/wsblast-installer.sh | sh
    # install.sh pinned to the prerelease
-   curl -fsSL https://raw.githubusercontent.com/jephter-olamiposi/wsblast/main/install.sh | WSBLAST_VERSION=v0.2.0-rc.1 sh
+   curl -fsSL https://raw.githubusercontent.com/jephter-olamiposi/wsblast/main/install.sh | WSBLAST_VERSION=vX.Y.Z-rc.1 sh
    # cargo-binstall, reading the metadata from a local checkout
    cargo binstall --manifest-path . wsblast
    ```
 
    On Windows, run the PowerShell installer:
-   `powershell -c "irm https://github.com/jephter-olamiposi/wsblast/releases/download/v0.2.0-rc.1/wsblast-installer.ps1 | iex"`.
-4. Set `version = "0.2.0"`, rename the changelog section, commit, tag
-   `v0.2.0` and push. This run publishes to crates.io.
+   `powershell -c "irm https://github.com/jephter-olamiposi/wsblast/releases/download/vX.Y.Z-rc.1/wsblast-installer.ps1 | iex"`.
+4. Set `version = "X.Y.Z"`, rename the changelog section, commit, tag
+   `vX.Y.Z` and push. This run publishes to crates.io.
