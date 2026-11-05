@@ -27,11 +27,9 @@ SLOs.
 
 ## Overview
 
-wsblast opens many WebSocket connections to a target, drives traffic through
-them, and reports what the server did under that load: how fast it answered,
-how often it failed and why. Every number it reports has a written
-definition, and the exit code tells a CI job whether the target met its SLOs.
-At a high level, it provides:
+wsblast opens WebSocket connections to a server, sends traffic through them,
+and reports latency, throughput and errors. The exit code tells a CI job
+whether the server met its SLOs. At a high level, it provides:
 
 * **Exact percentiles**: latency is recorded in HDR histograms per connection
   and merged, never averaged, from p50 to p99.9, across connections and
@@ -41,13 +39,13 @@ At a high level, it provides:
   that waited behind it.
 * **A failure taxonomy**: errors are counted by cause, from DNS and TLS to
   rejected upgrades, timeouts and unexpected closes.
-* **SLO gates for CI**: exit code `2` means an SLO failed or a baseline
-  comparison regressed, and nothing else does.
+* **SLO gates for CI**: exit code `2` is reserved for a failed SLO or a
+  regression against a baseline report.
 * **Time series**: every report breaks the run down by interval, so a stall
   shows up where it happened instead of in the run's averages.
 * **Distributed load**: `wsblast agent` on several machines generates one run's
   load, with histograms merged exactly on the coordinator.
-* **Batteries for testing**: a mock server that can misbehave on purpose,
+* **Test tooling**: a mock server that can misbehave on purpose,
   multi-phase YAML scenarios, client-side fault injection, frame capture,
   Prometheus and OpenTelemetry export, HTML reports and a live terminal
   dashboard.
@@ -82,10 +80,9 @@ Shape the load with stages: ramp to 200 connections over 30 seconds, hold for
 wsblast ws://127.0.0.1:9001 --stages 30s:200,2m:200,30s:0 -r 10
 ```
 
-No server to test yet? `wsblast mock` starts one on `127.0.0.1:9001`, and
-`--delay 20ms --stall-every 5s --stall-for 300ms` makes it slow and stall, so
-you can see how that shows up in a report. Add `--tui` to any run for the live
-dashboard.
+`wsblast mock` starts a local echo server on `127.0.0.1:9001` to test against.
+With `--delay 20ms --stall-every 5s --stall-for 300ms` it answers slowly and
+stalls every 5 seconds. Add `--tui` to any run for the live dashboard.
 
 ![wsblast live terminal dashboard](https://raw.githubusercontent.com/jephter-olamiposi/wsblast/main/assets/wsblast-tui-dashboard.png)
 
