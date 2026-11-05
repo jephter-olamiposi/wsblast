@@ -173,7 +173,7 @@
         "throughput_msg_per_sec": { "description": "The larger of messages_sent and messages_recv, per second of the interval.", "type": "number", "minimum": 0 },
         "latency": { "$ref": "#/$defs/interval_latency" },
         "generator_lag": {
-          "description": "How late the load generator's runtime woke up from its 10 ms probe sleeps during the interval. Absent when the probe took no sample in it, from distributed runs and from reports written before this field was added. See METHODOLOGY.md section 14.",
+          "description": "How late the load generator's runtime woke up from its 10 ms probe sleeps during the interval; in a distributed run, that of the agent with the highest p99 lag in the interval. Absent when the probe took no sample in it and from reports written before this field was added. See METHODOLOGY.md section 14.",
           "type": "object",
           "required": ["samples", "p99_us", "max_us"],
           "properties": {
@@ -302,7 +302,7 @@
           }
         },
         "generator_lag": {
-          "description": "How late the load generator's runtime woke up from a fixed 10 ms sleep, measured all through the run by a probe task on the workers' runtime. A high lag means the generator was short of CPU or its runtime was blocked, so every latency of the run includes client-side delay. Absent from distributed runs and from reports written before this field was added. See METHODOLOGY.md section 14.",
+          "description": "How late the load generator's runtime woke up from a fixed 10 ms sleep, measured all through the run by a probe task on the workers' runtime. A high lag means the generator was short of CPU or its runtime was blocked, so every latency of the run includes client-side delay. In a distributed run, the lag of the agent with the highest p99 lag (named by distributed.generator_lag_agent), with saturated true when any agent's generator was saturated; every agent's is in distributed.generators. Absent from reports written before this field was added. See METHODOLOGY.md sections 14 and 14.3.",
           "type": "object",
           "required": ["probe_interval_us", "samples", "p50_us", "p99_us", "max_us", "threshold_us", "intervals", "intervals_over_threshold", "saturated"],
           "properties": {
@@ -318,7 +318,7 @@
           }
         },
         "open_file_limit": {
-          "description": "The process's open file limit when the run started, against the descriptors it needed. Absent on Windows, from distributed runs and from reports written before this field was added.",
+          "description": "The process's open file limit when the run started, against the descriptors it needed. In a distributed run, the limit of the agent with the fewest descriptors to spare (named by distributed.open_file_limit_agent). Absent on Windows and from reports written before this field was added.",
           "type": "object",
           "required": ["soft_limit", "needed", "sufficient"],
           "properties": {
@@ -354,7 +354,22 @@
               "description": "Agents that disconnected or missed their result deadline after the run started, in --agents order. Their connections and messages are not in the report. Empty when every agent reported.",
               "type": "array",
               "items": { "type": "string", "minLength": 1 }
-            }
+            },
+            "generators": {
+              "description": "The load generator health of every agent that sent its result, in --agents order. Absent from reports written before this field was added.",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["agent"],
+                "properties": {
+                  "agent": { "description": "The agent, as given to --agents.", "type": "string", "minLength": 1 },
+                  "generator_lag": { "description": "The agent's own generator lag; absent when its probe took no sample.", "$ref": "#/$defs/aggregated_metrics/properties/generator_lag" },
+                  "open_file_limit": { "description": "The agent's open file limit against what its share needed; absent when the agent runs on Windows.", "$ref": "#/$defs/aggregated_metrics/properties/open_file_limit" }
+                }
+              }
+            },
+            "generator_lag_agent": { "description": "The agent whose lag is metrics.generator_lag: the one with the highest p99 lag.", "type": "string", "minLength": 1 },
+            "open_file_limit_agent": { "description": "The agent whose limit is metrics.open_file_limit: the one with the fewest descriptors to spare.", "type": "string", "minLength": 1 }
           }
         },
         "error_breakdown": {

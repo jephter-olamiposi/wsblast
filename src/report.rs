@@ -1758,28 +1758,68 @@ pub(crate) fn chaos_label(chaos: &ChaosSummary) -> String {
 
 /// The health of the load generator, as the text, Markdown and HTML
 /// reports show it: its wake-up lag and its open file limit. `None` when
-/// the run measured neither, as a distributed run does.
+/// the run measured neither.
+///
+/// In a distributed run the lag is the highest of the agents' and the
+/// limit the tightest, each named with its agent, and the agents whose
+/// generator was saturated, or whose limit was too low, are listed.
 pub(crate) fn generator_label(metrics: &AggregatedMetrics) -> Option<String> {
+    let distributed = metrics
+        .distributed
+        .as_ref()
+        .filter(|summary| !summary.generators.is_empty());
+    let of_agents = |agent: Option<&String>| match (agent, distributed) {
+        (Some(agent), Some(summary)) => {
+            format!(
+                " on agent {agent}, the highest of {} agents",
+                summary.generators.len()
+            )
+        }
+        _ => String::new(),
+    };
     let lag = metrics.generator_lag.as_ref().map(|lag| {
-        let verdict = if lag.saturated {
-            "SATURATED: latency includes client-side delay"
-        } else {
-            "ok"
+        let saturated: Vec<&str> = distributed
+            .map(|summary| summary.saturated_agents().collect())
+            .unwrap_or_default();
+        let verdict = match (lag.saturated, saturated.is_empty()) {
+            (false, _) => "ok".to_string(),
+            (true, true) => "SATURATED: latency includes client-side delay".to_string(),
+            (true, false) => format!(
+                "SATURATED on {}: latency includes client-side delay",
+                saturated.join(", ")
+            ),
         };
         format!(
-            "lag p99 {}, max {} over {} wake-ups (threshold {}; {verdict})",
+            "lag p99 {}, max {} over {} wake-ups{} (threshold {}; {verdict})",
             format_us(lag.p99_us),
             format_us(lag.max_us),
             lag.samples,
+            of_agents(distributed.and_then(|summary| summary.generator_lag_agent.as_ref())),
             format_us(lag.threshold_us)
         )
     });
     let files = metrics.open_file_limit.as_ref().map(|limit| {
+        let short: Vec<&str> = distributed
+            .map(|summary| summary.agents_short_of_files().collect())
+            .unwrap_or_default();
+        let verdict = match (limit.sufficient, short.is_empty()) {
+            (true, _) => String::new(),
+            (false, true) => " (too low)".to_string(),
+            (false, false) => format!(" (too low on {})", short.join(", ")),
+        };
+        let agent = match (
+            distributed.and_then(|summary| summary.open_file_limit_agent.as_ref()),
+            distributed,
+        ) {
+            (Some(agent), Some(summary)) => format!(
+                " on agent {agent}, the tightest of {} agents",
+                summary.generators.len()
+            ),
+            _ => String::new(),
+        };
         format!(
-            "open file limit {} for {} needed{}",
-            limit.soft_limit,
-            limit.needed,
-            if limit.sufficient { "" } else { " (too low)" }
+            "open file limit {} for {} needed{agent}{verdict}",
+            limit.soft_limit, limit.needed,
         )
     });
     match (lag, files) {
@@ -2186,6 +2226,83 @@ mod tests {
     }
 
     #[test]
+    fn a_distributed_report_names_the_agents_whose_generator_failed() {
+        use crate::metrics::{AgentGenerator, GeneratorLag, OpenFileLimit};
+        let lag = |p99_us: u64, saturated: bool| GeneratorLag {
+            probe_interval_us: 10_000,
+            samples: 300,
+            p50_us: 800,
+            p99_us,
+            max_us: p99_us * 2,
+            threshold_us: 20_000,
+            intervals: 3,
+            intervals_over_threshold: u64::from(saturated),
+            saturated,
+        };
+        let files = |soft_limit: u64, needed: u64| OpenFileLimit {
+            soft_limit,
+            needed,
+            sufficient: needed <= soft_limit,
+        };
+        let mut metrics = sample_metrics();
+        // The run's lag is agent b's, the highest p99, and it is flagged
+        // because agent c's generator was saturated.
+        metrics.generator_lag = Some(GeneratorLag {
+            saturated: true,
+            ..lag(30_000, false)
+        });
+        metrics.open_file_limit = Some(files(100, 120));
+        metrics.distributed = Some(DistributedSummary {
+            agents: vec!["a:1".into(), "b:1".into(), "c:1".into()],
+            lost_agents: Vec::new(),
+            generators: vec![
+                AgentGenerator {
+                    agent: "a:1".into(),
+                    generator_lag: Some(lag(900, false)),
+                    open_file_limit: Some(files(100, 120)),
+                },
+                AgentGenerator {
+                    agent: "b:1".into(),
+                    generator_lag: Some(lag(30_000, false)),
+                    open_file_limit: Some(files(1_000, 120)),
+                },
+                AgentGenerator {
+                    agent: "c:1".into(),
+                    generator_lag: Some(lag(19_000, true)),
+                    open_file_limit: Some(files(1_000, 120)),
+                },
+            ],
+            generator_lag_agent: Some("b:1".into()),
+            open_file_limit_agent: Some("a:1".into()),
+        });
+        let line = "lag p99 30.00 ms, max 60.00 ms over 300 wake-ups on agent b:1, the highest of 3 agents \
+                    (threshold 20.00 ms; SATURATED on c:1: latency includes client-side delay); \
+                    open file limit 100 for 120 needed on agent a:1, the tightest of 3 agents (too low on a:1)";
+        assert_eq!(generator_label(&metrics).as_deref(), Some(line));
+        let slo = evaluate_slos(
+            &SloThresholds::new().with_max_generator_lag(Duration::from_millis(25)),
+            &metrics,
+        );
+        assert!(!slo.passed, "agent b's p99 is over the limit");
+        for format in ["text", "markdown", "html"] {
+            let rendered = render_report(&report_config(format), &metrics, &slo);
+            assert!(rendered.contains(line), "{format}: {rendered}");
+        }
+        let json: serde_json::Value =
+            serde_json::from_str(&render_report(&report_config("json"), &metrics, &slo)).unwrap();
+        let distributed = &json["metrics"]["distributed"];
+        assert_eq!(distributed["generator_lag_agent"], "b:1");
+        assert_eq!(distributed["open_file_limit_agent"], "a:1");
+        assert_eq!(
+            distributed["generators"][2]["generator_lag"]["saturated"],
+            true
+        );
+        let parsed: AggregatedMetrics =
+            serde_json::from_value(json["metrics"].clone()).expect("report parses");
+        assert_eq!(parsed.distributed, metrics.distributed);
+    }
+
+    #[test]
     fn generator_health_is_reported_and_gated() {
         let mut metrics = sample_metrics();
         let slo = SloThresholds::new().with_max_generator_lag(Duration::from_millis(5));
@@ -2253,6 +2370,7 @@ mod tests {
                 "10.0.0.3:7700".into(),
             ],
             lost_agents: vec!["10.0.0.2:7700".into()],
+            ..Default::default()
         });
         let text = render_report(&report_config("text"), &metrics, &slo);
         assert!(text.contains("3 (lost: 10.0.0.2:7700)"), "{text}");

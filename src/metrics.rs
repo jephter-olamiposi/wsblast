@@ -572,13 +572,17 @@ pub struct AggregatedMetrics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chaos: Option<ChaosSummary>,
     /// How late the load generator's runtime woke up during the run, which
-    /// tells whether the generator itself was the bottleneck. Absent from
-    /// distributed runs and from reports written before it was added.
+    /// tells whether the generator itself was the bottleneck. In a
+    /// distributed run, the lag of the agent with the highest p99 lag,
+    /// flagged saturated when any agent's generator was; every agent's is in
+    /// [`DistributedSummary::generators`]. Absent from reports written before
+    /// it was added.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generator_lag: Option<GeneratorLag>,
     /// The open file limit the run had against the descriptors it needed;
-    /// absent where wsblast cannot read the limit (Windows) and from
-    /// distributed runs.
+    /// absent where wsblast cannot read the limit (Windows). In a
+    /// distributed run, the limit of the agent with the fewest descriptors
+    /// to spare.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_file_limit: Option<OpenFileLimit>,
 }
@@ -696,6 +700,68 @@ pub struct DistributedSummary {
     pub agents: Vec<String>,
     /// Agents whose result never arrived, in `agents` order.
     pub lost_agents: Vec<String>,
+    /// The generator health of every agent that sent its result, in
+    /// `agents` order. Empty in reports written before it was added.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generators: Vec<AgentGenerator>,
+    /// The agent whose lag is the run's
+    /// [`generator_lag`](AggregatedMetrics::generator_lag): the one with the
+    /// highest p99 lag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator_lag_agent: Option<String>,
+    /// The agent whose limit is the run's
+    /// [`open_file_limit`](AggregatedMetrics::open_file_limit): the one with
+    /// the fewest descriptors to spare.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_file_limit_agent: Option<String>,
+}
+
+impl DistributedSummary {
+    /// The agents whose generator was saturated, in `agents` order.
+    pub fn saturated_agents(&self) -> impl Iterator<Item = &str> {
+        self.generators
+            .iter()
+            .filter(|agent| {
+                agent
+                    .generator_lag
+                    .as_ref()
+                    .is_some_and(|lag| lag.saturated)
+            })
+            .map(|agent| agent.agent.as_str())
+    }
+
+    /// The agents whose open file limit was below what they needed, in
+    /// `agents` order.
+    pub fn agents_short_of_files(&self) -> impl Iterator<Item = &str> {
+        self.generators
+            .iter()
+            .filter(|agent| {
+                agent
+                    .open_file_limit
+                    .as_ref()
+                    .is_some_and(|limit| !limit.sufficient)
+            })
+            .map(|agent| agent.agent.as_str())
+    }
+}
+
+/// One agent's load generator health in a distributed run: what its lag
+/// probe measured and its open file limit, as a single run reports them in
+/// [`AggregatedMetrics::generator_lag`] and
+/// [`AggregatedMetrics::open_file_limit`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct AgentGenerator {
+    /// The agent, as given to `--agents`.
+    pub agent: String,
+    /// How late the agent's runtime woke up; absent when its probe took no
+    /// sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator_lag: Option<GeneratorLag>,
+    /// The agent's open file limit against what its share needed; absent
+    /// where the agent cannot read it (Windows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_file_limit: Option<OpenFileLimit>,
 }
 
 /// What a run wrote to its capture file.

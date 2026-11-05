@@ -11,7 +11,8 @@
 use crate::cli::TestMode;
 use crate::config::{LoadTestConfig, PayloadConfig, ReplyMatch, Stage};
 use crate::error::{ConfigError, ErrorCategory, Result, WsBlastError};
-use crate::metrics::{ChaosSummary, LiveSnapshot, MetricsTotals};
+use crate::lag::LagTotals;
+use crate::metrics::{ChaosSummary, LiveSnapshot, MetricsTotals, OpenFileLimit};
 use crate::timeseries::{SeriesPart, TimeSeries, interval_histogram};
 use clap::ValueEnum;
 use hdrhistogram::Histogram;
@@ -25,7 +26,8 @@ use std::time::Duration;
 /// Version 2 added scenario phases (several `prepare` to `result` rounds on
 /// one connection), capture records, refreshed authentication tokens and
 /// interval latency in snapshots. Version 3 added chaos injection to the
-/// configuration and the agent's counts of injected faults to its result.
+/// configuration, and the agent's counts of injected faults, its generator
+/// lag and its open file limit to its result.
 pub const PROTOCOL_VERSION: u32 = 3;
 
 /// The shortest agent token accepted.
@@ -995,6 +997,40 @@ pub(crate) struct WireInterval {
     pub(crate) values: Sparse,
 }
 
+/// What an agent's generator lag probe measured during its run: every
+/// wake-up's lag as the recorded values of its histogram, the time-series
+/// intervals with a sample, those over the threshold, and the threshold of
+/// the agent's platform, which they were checked against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireLag {
+    pub(crate) values: Sparse,
+    pub(crate) intervals: u64,
+    pub(crate) intervals_over: u64,
+    pub(crate) threshold_us: u64,
+}
+
+impl WireLag {
+    fn new(lag: &LagTotals) -> Option<Self> {
+        let (hist, intervals, intervals_over, threshold_us) = lag.parts();
+        Some(Self {
+            values: to_sparse(hist?),
+            intervals,
+            intervals_over,
+            threshold_us,
+        })
+    }
+
+    fn decode(self) -> std::result::Result<LagTotals, String> {
+        let empty = crate::lag::lag_histogram().ok_or("cannot create a lag histogram")?;
+        Ok(LagTotals::from_parts(
+            from_sparse(&self.values, empty)?,
+            self.intervals,
+            self.intervals_over,
+            self.threshold_us,
+        ))
+    }
+}
+
 /// The result of an agent's run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WireResult {
@@ -1014,6 +1050,13 @@ pub(crate) struct WireResult {
     /// because the control channel was gone. `None` without capture.
     #[serde(default)]
     pub(crate) capture_dropped: Option<u64>,
+    /// The agent's generator lag; `None` when its probe took no sample.
+    #[serde(default)]
+    pub(crate) generator_lag: Option<WireLag>,
+    /// The agent's open file limit against what its share needed; `None`
+    /// where the agent cannot read it (Windows).
+    #[serde(default)]
+    pub(crate) open_file_limit: Option<OpenFileLimit>,
 }
 
 /// A decoded result, ready to merge.
@@ -1025,6 +1068,8 @@ pub(crate) struct AgentResult {
     pub(crate) totals: MetricsTotals,
     pub(crate) series: SeriesPart,
     pub(crate) capture_dropped: Option<u64>,
+    pub(crate) lag: LagTotals,
+    pub(crate) open_file_limit: Option<OpenFileLimit>,
 }
 
 impl WireResult {
@@ -1050,6 +1095,8 @@ impl WireResult {
                 })
                 .collect(),
             capture_dropped: outcome_meta.capture_dropped,
+            generator_lag: WireLag::new(&outcome_meta.lag),
+            open_file_limit: outcome_meta.open_file_limit,
         }
     }
 
@@ -1071,6 +1118,12 @@ impl WireResult {
                 buckets,
             },
             capture_dropped: self.capture_dropped,
+            lag: self
+                .generator_lag
+                .map(WireLag::decode)
+                .transpose()?
+                .unwrap_or_default(),
+            open_file_limit: self.open_file_limit,
         })
     }
 }
@@ -1082,6 +1135,8 @@ pub(crate) struct ResultMeta {
     pub(crate) connections: u64,
     pub(crate) not_started: u64,
     pub(crate) capture_dropped: Option<u64>,
+    pub(crate) lag: LagTotals,
+    pub(crate) open_file_limit: Option<OpenFileLimit>,
 }
 
 #[cfg(test)]
@@ -1526,6 +1581,56 @@ phases:
         let mut unscripted = share;
         unscripted.phase.as_mut().unwrap().actions.clear();
         assert!(unscripted.into_config().is_err());
+    }
+
+    #[test]
+    fn results_carry_the_generator_lag_and_the_open_file_limit() {
+        let mut hist = crate::lag::lag_histogram().unwrap();
+        for micros in [900, 1_000, 1_100, 1_200, 45_000] {
+            hist.record(micros).unwrap();
+        }
+        // Checked against the agent's threshold, which may not be this
+        // machine's.
+        let lag = LagTotals::from_parts(hist, 4, 1, 36_000);
+        let limit = OpenFileLimit {
+            soft_limit: 1_024,
+            needed: 65,
+            sufficient: true,
+        };
+        let result = WireResult::new(
+            &MetricsTotals::new().unwrap(),
+            ResultMeta {
+                elapsed: Duration::from_secs(1),
+                started_at_unix_ms: 0,
+                connections: 1,
+                not_started: 0,
+                capture_dropped: None,
+                lag: lag.clone(),
+                open_file_limit: Some(limit.clone()),
+            },
+            TimeSeries::default(),
+            &BTreeMap::new(),
+        );
+        let json = serde_json::to_string(&result).unwrap();
+        let decoded = serde_json::from_str::<WireResult>(&json)
+            .unwrap()
+            .decode()
+            .unwrap();
+        let summary = decoded.lag.summary().unwrap();
+        assert_eq!(Some(&summary), lag.summary().as_ref());
+        assert_eq!(summary.samples, 5);
+        assert_eq!(summary.threshold_us, 36_000);
+        assert_eq!(summary.intervals_over_threshold, 1);
+        assert_eq!(decoded.open_file_limit, Some(limit));
+
+        // An agent whose probe took no sample sends none.
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value["generator_lag"] = serde_json::Value::Null;
+        let decoded = serde_json::from_value::<WireResult>(value)
+            .unwrap()
+            .decode()
+            .unwrap();
+        assert!(decoded.lag.summary().is_none());
     }
 
     #[test]

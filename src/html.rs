@@ -1981,6 +1981,7 @@ mod tests {
         metrics.distributed = Some(crate::metrics::DistributedSummary {
             agents: vec!["a.test:7700".into(), "<b>evil</b>:1".into()],
             lost_agents: vec!["<b>evil</b>:1".into()],
+            ..Default::default()
         });
         let html = render_html_report(&view(&metrics, &slo, &[], &target));
         assert_well_formed(&html);

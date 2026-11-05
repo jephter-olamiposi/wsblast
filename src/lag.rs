@@ -47,7 +47,8 @@ fn threshold_us() -> u64 {
     DEFAULT_THRESHOLD.as_micros() as u64
 }
 
-fn lag_histogram() -> Option<Histogram<u64>> {
+/// An empty histogram of lag samples, in microseconds.
+pub(crate) fn lag_histogram() -> Option<Histogram<u64>> {
     Histogram::new_with_bounds(1, 60_000_000, 2).ok()
 }
 
@@ -179,6 +180,7 @@ impl LagRecord {
             hist: self.hist.clone(),
             intervals: self.intervals.len() as u64,
             intervals_over: self.intervals_over,
+            threshold_us: None,
         }
     }
 }
@@ -189,9 +191,42 @@ pub(crate) struct LagTotals {
     hist: Option<Histogram<u64>>,
     intervals: u64,
     intervals_over: u64,
+    /// The threshold of the machine the samples were taken on, when it is
+    /// not this one: a distributed agent's, whose platform may differ from
+    /// its coordinator's. `None` for this machine's.
+    threshold_us: Option<u64>,
 }
 
 impl LagTotals {
+    /// The totals as a distributed agent sends them: the samples, the
+    /// interval counts and the threshold the intervals were checked
+    /// against.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn parts(&self) -> (Option<&Histogram<u64>>, u64, u64, u64) {
+        (
+            self.hist.as_ref(),
+            self.intervals,
+            self.intervals_over,
+            self.threshold_us.unwrap_or_else(threshold_us),
+        )
+    }
+
+    /// Totals an agent sent, checked against its own threshold.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn from_parts(
+        hist: Histogram<u64>,
+        intervals: u64,
+        intervals_over: u64,
+        threshold_us: u64,
+    ) -> Self {
+        Self {
+            hist: Some(hist),
+            intervals,
+            intervals_over,
+            threshold_us: Some(threshold_us),
+        }
+    }
+
     /// Adds the totals of another phase.
     #[cfg(feature = "scenario")]
     pub(crate) fn add(&mut self, other: &Self) {
@@ -204,12 +239,13 @@ impl LagTotals {
         }
         self.intervals += other.intervals;
         self.intervals_over += other.intervals_over;
+        self.threshold_us = self.threshold_us.or(other.threshold_us);
     }
 
     /// The report's summary; `None` without a single sample.
     pub(crate) fn summary(&self) -> Option<GeneratorLag> {
         let hist = self.hist.as_ref().filter(|hist| !hist.is_empty())?;
-        let threshold_us = threshold_us();
+        let threshold_us = self.threshold_us.unwrap_or_else(threshold_us);
         let p99_us = hist.value_at_quantile(0.99);
         let late = hist.len() - hist.count_between(1, threshold_us);
         let p99_over = p99_us > threshold_us && late >= MIN_LATE_IN_RUN;

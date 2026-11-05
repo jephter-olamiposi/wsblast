@@ -799,6 +799,8 @@ where
             connections: outcome.connections,
             not_started: outcome.not_started,
             capture_dropped,
+            lag: outcome.lag,
+            open_file_limit: crate::runner::open_file_limit(connections),
         },
         outcome.time_series,
         &outcome.interval_store.buckets(),

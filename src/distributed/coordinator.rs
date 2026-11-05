@@ -10,7 +10,8 @@ use super::ws_config;
 use crate::config::LoadTestConfig;
 use crate::error::{ConfigError, Result, WsBlastError};
 use crate::metrics::{
-    AggregatedMetrics, CaptureSummary, DistributedSummary, LiveMetrics, LiveSnapshot, MetricsTotals,
+    AgentGenerator, AggregatedMetrics, CaptureSummary, DistributedSummary, LiveMetrics,
+    LiveSnapshot, MetricsTotals, OpenFileLimit,
 };
 use crate::timeseries::{TimeSeries, interval_for, interval_histogram};
 use futures_util::stream::{SplitSink, SplitStream};
@@ -252,6 +253,9 @@ struct AgentTotals {
     connections: u64,
     not_started: u64,
     series: TimeSeries,
+    lag: crate::lag::LagTotals,
+    /// The limit of the agent's largest share of a phase.
+    open_file_limit: Option<OpenFileLimit>,
 }
 
 /// What became of one agent in a phase.
@@ -513,9 +517,8 @@ impl Coordinator {
             ));
         };
         let (metrics, agents) = self.merge_phase(&phase)?;
-        let summary = self.summary(&agents);
         Ok(DistributedOutcome {
-            metrics: metrics.with_distributed(summary).with_capture(capture),
+            metrics: metrics.with_capture(capture),
             agents,
         })
     }
@@ -1112,20 +1115,38 @@ impl Coordinator {
         Some(bar)
     }
 
-    /// The agents of the run and the ones lost in it.
-    fn summary(&self, agents: &[AgentOutcome]) -> DistributedSummary {
-        DistributedSummary {
+    /// The agents of the run, the ones lost in it and the generator health
+    /// of the others, and the run's own generator health from theirs.
+    fn summary(&self, agents: &[AgentOutcome]) -> (DistributedSummary, GeneratorHealth) {
+        let generators: Vec<AgentGenerator> = agents
+            .iter()
+            .filter_map(|agent| {
+                let metrics = agent.metrics.as_ref()?;
+                Some(AgentGenerator {
+                    agent: agent.address.clone(),
+                    generator_lag: metrics.generator_lag.clone(),
+                    open_file_limit: metrics.open_file_limit.clone(),
+                })
+            })
+            .collect();
+        let health = GeneratorHealth::of(&generators);
+        let summary = DistributedSummary {
             agents: agents.iter().map(|agent| agent.address.clone()).collect(),
             lost_agents: agents
                 .iter()
                 .filter(|agent| agent.metrics.is_none())
                 .map(|agent| agent.address.clone())
                 .collect(),
-        }
+            generator_lag_agent: health.lag.as_ref().map(|(agent, _)| agent.clone()),
+            open_file_limit_agent: health.files.as_ref().map(|(agent, _)| agent.clone()),
+            generators,
+        };
+        (summary, health)
     }
 
     /// Merges the results of one phase: the phase's metrics, measured from
-    /// its start to its last result, and every agent's own.
+    /// its start to its last result, with the agents and their generator
+    /// health, and every agent's own metrics.
     fn merge_phase(&self, run: &PhaseRun) -> Result<(AggregatedMetrics, Vec<AgentOutcome>)> {
         let mut totals = MetricsTotals::new()?;
         let mut parts = Vec::new();
@@ -1143,7 +1164,8 @@ impl Coordinator {
                         .clone()
                         .finish(result.elapsed, result.connections)
                         .with_not_started(result.not_started)
-                        .with_time_series(result.series.series.clone());
+                        .with_time_series(result.series.series.clone())
+                        .with_generator(result.lag.summary(), result.open_file_limit.clone());
                     parts.push(crate::timeseries::SeriesPart {
                         series: result.series.series.clone(),
                         buckets: result.series.buckets.clone(),
@@ -1195,6 +1217,8 @@ impl Coordinator {
         if let (Some(chaos), Some(seed)) = (metrics.chaos.as_mut(), run.chaos_seed) {
             chaos.seed = seed;
         }
+        let (summary, health) = self.summary(&agents);
+        let metrics = health.apply(metrics).with_distributed(summary);
         Ok((metrics, agents))
     }
 
@@ -1244,6 +1268,8 @@ impl Coordinator {
                         connections: 0,
                         not_started: 0,
                         series: TimeSeries::default(),
+                        lag: crate::lag::LagTotals::default(),
+                        open_file_limit: None,
                     });
                 }
                 let Some(own) = per_agent[slot].as_mut() else {
@@ -1254,6 +1280,15 @@ impl Coordinator {
                 own.connections += result.connections;
                 own.not_started += result.not_started;
                 own.series.append(result.series.series.clone(), offset);
+                own.lag.add(&result.lag);
+                if let Some(limit) = &result.open_file_limit
+                    && own
+                        .open_file_limit
+                        .as_ref()
+                        .is_none_or(|largest| limit.needed > largest.needed)
+                {
+                    own.open_file_limit = Some(limit.clone());
+                }
             }
             total_elapsed += phase_metrics.elapsed;
             total_connections += phase_metrics.total_connections_attempted;
@@ -1288,7 +1323,8 @@ impl Coordinator {
                             own.totals
                                 .finish(own.elapsed, own.connections)
                                 .with_not_started(own.not_started)
-                                .with_time_series(own.series),
+                                .with_time_series(own.series)
+                                .with_generator(own.lag.summary(), own.open_file_limit),
                         ),
                         error: None,
                         started_at_unix_ms: started_at[slot],
@@ -1302,12 +1338,16 @@ impl Coordinator {
                 },
             )
             .collect();
-        let mut metrics = totals
-            .finish(total_elapsed, total_connections)
-            .with_not_started(total_not_started)
-            .with_time_series(time_series)
-            .with_capture(capture)
-            .with_distributed(self.summary(&agents));
+        let (summary, health) = self.summary(&agents);
+        let mut metrics = health
+            .apply(
+                totals
+                    .finish(total_elapsed, total_connections)
+                    .with_not_started(total_not_started)
+                    .with_time_series(time_series)
+                    .with_capture(capture),
+            )
+            .with_distributed(summary);
         // As on one machine, the scenario reports the seed of the first
         // phase that injected faults.
         if let (Some(chaos), Some(seed)) = (metrics.chaos.as_mut(), first_chaos_seed) {
@@ -1331,6 +1371,61 @@ impl Coordinator {
             agents,
             phases: phase_agents,
         })
+    }
+}
+
+/// The generator health of a distributed run, from its agents'.
+///
+/// Lag does not add up across machines: each agent's probe measures its own
+/// runtime. The run reports the agent with the highest p99 lag, so
+/// `--max-generator-lag` fails when any agent's generator lagged more than
+/// the limit, and flags the run as saturated when any agent's generator
+/// was. The open file limit is that of the agent with the fewest
+/// descriptors to spare.
+struct GeneratorHealth {
+    lag: Option<(String, crate::metrics::GeneratorLag)>,
+    files: Option<(String, OpenFileLimit)>,
+}
+
+impl GeneratorHealth {
+    fn of(generators: &[AgentGenerator]) -> Self {
+        let mut lag: Option<(String, crate::metrics::GeneratorLag)> = None;
+        let mut files: Option<(String, OpenFileLimit)> = None;
+        let headroom =
+            |limit: &OpenFileLimit| i128::from(limit.soft_limit) - i128::from(limit.needed);
+        for agent in generators {
+            if let Some(own) = &agent.generator_lag
+                && lag.as_ref().is_none_or(|(_, worst)| {
+                    (own.p99_us, own.max_us) > (worst.p99_us, worst.max_us)
+                })
+            {
+                lag = Some((agent.agent.clone(), own.clone()));
+            }
+            if let Some(own) = &agent.open_file_limit
+                && files
+                    .as_ref()
+                    .is_none_or(|(_, tightest)| headroom(own) < headroom(tightest))
+            {
+                files = Some((agent.agent.clone(), own.clone()));
+            }
+        }
+        if let Some((_, worst)) = lag.as_mut() {
+            worst.saturated = generators.iter().any(|agent| {
+                agent
+                    .generator_lag
+                    .as_ref()
+                    .is_some_and(|lag| lag.saturated)
+            });
+        }
+        Self { lag, files }
+    }
+
+    /// Attaches the run's lag and open file limit to `metrics`.
+    fn apply(self, metrics: AggregatedMetrics) -> AggregatedMetrics {
+        metrics.with_generator(
+            self.lag.map(|(_, lag)| lag),
+            self.files.map(|(_, limit)| limit),
+        )
     }
 }
 
@@ -1658,5 +1753,74 @@ async fn follow_agent(
                 )));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::GeneratorLag;
+
+    fn lag(p99_us: u64, max_us: u64, saturated: bool) -> GeneratorLag {
+        GeneratorLag {
+            probe_interval_us: 10_000,
+            samples: 100,
+            p50_us: 1_000,
+            p99_us,
+            max_us,
+            threshold_us: 20_000,
+            intervals: 2,
+            intervals_over_threshold: 0,
+            saturated,
+        }
+    }
+
+    fn agent(name: &str, lag: Option<GeneratorLag>, files: Option<(u64, u64)>) -> AgentGenerator {
+        AgentGenerator {
+            agent: name.to_string(),
+            generator_lag: lag,
+            open_file_limit: files.map(|(soft_limit, needed)| OpenFileLimit {
+                soft_limit,
+                needed,
+                sufficient: needed <= soft_limit,
+            }),
+        }
+    }
+
+    #[test]
+    fn the_run_reports_the_worst_agent_and_any_saturation() {
+        let health = GeneratorHealth::of(&[
+            agent("a", Some(lag(1_000, 5_000, false)), Some((1_024, 100))),
+            agent(
+                "b",
+                Some(lag(25_000, 40_000, false)),
+                Some((65_536, 10_064)),
+            ),
+            agent("c", Some(lag(15_000, 90_000, true)), None),
+            agent("d", None, Some((1_024, 1_000))),
+        ]);
+        let (name, worst) = health.lag.clone().unwrap();
+        assert_eq!(name, "b");
+        assert_eq!(worst.p99_us, 25_000);
+        assert!(worst.saturated, "agent c was saturated");
+        let (name, files) = health.files.clone().unwrap();
+        assert_eq!((name.as_str(), files.soft_limit), ("d", 1_024));
+
+        let metrics = health.apply(
+            MetricsTotals::new()
+                .unwrap()
+                .finish(Duration::from_secs(1), 1),
+        );
+        assert_eq!(metrics.generator_lag.unwrap().p99_us, 25_000);
+        assert_eq!(metrics.open_file_limit.unwrap().needed, 1_000);
+
+        // Ties keep the first agent; no measurement gives nothing.
+        let tie = GeneratorHealth::of(&[
+            agent("a", Some(lag(1_000, 2_000, false)), None),
+            agent("b", Some(lag(1_000, 2_000, false)), None),
+        ]);
+        assert_eq!(tie.lag.unwrap().0, "a");
+        let none = GeneratorHealth::of(&[agent("a", None, None)]);
+        assert!(none.lag.is_none() && none.files.is_none());
     }
 }

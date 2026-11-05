@@ -12,7 +12,7 @@ Contents:
 2. [Flags](#2-flags)
 3. [How the load is split](#3-how-the-load-is-split)
 4. [Scenarios, capture, refreshed tokens and live export](#4-scenarios-capture-refreshed-tokens-and-live-export)
-5. [Chaos injection](#5-chaos-injection)
+5. [Chaos injection and generator saturation](#5-chaos-injection-and-generator-saturation)
 6. [Architecture and protocol](#6-architecture-and-protocol)
 7. [Security model](#7-security-model)
 8. [Failures and exit codes](#8-failures-and-exit-codes)
@@ -66,7 +66,7 @@ The coordinator is the normal command plus:
 | `--agent-timeout DURATION` | `30s` | Time the agents get to connect, authenticate, validate the test and become ready (the start barrier), and time each agent gets after the end of the run, or after a stop, to send its result. |
 | `--agent-ca PEM` | off | CA certificates to trust for `wss://` agents, in addition to the platform's roots (which `SSL_CERT_FILE` and `SSL_CERT_DIR` also override). Use it for a private CA or a self-signed agent certificate. |
 
-Every other flag of a normal run keeps its meaning: target, mode, rate, payload, headers, subprotocol, timeouts, pings, `--match`, `--no-reconnect`, GraphQL options, `--auth-*` including `--auth-token-refresh`, `--scenario` and `--phase`, `--capture` and `--capture-limit`, `--prometheus-listen`, `--otel-*`, `--chaos-*`, SLOs, `--format` and `-o`. [Section 4](#4-scenarios-capture-refreshed-tokens-and-live-export) describes how the scenario, capture, token refresh and export flags work across machines, and [section 5](#5-chaos-injection) how chaos does. Only `--tui` is not supported with `--agents` in this version; it is rejected with exit code 1.
+Every other flag of a normal run keeps its meaning: target, mode, rate, payload, headers, subprotocol, timeouts, pings, `--match`, `--no-reconnect`, GraphQL options, `--auth-*` including `--auth-token-refresh`, `--scenario` and `--phase`, `--capture` and `--capture-limit`, `--prometheus-listen`, `--otel-*`, `--chaos-*`, SLOs, `--format` and `-o`. [Section 4](#4-scenarios-capture-refreshed-tokens-and-live-export) describes how the scenario, capture, token refresh and export flags work across machines, and [section 5](#5-chaos-injection-and-generator-saturation) how chaos and `--max-generator-lag` do. Only `--tui` is not supported with `--agents` in this version; it is rejected with exit code 1.
 
 ## 3. How the load is split
 
@@ -131,7 +131,9 @@ With `--auth-token-cmd` and `--auth-token-refresh`, the token command runs on th
 
 The coordinator keeps these cluster totals in a live-metrics registry of its own whether or not an exporter runs, so a display that reads live counters (as the TUI does on one machine) can read them too.
 
-## 5. Chaos injection
+## 5. Chaos injection and generator saturation
+
+### 5.1 Chaos injection
 
 The `--chaos-*` options, and a scenario phase's `chaos:` mapping, work with `--agents` as on one machine ([METHODOLOGY.md, section 13](../METHODOLOGY.md#13-chaos-injection)): every agent injects the faults into its own connections, with the same percentages, delay and close mode.
 
@@ -139,6 +141,16 @@ The `--chaos-*` options, and a scenario phase's `chaos:` mapping, work with `--a
 - **Scenarios.** The coordinator resolves each phase's chaos (the phase's mapping, or the command line's options when it has none, and the seed) and sends every agent its share of it with the agent's seed, so the agents do not fall back on settings of their own.
 - **Counts.** Each agent's result carries its counts of delayed, dropped and corrupted sends and of closes. The coordinator adds them up, so `metrics.chaos` holds the counts of every agent and the run's seed, the one to give `--chaos-seed` to repeat the run; a scenario reports the seed of its first phase that injected faults, as on one machine. Each agent's own counts and seed are in its [`AgentOutcome`](#10-using-it-from-rust) when the coordinator runs from Rust.
 - The counts of a whole run repeat when the number of sends does, as on one machine: with `-n` and one connection per agent they repeat exactly.
+
+### 5.2 Generator saturation
+
+Every agent watches its own load generator as a single run does ([METHODOLOGY.md, section 14](../METHODOLOGY.md#14-load-generator-saturation)): its lag probe runs for the whole of each run or phase, and it checks its open file limit against its share of the connections. Its result carries the lag samples and the limit; lag does not add up across machines, so the coordinator keeps each agent's apart:
+
+- The report lists every agent's lag and limit in `metrics.distributed.generators`.
+- `metrics.generator_lag` is the lag of the agent with the highest p99 lag, named in `metrics.distributed.generator_lag_agent`, and it is flagged `saturated` when any agent's generator was saturated. `metrics.open_file_limit` is the limit of the agent with the fewest descriptors to spare, named in `metrics.distributed.open_file_limit_agent`.
+- `--max-generator-lag D` compares that highest p99 lag with `D`: the gate fails if any agent's generator was saturated past the limit, and the run exits with 2.
+- The text, Markdown and HTML reports print the `Generator:` line with the agent whose lag and limit it shows and the agents that were saturated or short of descriptors, for example `lag p99 31.20 ms, max 64.00 ms over 150 wake-ups on agent 10.0.0.12:7700, the highest of 3 agents (threshold 20.00 ms; SATURATED on 10.0.0.12:7700: latency includes client-side delay)`. After the report the coordinator warns once for every saturated agent.
+- Each agent checks its lag against its own platform's threshold, so a cluster that mixes Windows and Linux agents flags each of them correctly.
 
 ## 6. Architecture and protocol
 
@@ -170,9 +182,9 @@ A test goes through these steps:
 
 The `config` of `prepare` is a dedicated wire structure, not a serialised `LoadTestConfig`: the target, the mode, the connections, ramp rate and request limit of this agent, the duration, the stages and the agent's share of them, the rate, the payload (text as is, binary as base64), the handshake headers (including resolved `--auth-*` credentials), the subprotocol, the timeouts, the ping interval, `--match`, the reconnect setting and the GraphQL settings; and, when they apply, `phase` (the scenario phase's name, think time and actions), `capture` (how many records the agent may still queue), `live_auth` (the refreshed header's name and current value) and `chaos` (the faults to inject, with the agent's seed). SLOs, the report format and file paths stay on the coordinator.
 
-Version 2 of the protocol added scenario phases, the `capture` and `token` messages and the snapshot's `intervals`. Version 3 added `chaos` to the configuration and the agent's counts of injected faults to its result. Builds speaking different versions reject each other at the hello, with an error naming both wsblast versions: an agent of an earlier release cannot be given chaos settings it would ignore.
+Version 2 of the protocol added scenario phases, the `capture` and `token` messages and the snapshot's `intervals`. Version 3 added `chaos` to the configuration, and the agent's counts of injected faults, its generator lag and its open file limit to its result. Builds speaking different versions reject each other at the hello, with an error naming both wsblast versions: an agent of an earlier release cannot be given chaos settings it would ignore.
 
-A `result` carries the agent's counters, its error breakdown, its interrupted and not-started slot counts, its handshake, RTT and response-time histograms as `[value, count]` pairs of every non-empty bucket, its time series, the latency histogram of every time-series interval in the same form, and, when it injected faults, its chaos counts. A histogram rebuilt from these pairs has exactly the agent's buckets, so merging rebuilt histograms gives the same percentiles as merging the agents' own.
+A `result` carries the agent's counters, its error breakdown, its interrupted and not-started slot counts, its handshake, RTT and response-time histograms as `[value, count]` pairs of every non-empty bucket, its time series, the latency histogram of every time-series interval in the same form, its generator lag histogram in the same form with its interval counts and threshold, its open file limit, and, when it injected faults, its chaos counts. A histogram rebuilt from these pairs has exactly the agent's buckets, so merging rebuilt histograms gives the same percentiles as merging the agents' own.
 
 Example `prepare` and `result` messages, abbreviated:
 
@@ -215,7 +227,6 @@ A lost agent's work is never re-run on another agent, so nothing is counted twic
 - Run the same wsblast version everywhere. A different protocol version is rejected; the same protocol from another release works, but the agents then measure with their own release's rules.
 - `--auth-token-cmd` runs on the coordinator only, once at the start and again on every `--auth-token-refresh`, and the resulting header is sent to every agent.
 - Agents start within the control channel's latency of each other, not at the same instant, and their time series are aligned on their own starts ([METHODOLOGY.md, section 12.3](../METHODOLOGY.md#123-time-across-machines)). Keep the coordinator close to the agents when per-second detail matters.
-- The coordinator does not check that the agents are not saturated. Watch their CPU as you would for a single machine.
 - The agents' wall clocks are not used for any measurement; `started_at_unix_ms` in the library's per-agent outcome is informational.
 
 ## 10. Using it from Rust

@@ -613,7 +613,8 @@ impl TimeSeries {
     /// counters and open connections are summed, the duration is the longest
     /// of them, and the latency is read from the sum of the interval
     /// histograms, so interval percentiles are those of every sample, not an
-    /// average of percentiles.
+    /// average of percentiles. The generator lag of a point is that of the
+    /// machine with the highest p99 lag in the interval.
     pub(crate) fn merge_parallel(parts: Vec<SeriesPart>) -> Self {
         let Some(first) = parts.iter().find(|part| !part.series.points.is_empty()) else {
             return parts
@@ -651,6 +652,16 @@ impl TimeSeries {
                 merged.bytes_sent += point.bytes_sent;
                 merged.bytes_recv += point.bytes_recv;
                 merged.errors += point.errors;
+                // Lag is not additive: the interval shows the agent whose
+                // generator lagged most in it.
+                if let Some(lag) = point.generator_lag
+                    && merged
+                        .generator_lag
+                        .as_ref()
+                        .is_none_or(|worst| (lag.p99_us, lag.max_us) > (worst.p99_us, worst.max_us))
+                {
+                    merged.generator_lag = Some(lag);
+                }
             }
             for (bucket, hist) in part.buckets {
                 match histograms.get_mut(&bucket) {
@@ -817,12 +828,23 @@ mod tests {
             }
             hist
         };
+        let lag = |p99_us: u64| IntervalLag {
+            samples: 100,
+            p99_us,
+            max_us: p99_us * 2,
+        };
+        let mut a_first = point(0.0, 1.0, 10, 2);
+        a_first.generator_lag = Some(lag(900));
+        let mut b_first = point(0.0, 1.0, 6, 3);
+        b_first.generator_lag = Some(lag(30_000));
+        let mut a_second = point(1.0, 0.5, 4, 2);
+        a_second.generator_lag = Some(lag(1_100));
         let a = SeriesPart {
-            series: series(vec![point(0.0, 1.0, 10, 2), point(1.0, 0.5, 4, 2)]),
+            series: series(vec![a_first, a_second]),
             buckets: BTreeMap::from([(0, hist_of(&[1_000; 9])), (1, hist_of(&[2_000]))]),
         };
         let b = SeriesPart {
-            series: series(vec![point(0.0, 1.0, 6, 3), point(1.0, 0.52, 6, 1)]),
+            series: series(vec![b_first, point(1.0, 0.52, 6, 1)]),
             buckets: BTreeMap::from([(0, hist_of(&[50_000]))]),
         };
         let merged = TimeSeries::merge_parallel(vec![a, b]);
@@ -839,6 +861,9 @@ mod tests {
         assert_eq!(second.duration_secs, 0.52);
         assert_eq!(second.messages_sent, 10);
         assert_eq!(second.latency.count, 1);
+        // Each interval shows the machine that lagged most in it.
+        assert_eq!(first.generator_lag, Some(lag(30_000)));
+        assert_eq!(second.generator_lag, Some(lag(1_100)));
     }
 
     #[cfg(feature = "scenario")]

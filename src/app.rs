@@ -499,12 +499,6 @@ fn check_distributed_options(cli: &Cli) -> Result<()> {
             "--tui cannot be used with --agents in this version of wsblast; the coordinator prints progress lines instead".to_string(),
         )));
     }
-    if cli.max_generator_lag.is_some() {
-        return Err(WsBlastError::Config(ConfigError::UnsupportedOption(
-            "--max-generator-lag cannot be used with --agents in this version of wsblast"
-                .to_string(),
-        )));
-    }
     // A token re-signed before expiry, or an OAuth2 token refreshed before
     // it expires, is pushed to the agents like a refreshed token command. A
     // token signed per connection attempt would need the signing key on
@@ -673,6 +667,7 @@ async fn run_distributed(cli: &Cli) -> Result<()> {
     let slo_result = slo.unwrap_or_else(|| report::evaluate_slos(&config.slo, &metrics));
     report::emit_scenario_report(&config, &metrics, &slo_result, &phase_targets, &phases)
         .map_err(WsBlastError::Io)?;
+    warn_if_generator_saturated(&metrics);
     if !lost.is_empty() {
         eprintln!(
             "{} {} of {} agents were lost; the report covers the other {}.",
@@ -693,8 +688,32 @@ async fn run_distributed(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// Warns, after the report, when the load generator was the bottleneck.
+/// Warns, after the report, when the load generator was the bottleneck: on
+/// one machine, or on any agent of a distributed run, each named.
 fn warn_if_generator_saturated(metrics: &crate::metrics::AggregatedMetrics) {
+    if let Some(distributed) = metrics
+        .distributed
+        .as_ref()
+        .filter(|summary| !summary.generators.is_empty())
+    {
+        for agent in &distributed.generators {
+            if let Some(lag) = agent.generator_lag.as_ref().filter(|lag| lag.saturated) {
+                eprintln!(
+                    "\n{} The load generator of agent {} was saturated: its runtime woke up late by {} at p99 and {} at most (threshold {}; {} of {} intervals over it). \
+                     Every latency it measured, and so every latency in this report, includes that client-side delay and may be invalid. \
+                     Use fewer connections or a lower rate per agent, give that machine more CPU, or add agents.",
+                    "WARNING:".bold().red(),
+                    agent.agent,
+                    report::format_us(lag.p99_us),
+                    report::format_us(lag.max_us),
+                    report::format_us(lag.threshold_us),
+                    lag.intervals_over_threshold,
+                    lag.intervals
+                );
+            }
+        }
+        return;
+    }
     let Some(lag) = metrics.generator_lag.as_ref().filter(|lag| lag.saturated) else {
         return;
     };

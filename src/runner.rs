@@ -788,7 +788,7 @@ fn check_file_descriptor_limit(required_conns: usize) {
 /// The open file limit against what `required_conns` connections need:
 /// one descriptor each plus 64 for runtime I/O, event loops and DNS
 /// resolution. `None` where the limit cannot be read.
-fn open_file_limit(required_conns: usize) -> Option<OpenFileLimit> {
+pub(crate) fn open_file_limit(required_conns: usize) -> Option<OpenFileLimit> {
     #[cfg(unix)]
     {
         let mut rlim = libc::rlimit {
