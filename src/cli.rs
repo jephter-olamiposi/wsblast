@@ -252,6 +252,11 @@ pub(crate) struct Cli {
     #[arg(long = "auth-jwt-ttl", value_name = "DURATION")]
     pub auth_jwt_ttl: Option<String>,
 
+    /// Key ID put in the JWT header as kid, for servers that look the verification key up in a JWKS
+    #[cfg(feature = "auth")]
+    #[arg(long = "auth-jwt-kid", value_name = "KEY_ID")]
+    pub auth_jwt_kid: Option<String>,
+
     /// Sign a fresh JWT with a unique jti for every connection attempt instead of sharing one token
     #[cfg(feature = "auth")]
     #[arg(long = "auth-jwt-per-connection")]

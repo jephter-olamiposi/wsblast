@@ -3,8 +3,9 @@
 //! implementation.
 //!
 //! Every token carries the `--auth-jwt-claims` object plus `iat`, `nbf`,
-//! `exp` and a random `jti`. By default one token is shared by every
-//! handshake and re-signed by a background thread before it expires; with
+//! `exp` and a random `jti`, and its JOSE header carries `--auth-jwt-kid`
+//! when one is given. By default one token is shared by every handshake
+//! and re-signed by a background thread before it expires; with
 //! `--auth-jwt-per-connection` each handshake attempt signs its own.
 
 use super::{LiveAuthHeader, RefreshGuard, Source, WARNING_GAP, WarningLimiter};
@@ -55,6 +56,8 @@ pub(crate) struct JwtConfig {
     /// Added to every token.
     pub(crate) claims: Map<String, Value>,
     pub(crate) ttl: Duration,
+    /// The `kid` header parameter (RFC 7515 section 4.1.4).
+    pub(crate) kid: Option<String>,
     pub(crate) per_connection: bool,
 }
 
@@ -101,13 +104,37 @@ pub(crate) fn config_from_cli(cli: &Cli) -> Result<JwtConfig> {
         )));
     }
 
+    let kid = cli.auth_jwt_kid.clone();
+    if let Some(kid) = &kid {
+        validate_kid(kid).map_err(|problem| invalid(format!("--auth-jwt-kid {problem}")))?;
+    }
+
     Ok(JwtConfig {
         alg: cli.auth_jwt_alg.unwrap_or(JwtAlg::Hs256),
         key_file,
         claims,
         ttl,
+        kid,
         per_connection: cli.auth_jwt_per_connection,
     })
+}
+
+/// Checks a `--auth-jwt-kid` value. RFC 7515 allows any string, but a key
+/// ID that is empty, carries control characters or has surrounding
+/// whitespace is almost always a quoting or copy-paste mistake that would
+/// make the server's JWKS lookup fail on every handshake, so it is rejected
+/// before the run instead.
+fn validate_kid(kid: &str) -> std::result::Result<(), &'static str> {
+    if kid.is_empty() {
+        return Err("must not be empty");
+    }
+    if kid.chars().any(char::is_control) {
+        return Err("must contain printable characters only");
+    }
+    if kid.trim() != kid {
+        return Err("must not start or end with whitespace");
+    }
+    Ok(())
 }
 
 /// Loads the key and signs the first token, so a bad key fails before the
@@ -237,12 +264,19 @@ impl Signer {
         let path = &config.key_file;
         let bytes = std::fs::read(path)
             .map_err(|e| format!("could not read --auth-jwt-key {}: {e}", path.display()))?;
-        Self::new(config.alg, &bytes, config.claims.clone(), config.ttl)
-            .map_err(|e| format!("--auth-jwt-key {}: {e}", path.display()))
+        Self::new(
+            config.alg,
+            config.kid.as_deref(),
+            &bytes,
+            config.claims.clone(),
+            config.ttl,
+        )
+        .map_err(|e| format!("--auth-jwt-key {}: {e}", path.display()))
     }
 
     fn new(
         alg: JwtAlg,
+        kid: Option<&str>,
         key: &[u8],
         claims: Map<String, Value>,
         ttl: Duration,
@@ -255,7 +289,7 @@ impl Signer {
             JwtAlg::Rs256 => SigningKey::Rsa(rsa_key(key)?),
             JwtAlg::Es256 => SigningKey::Ecdsa(ecdsa_key(key, &rng)?),
         };
-        let header = format!(r#"{{"alg":"{}","typ":"JWT"}}"#, alg.name());
+        let header = jose_header(alg, kid);
         Ok(Self {
             key,
             header: crate::base64::encode_url(header.as_bytes()),
@@ -316,6 +350,20 @@ impl Signer {
         let value = super::header_value(AuthScheme::Static, name, &token)
             .ok_or_else(|| "the token is not a valid HTTP header value".to_string())?;
         Ok((value, expires))
+    }
+}
+
+/// The JOSE header JSON: `alg` and `typ`, plus `kid` when given. The key
+/// ID is serialized by serde_json, so quotes and backslashes in it are
+/// escaped.
+fn jose_header(alg: JwtAlg, kid: Option<&str>) -> String {
+    match kid {
+        None => format!(r#"{{"alg":"{}","typ":"JWT"}}"#, alg.name()),
+        Some(kid) => format!(
+            r#"{{"alg":"{}","typ":"JWT","kid":{}}}"#,
+            alg.name(),
+            Value::from(kid)
+        ),
     }
 }
 
@@ -414,7 +462,7 @@ mod tests {
         let Value::Object(claims) = claims else {
             panic!("claims must be an object")
         };
-        Signer::new(alg, key, claims, ttl).unwrap()
+        Signer::new(alg, None, key, claims, ttl).unwrap()
     }
 
     fn b64url_decode(input: &str) -> Vec<u8> {
@@ -456,9 +504,17 @@ mod tests {
         )
     }
 
-    /// Splits a token, checks its header and returns the signing input,
-    /// the decoded claims and the signature.
+    /// Splits a token, checks that its header is exactly `alg` and `typ`
+    /// and returns the signing input, the decoded claims and the signature.
     fn parts(token: &str, alg: &str) -> (String, Map<String, Value>, Vec<u8>) {
+        parts_with_header(token, &serde_json::json!({"alg": alg, "typ": "JWT"}))
+    }
+
+    /// Like [`parts`], with the whole expected header.
+    fn parts_with_header(
+        token: &str,
+        expected_header: &Value,
+    ) -> (String, Map<String, Value>, Vec<u8>) {
         let mut parts = token.split('.');
         let (header, payload, signature) = (
             parts.next().unwrap(),
@@ -474,7 +530,7 @@ mod tests {
             );
         }
         let header: Value = serde_json::from_slice(&b64url_decode(header)).unwrap();
-        assert_eq!(header, serde_json::json!({"alg": alg, "typ": "JWT"}));
+        assert_eq!(&header, expected_header, "{token}");
         let Value::Object(claims) = serde_json::from_slice(&b64url_decode(payload)).unwrap() else {
             panic!("claims are not an object");
         };
@@ -527,7 +583,7 @@ mod tests {
         let key = hmac::Key::new(hmac::HMAC_SHA256, b"secret\n");
         hmac::verify(&key, input.as_bytes(), &signature).unwrap();
 
-        let error = Signer::new(JwtAlg::Hs256, b"\n", Map::new(), DEFAULT_TTL).unwrap_err();
+        let error = Signer::new(JwtAlg::Hs256, None, b"\n", Map::new(), DEFAULT_TTL).unwrap_err();
         assert!(error.contains("empty"), "{error}");
     }
 
@@ -619,6 +675,100 @@ mod tests {
         assert_eq!(jtis.len(), 1000);
     }
 
+    #[test]
+    fn kid_is_in_the_header_when_set_and_the_signature_still_verifies() {
+        let secret = b"0123456789abcdef0123456789abcdef";
+        let kid = "2026-11 \"rotated\" \\ key/ü";
+        let hs256 = Signer::new(JwtAlg::Hs256, Some(kid), secret, Map::new(), DEFAULT_TTL)
+            .unwrap()
+            .sign_at(1_700_000_000)
+            .unwrap()
+            .token;
+        let (input, _, signature) = parts_with_header(
+            &hs256,
+            &serde_json::json!({"alg": "HS256", "typ": "JWT", "kid": kid}),
+        );
+        hmac::verify(
+            &hmac::Key::new(hmac::HMAC_SHA256, secret),
+            input.as_bytes(),
+            &signature,
+        )
+        .unwrap();
+
+        let rs256 = Signer::new(
+            JwtAlg::Rs256,
+            Some("rsa-1"),
+            RSA_PKCS8.as_bytes(),
+            Map::new(),
+            DEFAULT_TTL,
+        )
+        .unwrap();
+        let SigningKey::Rsa(key) = &rs256.key else {
+            panic!("expected an RSA key");
+        };
+        let public = UnparsedPublicKey::new(
+            &RSA_PKCS1_2048_8192_SHA256,
+            key.public_key().as_ref().to_vec(),
+        );
+        let token = rs256.sign_at(1_700_000_000).unwrap().token;
+        let (input, _, signature) = parts_with_header(
+            &token,
+            &serde_json::json!({"alg": "RS256", "typ": "JWT", "kid": "rsa-1"}),
+        );
+        public.verify(input.as_bytes(), &signature).unwrap();
+
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+        let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng)
+            .unwrap();
+        let public = UnparsedPublicKey::new(
+            &ECDSA_P256_SHA256_FIXED,
+            pair.public_key().as_ref().to_vec(),
+        );
+        let pem = pem("PRIVATE KEY", pkcs8.as_ref());
+        let token = Signer::new(
+            JwtAlg::Es256,
+            Some("ec-1"),
+            pem.as_bytes(),
+            Map::new(),
+            DEFAULT_TTL,
+        )
+        .unwrap()
+        .sign_at(1_700_000_000)
+        .unwrap()
+        .token;
+        let (input, _, signature) = parts_with_header(
+            &token,
+            &serde_json::json!({"alg": "ES256", "typ": "JWT", "kid": "ec-1"}),
+        );
+        public.verify(input.as_bytes(), &signature).unwrap();
+    }
+
+    #[test]
+    fn kid_is_omitted_without_the_option() {
+        let token = signer(JwtAlg::Hs256, b"secret", serde_json::json!({}), DEFAULT_TTL)
+            .sign_at(1)
+            .unwrap()
+            .token;
+        let header = token.split('.').next().unwrap();
+        let header: Map<String, Value> = serde_json::from_slice(&b64url_decode(header)).unwrap();
+        assert!(!header.contains_key("kid"), "{header:?}");
+    }
+
+    #[test]
+    fn shared_and_per_connection_tokens_carry_the_configured_kid() {
+        for per_connection in [false, true] {
+            let path = key_file("kid", b"secret");
+            let mut config = config(path, DEFAULT_TTL, per_connection);
+            config.kid = Some("k1".into());
+            let (live, _guard) = prepare(&config, AUTHORIZATION).unwrap();
+            parts_with_header(
+                &applied(&live),
+                &serde_json::json!({"alg": "HS256", "typ": "JWT", "kid": "k1"}),
+            );
+        }
+    }
+
     fn key_file(name: &str, contents: &[u8]) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("wsblast-jwt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -633,6 +783,7 @@ mod tests {
             key_file,
             claims: Map::new(),
             ttl,
+            kid: None,
             per_connection,
         }
     }
@@ -731,7 +882,7 @@ mod tests {
             ),
         ];
         for (alg, key, message) in cases {
-            let error = Signer::new(alg, key, Map::new(), DEFAULT_TTL).unwrap_err();
+            let error = Signer::new(alg, None, key, Map::new(), DEFAULT_TTL).unwrap_err();
             assert!(error.contains(message), "{error}");
             assert!(!error.contains("top-secret"), "{error}");
         }
@@ -772,6 +923,10 @@ mod tests {
         assert_eq!(config.ttl, Duration::from_secs(3600));
         assert!(config.per_connection);
         assert_eq!(config.claims["sub"], "load");
+        assert_eq!(config.kid, None);
+
+        let config = parse("--auth-jwt-key k --auth-jwt-kid 3f9a-2026_11.rsa").unwrap();
+        assert_eq!(config.kid.as_deref(), Some("3f9a-2026_11.rsa"));
 
         let config = parse("--auth-jwt-key k").unwrap();
         assert_eq!(config.alg, JwtAlg::Hs256);
@@ -799,5 +954,56 @@ mod tests {
             let error = parse(extra).unwrap_err().to_string();
             assert!(error.contains(message), "{extra}: {error}");
         }
+
+        // Values with whitespace or control characters cannot go through
+        // the whitespace-split helper above.
+        for (kid, message) in [
+            ("", "--auth-jwt-kid must not be empty"),
+            (
+                "key\n1",
+                "--auth-jwt-kid must contain printable characters only",
+            ),
+            (
+                "key\u{7f}",
+                "--auth-jwt-kid must contain printable characters only",
+            ),
+            (
+                " key",
+                "--auth-jwt-kid must not start or end with whitespace",
+            ),
+            (
+                "key\u{a0}",
+                "--auth-jwt-kid must not start or end with whitespace",
+            ),
+        ] {
+            let cli = Cli::try_parse_from([
+                "wsblast",
+                "ws://127.0.0.1:9001",
+                "--auth-type",
+                "jwt",
+                "--auth-jwt-key",
+                "k",
+                "--auth-jwt-kid",
+                kid,
+            ])
+            .unwrap();
+            let error = config_from_cli(&cli).unwrap_err().to_string();
+            assert!(error.contains(message), "{kid:?}: {error}");
+        }
+        let cli = Cli::try_parse_from([
+            "wsblast",
+            "ws://127.0.0.1:9001",
+            "--auth-type",
+            "jwt",
+            "--auth-jwt-key",
+            "k",
+            "--auth-jwt-kid",
+            "key 2026 ü",
+        ])
+        .unwrap();
+        assert_eq!(
+            config_from_cli(&cli).unwrap().kid.as_deref(),
+            Some("key 2026 ü")
+        );
     }
 }

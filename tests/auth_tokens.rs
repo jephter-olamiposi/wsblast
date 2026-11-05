@@ -169,6 +169,13 @@ fn split(token: &str) -> Option<(String, serde_json::Value, Vec<u8>)> {
 }
 
 #[cfg(feature = "jwt")]
+/// The decoded JOSE header of a compact JWS.
+fn jose_header(token: &str) -> Option<serde_json::Value> {
+    let (header, _) = token.split_once('.')?;
+    serde_json::from_slice(&b64url_decode(header)?).ok()
+}
+
+#[cfg(feature = "jwt")]
 /// Checks the time claims a server would check, with no leeway.
 fn current(claims: &serde_json::Value) -> bool {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -237,7 +244,7 @@ async fn hs256_tokens_pass_the_servers_signature_check() {
 
 #[cfg(feature = "jwt")]
 #[tokio::test]
-async fn rs256_per_connection_tokens_have_unique_jtis() {
+async fn rs256_per_connection_tokens_have_unique_jtis_and_the_kid() {
     let pem = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/jwt/rs256-pkcs8.pem"
@@ -252,9 +259,17 @@ async fn rs256_per_connection_tokens_have_unique_jtis() {
             .as_ref()
             .to_vec(),
     );
+    // Like a server with a JWKS, pick the verification key by kid.
+    let jwks = std::collections::HashMap::from([("fixture-rsa-1".to_string(), public)]);
     let verify: Verify = Arc::new(move |token| {
+        let Some(key) = jose_header(token)
+            .and_then(|header| header["kid"].as_str().map(str::to_string))
+            .and_then(|kid| jwks.get(&kid))
+        else {
+            return false;
+        };
         split(token).is_some_and(|(input, claims, signature)| {
-            public.verify(input.as_bytes(), &signature).is_ok() && current(&claims)
+            key.verify(input.as_bytes(), &signature).is_ok() && current(&claims)
         })
     });
     let server = VerifyingServer::spawn(10, verify).await;
@@ -276,6 +291,8 @@ async fn rs256_per_connection_tokens_have_unique_jtis() {
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/jwt/rs256-pkcs8.pem"
         ),
+        "--auth-jwt-kid",
+        "fixture-rsa-1",
         "--auth-jwt-per-connection",
     ])
     .await;

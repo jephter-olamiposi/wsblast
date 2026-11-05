@@ -73,16 +73,18 @@ printf '%s' "$WS_JWT_SECRET" > jwt.key
 wsblast "$TARGET" --auth-type jwt --auth-jwt-key jwt.key \
   --auth-jwt-claims '{"sub":"loadtest","aud":"realtime","iss":"ci"}' --auth-jwt-ttl 10m
 
-# RS256 or ES256 with a PEM private key, path from the environment, a fresh
-# token for every connection attempt.
+# RS256 or ES256 with a PEM private key, path from the environment, the key
+# ID the server's JWKS lists it under, a fresh token for every connection
+# attempt.
 export WSBLAST_JWT_KEY_FILE="$RUNNER_TEMP/jwt-signing.pem"
 wsblast "$TARGET" --auth-type jwt --auth-jwt-alg ES256 --auth-jwt-per-connection \
-  --auth-jwt-claims '{"sub":"loadtest","aud":"realtime"}'
+  --auth-jwt-kid "$WS_JWT_KEY_ID" --auth-jwt-claims '{"sub":"loadtest","aud":"realtime"}'
 ```
 
 - `--auth-jwt-alg` is `HS256` (default), `HS384`, `HS512`, `RS256` or `ES256`. Signing uses ring, the library rustls already uses; no OpenSSL is involved.
 - `--auth-jwt-key FILE`, or the `WSBLAST_JWT_KEY_FILE` environment variable, names the key file. The key itself is never accepted on the command line. For `HS*` the file's bytes are the secret, without one trailing newline (`\n` or `\r\n`), so a file written with `echo` works. `RS256` takes a PEM `PRIVATE KEY` (PKCS#8) or `RSA PRIVATE KEY` (PKCS#1) block of 2048 to 8192 bits. `ES256` takes a P-256 PEM `PRIVATE KEY` (PKCS#8) block; convert a SEC1 `EC PRIVATE KEY` file with `openssl pkcs8 -topk8 -nocrypt -in key.pem -out key.pkcs8.pem`. Encrypted keys are not supported. A key that cannot be read or used is a configuration error (exit code 1) before any connection is opened; the message names the file, never its contents.
 - `--auth-jwt-claims JSON` is an object whose members are copied into every token (`sub`, `aud`, `iss`, custom claims). wsblast sets `iat` and `nbf` to the signing time, `exp` to `iat` plus `--auth-jwt-ttl` (default `5m`, at least `2s`, whole seconds), and `jti` to 16 random bytes in base64url; the claims object must not set these four. The JOSE header is `{"alg":"<alg>","typ":"JWT"}`.
+- `--auth-jwt-kid KEY_ID` adds the `kid` header parameter (RFC 7515 section 4.1.4), giving `{"alg":"<alg>","typ":"JWT","kid":"<KEY_ID>"}`, for servers that pick the verification key from a JWKS by its key ID. It must not be empty, contain control characters, or start or end with whitespace; such a value is a configuration error (exit code 1). Without it the header has no `kid`.
 - By default every handshake sends the same token, and a background thread signs a new one before it expires: a fifth of the lifetime before `exp`, at most one minute before (at 4 minutes for the default `5m`). New handshakes, including reconnects, use the newest token; open connections are not touched. Long runs therefore keep working with any lifetime.
 - `--auth-jwt-per-connection` signs a fresh token, with its own `jti`, for each connection attempt instead, for servers that reject a replayed `jti`. Signing happens before the handshake clock starts, so it is not part of handshake latency, but it costs CPU on the load generator: microseconds for `HS*` and `ES256`, around a millisecond for `RS256` with a 2048-bit key.
 - The token goes in `Authorization` as `Bearer <token>`; `--auth-header` names another header, which then carries the bare token, as with `--auth-type static`. `--auth-jwt-*` options without `--auth-type jwt`, and `--auth-token`, `--auth-apikey` or `--auth-token-cmd` with it, are rejected. With `--agents`, the token is signed and re-signed on the coordinator only and every new token is pushed to the agents ([docs/distributed.md, section 4.3](distributed.md#43-refreshed-tokens)); `--auth-jwt-per-connection` is rejected there, because the signing key stays on the coordinator.

@@ -63,6 +63,7 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--auth-jwt-key', '--auth-jwt-key', [CompletionResultType]::ParameterName, 'File with the JWT signing key: the secret bytes for HS*, a PEM private key for RS256 and ES256; or set WSBLAST_JWT_KEY_FILE')
             [CompletionResult]::new('--auth-jwt-claims', '--auth-jwt-claims', [CompletionResultType]::ParameterName, 'JSON object of claims added to every JWT (e.g. ''{"sub":"loadtest","aud":"ws"}'')')
             [CompletionResult]::new('--auth-jwt-ttl', '--auth-jwt-ttl', [CompletionResultType]::ParameterName, 'JWT lifetime, which sets iat, nbf and exp; tokens are re-signed before they expire [default: 5m]')
+            [CompletionResult]::new('--auth-jwt-kid', '--auth-jwt-kid', [CompletionResultType]::ParameterName, 'Key ID put in the JWT header as kid, for servers that look the verification key up in a JWKS')
             [CompletionResult]::new('--auth-oauth2-token-url', '--auth-oauth2-token-url', [CompletionResultType]::ParameterName, 'OAuth2 token endpoint for the client-credentials grant (used with --auth-type oauth2)')
             [CompletionResult]::new('--auth-oauth2-client-id', '--auth-oauth2-client-id', [CompletionResultType]::ParameterName, 'OAuth2 client id (used with --auth-type oauth2)')
             [CompletionResult]::new('--auth-oauth2-client-secret-file', '--auth-oauth2-client-secret-file', [CompletionResultType]::ParameterName, 'File with the OAuth2 client secret; or set WSBLAST_OAUTH2_CLIENT_SECRET')

@@ -2514,6 +2514,7 @@ fn jwt_flag_given(cli: &Cli) -> Option<&'static str> {
         ("--auth-jwt-key", cli.auth_jwt_key.is_some()),
         ("--auth-jwt-claims", cli.auth_jwt_claims.is_some()),
         ("--auth-jwt-ttl", cli.auth_jwt_ttl.is_some()),
+        ("--auth-jwt-kid", cli.auth_jwt_kid.is_some()),
         ("--auth-jwt-per-connection", cli.auth_jwt_per_connection),
     ]
     .into_iter()
@@ -3015,6 +3016,10 @@ mod tests {
             (
                 "--auth-jwt-per-connection",
                 "--auth-jwt-per-connection requires --auth-type jwt",
+            ),
+            (
+                "--auth-jwt-kid k1",
+                "--auth-jwt-kid requires --auth-type jwt",
             ),
             (
                 "--auth-type static --auth-token t --auth-jwt-key k",

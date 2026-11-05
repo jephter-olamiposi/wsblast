@@ -60,6 +60,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --auth-jwt-key 'File with the JWT signing key: the secret bytes for HS*, a PEM private key for RS256 and ES256; or set WSBLAST_JWT_KEY_FILE'
             cand --auth-jwt-claims 'JSON object of claims added to every JWT (e.g. ''{"sub":"loadtest","aud":"ws"}'')'
             cand --auth-jwt-ttl 'JWT lifetime, which sets iat, nbf and exp; tokens are re-signed before they expire [default: 5m]'
+            cand --auth-jwt-kid 'Key ID put in the JWT header as kid, for servers that look the verification key up in a JWKS'
             cand --auth-oauth2-token-url 'OAuth2 token endpoint for the client-credentials grant (used with --auth-type oauth2)'
             cand --auth-oauth2-client-id 'OAuth2 client id (used with --auth-type oauth2)'
             cand --auth-oauth2-client-secret-file 'File with the OAuth2 client secret; or set WSBLAST_OAUTH2_CLIENT_SECRET'
