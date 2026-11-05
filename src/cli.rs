@@ -9,6 +9,9 @@ use std::path::PathBuf;
 #[derive(Debug, Parser, Clone)]
 #[command(
     name = "wsblast",
+    // Fixed so help and usage errors say `wsblast` on every platform, not
+    // `wsblast.exe` on Windows.
+    bin_name = "wsblast",
     author,
     version,
     about = "High-performance WebSocket load-testing CLI with percentile latency & CI gating",
