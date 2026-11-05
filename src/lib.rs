@@ -222,3 +222,9 @@ pub mod __private {
         crate::AggregatedMetrics::merge(workers, elapsed, attempted_connections)
     }
 }
+
+// Compile the Rust examples in README.md as doctests, so the crate's front
+// page cannot drift from the API.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
