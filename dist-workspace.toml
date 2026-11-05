@@ -60,5 +60,10 @@ github-custom-job-permissions = { "publish-crates" = { contents = "read", id-tok
 # a native arm64 runner instead of being cross-compiled from x86_64. Both
 # Linux targets build on Ubuntu 22.04 so the binaries need glibc 2.35 at
 # most and run on Ubuntu 22.04, Debian 12 and Amazon Linux 2023.
+#
+# Apple Silicon builds on macos-15: the default macos-14 image is retired.
+# The binary still targets macOS 11 and later, as rustc sets that minimum
+# for aarch64-apple-darwin.
 [dist.github-custom-runners]
 aarch64-unknown-linux-gnu = "ubuntu-22.04-arm"
+aarch64-apple-darwin = "macos-15"
