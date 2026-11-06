@@ -393,7 +393,7 @@ pub(crate) struct Cli {
     #[arg(long = "chaos-seed", value_name = "N")]
     pub chaos_seed: Option<u64>,
 
-    /// Write output report to the specified file path
+    /// Write the report to FILE in the --format format; the terminal then shows the text summary
     #[arg(short = 'o', long = "output", value_name = "FILE")]
     pub output_file: Option<PathBuf>,
 

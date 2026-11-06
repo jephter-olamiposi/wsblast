@@ -39,7 +39,7 @@ subcommand.
 
 | Option | Default | Description |
 | :--- | :--- | :--- |
-| `--format` / `-o, --output` | `text` | `text`, `json`, `markdown` or `html` (a self-contained page with charts), optionally written to a file |
+| `--format` / `-o, --output` | `text` | `text`, `json`, `markdown` or `html` (a self-contained page with charts). With `-o FILE` the report goes to FILE and the terminal shows the text summary |
 | `--tui` / `--no-progress` | | Live dashboard, or no progress bar for CI logs |
 | `--compare BASE CURRENT` | | Compare two JSON reports; `--fail-on-regression` exits with 2 on a regression beyond `--compare-threshold` |
 | `--compare ... --format html` | | Comparison as a self-contained HTML page with overlay charts; `wsblast render` also renders a saved comparison JSON |

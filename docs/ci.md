@@ -26,7 +26,7 @@ Rules that matter in a pipeline:
 
 - **Exit code 2 always means an SLO breach** (or a regression with `--fail-on-regression`). A typo in a CI command, such as an unknown flag or a missing value, exits with 1 like any other configuration error. `--help` and `--version` exit with 0.
 - SLOs are checked before the "all connections failed" condition. If every connection fails and an SLO also fails (for example `--max-error-rate`), the exit code is 2.
-- After a completed run the report is printed to stdout and written to the `-o` file before the process exits, also when it exits with 1 or 2. Upload it with an "always" condition.
+- After a completed run the report is written to the `-o` file before the process exits, also when it exits with 1 or 2, and the text summary is printed to stdout, so the job log stays readable whatever the file's format. Without `-o` the report is printed to stdout in the `--format` format. Upload the file with an "always" condition.
 - A latency SLO with no RTT samples fails ("no RTT samples"). An unreachable target cannot pass a latency gate.
 
 ## 2. Installing in CI
@@ -545,7 +545,7 @@ Download the artifact from the run's summary page and open `report.html` in a br
 - a table of every compared metric, with the baseline and current values in their units, the signed change, the direction that is better and the result. Regressions are highlighted and listed first, then improvements, then the metrics within the threshold. Metrics that are 0 in both reports are left out, as in the comparison itself ([section 7](#7-baseline-comparison-rules));
 - when both reports have a time series, two charts that overlay the baseline (dashed) and current (solid) runs: throughput and p99 latency per interval, each against the time since its run started. Runs with different lengths or interval lengths share one time axis, and the comparison window is shaded. Each chart has a text description and a table of both runs' points. Reports from wsblast 0.2.0 and earlier have no time series, so their comparison page has no charts.
 
-The flags, the exit code and `-o` work as for the other formats: the page is printed to stdout and also written to the `-o` file.
+The flags, the exit code and `-o` work as for the other formats: with `-o` the page is written to the file and the text comparison is printed to stdout; without it the page is printed to stdout.
 
 ```bash
 wsblast --compare perf/baseline.json current.json \

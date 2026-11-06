@@ -1251,8 +1251,13 @@ pub(crate) fn render_view(view: &ReportView<'_>, format: OutputFormat) -> String
     }
 }
 
-/// Prints the report to stdout and writes it to the configured output path,
-/// listing the target of every executed scenario phase.
+/// Emits the report of a finished run, listing the target of every executed
+/// scenario phase.
+///
+/// Without an output path the report is printed to stdout in the configured
+/// format. With one it is written to that file, and stdout gets the text
+/// summary, so a terminal or CI log stays readable whatever the file's
+/// format.
 ///
 /// # Errors
 ///
@@ -1264,13 +1269,20 @@ pub(crate) fn emit_scenario_report(
     phase_targets: &[PhaseTarget],
     phases: &[PhaseReport],
 ) -> std::io::Result<()> {
-    let output = render_scenario_report(config, metrics, slo, phase_targets, phases);
-    println!("{output}");
-
-    if let Some(path) = &config.output_path {
-        fs::write(path, output)?;
+    let view = ReportView::from_config(config, metrics, slo, phase_targets, phases);
+    let output = render_view(&view, config.output_format);
+    match &config.output_path {
+        Some(path) => {
+            fs::write(path, &output)?;
+            let summary = if config.output_format == OutputFormat::Text {
+                output
+            } else {
+                render_view(&view, OutputFormat::Text)
+            };
+            println!("{summary}");
+        }
+        None => println!("{output}"),
     }
-
     Ok(())
 }
 

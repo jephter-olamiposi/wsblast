@@ -419,7 +419,13 @@ fn compare_writes_an_html_page() {
     ]);
     assert_eq!(result.code, Some(0), "{}", result.stderr);
     let html = std::fs::read_to_string(&out).expect("html written");
-    assert_eq!(result.stdout, format!("{html}\n"), "printed and written");
+    // The file gets the page; the terminal gets the text comparison.
+    assert!(
+        result.stdout.contains("Baseline Comparison Report"),
+        "{}",
+        result.stdout
+    );
+    assert!(!result.stdout.contains("<!doctype"), "{}", result.stdout);
     assert!(html.starts_with("<!doctype html>"));
     assert!(html.contains("wsblast baseline comparison"));
     assert!(html.contains("No regressions: no metric changed by more than"));

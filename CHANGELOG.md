@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Memory per connection is about 36 times lower.** Each connection used to hold its own latency histograms (about 136 KiB each for handshake latency, round-trip time and response time), a 20 KB time-series histogram and the WebSocket library's 128 KiB read buffer: about 575 KB per connection, so 4,000 connections needed 2.3 GB. Every worker of a run now records into one shared set of histograms with lock-free atomic counters, split into one shard per CPU core, and moves its time-series samples to the run in batches of 64. Read buffers start at an equal share of 64 MiB, between 4 KiB and 128 KiB, so runs of up to 512 connections keep the 128 KiB default. Each additional connection now costs about 16 KB, and 4,000 connections use about 140 MB. Percentiles are unchanged: the shared histograms use the same buckets, so the merged histogram is identical. See METHODOLOGY.md, section 10.
+- With `-o FILE`, the report is written to the file in the `--format` format and the terminal shows the text summary. Before, the report was also printed to stdout in the file's format, so a JSON or HTML report filled the terminal or CI log. Without `-o`, the report is printed to stdout as before. `--compare` follows the same rule.
 
 ## [0.2.1] - 2026-11-05
 

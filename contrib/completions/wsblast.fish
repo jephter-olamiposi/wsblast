@@ -96,7 +96,7 @@ complete -c wsblast -n "__fish_wsblast_needs_command" -l chaos-close -d 'Chaos: 
 complete -c wsblast -n "__fish_wsblast_needs_command" -l chaos-close-mode -d 'How --chaos-close ends a connection' -r -f -a "abrupt\t'Closes the TCP connection without a WebSocket Close frame'
 graceful\t'Sends a Close frame with code 1001 (going away), then closes the TCP connection without waiting for the server\'s Close frame'"
 complete -c wsblast -n "__fish_wsblast_needs_command" -l chaos-seed -d 'Chaos: seed of every chaos decision, to repeat a run\'s faults [default: picked per run and shown in the report]' -r
-complete -c wsblast -n "__fish_wsblast_needs_command" -s o -l output -d 'Write output report to the specified file path' -r -F
+complete -c wsblast -n "__fish_wsblast_needs_command" -s o -l output -d 'Write the report to FILE in the --format format; the terminal then shows the text summary' -r -F
 complete -c wsblast -n "__fish_wsblast_needs_command" -l prometheus-listen -d 'Serve live metrics at http://ADDR/metrics in the Prometheus text format while the run lasts (e.g. \'127.0.0.1:9464\'; port 0 picks a free port)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l otel-endpoint -d 'Export live metrics over OTLP/HTTP with protobuf bodies to this base URL, e.g. \'http://localhost:4318\' (needs the otel feature)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l otel-interval -d 'How often metrics are exported over OTLP; the final values are also exported when the run ends' -r

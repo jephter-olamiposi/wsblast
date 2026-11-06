@@ -3251,3 +3251,44 @@ async fn test_generator_lag_flags_a_blocked_runtime() {
     );
     cancel_server.cancel();
 }
+
+/// With `-o`, the file holds the report in the chosen format and stdout
+/// the text summary, so a terminal or CI log stays readable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn output_file_gets_the_format_and_stdout_the_text_summary() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("output-file");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (format, starts_with) in [("json", "{"), ("html", "<!doctype html>"), ("text", "\n")] {
+        let path = dir.join(format!("report.{format}"));
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_wsblast"))
+            .args([
+                target_url.as_str(),
+                "-c",
+                "2",
+                "-d",
+                "500ms",
+                "--no-progress",
+                "--format",
+                format,
+                "-o",
+            ])
+            .arg(&path)
+            .env("NO_COLOR", "1")
+            .output()
+            .await
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(0), "{format}: {stdout}");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.starts_with(starts_with), "{format}: {written}");
+        assert!(
+            stdout.contains("WebSocket Benchmark Summary"),
+            "{format}: {stdout}"
+        );
+        assert!(!stdout.contains("<!doctype") && !stdout.trim_start().starts_with('{'));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    cancel_server.cancel();
+}

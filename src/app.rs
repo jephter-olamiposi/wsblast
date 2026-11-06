@@ -246,13 +246,22 @@ fn run_compare(cli: &Cli) -> Result<()> {
         baseline_path.display().to_string(),
         current_path.display().to_string(),
     ));
-    let rendered =
-        report::render_comparison_view(&comparison.view(cli.compare_threshold, files), cli.format);
+    let view = comparison.view(cli.compare_threshold, files);
+    let rendered = report::render_comparison_view(&view, cli.format);
 
-    println!("{rendered}");
-
-    if let Some(output_path) = &cli.output_file {
-        std::fs::write(output_path, &rendered).map_err(WsBlastError::Io)?;
+    // As for a run: with -o the file gets the chosen format and stdout the
+    // text comparison.
+    match &cli.output_file {
+        Some(output_path) => {
+            std::fs::write(output_path, &rendered).map_err(WsBlastError::Io)?;
+            let summary = if cli.format == crate::cli::OutputFormat::Text {
+                rendered
+            } else {
+                report::render_comparison_view(&view, crate::cli::OutputFormat::Text)
+            };
+            println!("{summary}");
+        }
+        None => println!("{rendered}"),
     }
 
     if cli.fail_on_regression && !comparison.regressions.is_empty() {
