@@ -3296,6 +3296,10 @@ async fn output_file_gets_the_format_and_stdout_the_text_summary() {
 /// A slow consumer in stream mode: reads pause after every frame while the
 /// paced sends go on, so far fewer frames are read than sent, and nothing
 /// is an error.
+///
+/// The pause is long next to the send interval, so the test holds where
+/// timers wake only every 15.6 ms (Windows) and the 10 ms interval fires
+/// about 64 times a second instead of 100.
 #[cfg(feature = "chaos")]
 #[tokio::test]
 async fn test_chaos_read_pause_slows_reads_while_stream_sends_continue() {
@@ -3303,18 +3307,19 @@ async fn test_chaos_read_pause_slows_reads_while_stream_sends_continue() {
     let metrics = run(echo_test_config(&target_url)
         .mode(wsblast::TestMode::Stream)
         .connections(2)
-        .rate_per_connection(200)
+        .rate_per_connection(100)
         .duration(Duration::from_millis(1500))
         .chaos(
             wsblast::ChaosConfig::new()
-                .with_read_pause(Duration::from_millis(50), Duration::ZERO)
+                .with_read_pause(Duration::from_millis(200), Duration::ZERO)
                 .with_seed(5),
         ))
     .await;
 
     let chaos = chaos_of(&metrics);
     assert_no_errors(&metrics);
-    assert!(metrics.total_messages_sent > 400, "{metrics:?}");
+    assert!(metrics.total_messages_sent > 100, "{metrics:?}");
+    assert!(metrics.total_messages_recv > 0, "{metrics:?}");
     assert!(
         metrics.total_messages_recv * 4 < metrics.total_messages_sent,
         "{metrics:?}"
