@@ -65,6 +65,10 @@ CI additionally:
 - runs `cargo package` and `cargo publish --dry-run`;
 - runs an end-to-end SLO gate against the echo server (exit code `0` for a
   passing run, `2` for a breached budget);
+- builds a release binary and runs `scripts/perf-budget.sh` on it, which
+  fails when the binary size, startup time, memory per connection or echo
+  throughput crosses the limits at the top of the script. If a change moves
+  one of them on purpose, update the limit in the same commit and say why;
 - runs `cargo deny check` (licenses, advisories, sources) and
   `cargo machete` (unused dependencies);
 - builds the Docker image.
