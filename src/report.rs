@@ -1451,6 +1451,9 @@ fn render_text_report(view: &ReportView<'_>) -> String {
     lat_table.add_row(row);
     out.push_str(&lat_table.to_string());
     out.push_str("\n\n");
+    if let Some(hint) = coordinated_omission_hint(metrics) {
+        out.push_str(&format!("Note: {hint}\n\n"));
+    }
 
     let windows = time_windows(metrics);
     if !windows.is_empty() {
@@ -1709,6 +1712,9 @@ fn render_markdown_report(view: &ReportView<'_>) -> String {
         md.push('\n');
     }
     md.push('\n');
+    if let Some(hint) = coordinated_omission_hint(metrics) {
+        md.push_str(&format!("> **Note:** {hint}\n\n"));
+    }
 
     let windows = time_windows(metrics);
     if !windows.is_empty() {
@@ -1809,6 +1815,27 @@ pub(crate) fn chaos_label(chaos: &ChaosSummary) -> String {
 /// In a distributed run the lag is the highest of the agents' and the
 /// limit the tightest, each named with its agent, and the agents whose
 /// generator was saturated, or whose limit was too low, are listed.
+/// The note reports add below the latency percentiles when an echo run
+/// without `--rate` spent at least 1% of its waiting time on replies far
+/// slower than its p99: the percentiles then leave a stall out.
+pub(crate) fn coordinated_omission_hint(metrics: &AggregatedMetrics) -> Option<String> {
+    let slow = metrics
+        .slow_replies
+        .as_ref()
+        .filter(|slow| slow.hides_a_stall())?;
+    Some(format!(
+        "{} {} over {} took {:.1}% of the time connections waited for replies. \
+         Without --rate a connection sends nothing while it waits, so the requests \
+         it would have sent meanwhile were never measured, and the percentiles \
+         above leave that time out. Run with --rate to count them in response \
+         time (METHODOLOGY.md, section 4).",
+        slow.count,
+        if slow.count == 1 { "reply" } else { "replies" },
+        format_us(slow.threshold_us),
+        slow.wait_share * 100.0
+    ))
+}
+
 pub(crate) fn generator_label(metrics: &AggregatedMetrics) -> Option<String> {
     let distributed = metrics
         .distributed
@@ -1945,7 +1972,48 @@ mod tests {
             chaos: None,
             generator_lag: None,
             open_file_limit: None,
+            slow_replies: None,
         }
+    }
+
+    #[test]
+    fn reports_note_slow_replies_that_hide_a_stall() {
+        let mut metrics = sample_metrics();
+        let slo = evaluate_slos(&SloThresholds::default(), &metrics);
+        let view = |metrics: &AggregatedMetrics, format: &str| {
+            render_report(&report_config(format), metrics, &slo)
+        };
+        assert!(!view(&metrics, "text").contains("Note:"));
+
+        let mut slow = crate::metrics::SlowReplies {
+            threshold_us: 15_000,
+            count: 1,
+            wait_share: 0.004,
+        };
+        metrics.slow_replies = Some(slow.clone());
+        assert!(!view(&metrics, "text").contains("Note:"));
+
+        slow.count = 20;
+        slow.wait_share = 0.084;
+        metrics.slow_replies = Some(slow);
+        let text = view(&metrics, "text");
+        assert!(
+            text.contains("Note: 20 replies over 15.00 ms took 8.4% of the time"),
+            "{text}"
+        );
+        assert!(text.contains("Run with --rate"), "{text}");
+        let markdown = view(&metrics, "markdown");
+        assert!(
+            markdown.contains("> **Note:** 20 replies over 15.00 ms"),
+            "{markdown}"
+        );
+        let html = view(&metrics, "html");
+        assert!(
+            html.contains("<p class=\"note\">20 replies over 15.00 ms"),
+            "{html}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&view(&metrics, "json")).unwrap();
+        assert_eq!(json["metrics"]["slow_replies"]["count"], 20);
     }
 
     #[test]

@@ -197,7 +197,7 @@ pub use config::{LoadTestConfig, LoadTestConfigBuilder, ReplyMatch, SloThreshold
 pub use error::{ConfigError, ErrorCategory, Result, WorkerError, WsBlastError};
 pub use metrics::{
     AgentGenerator, AggregatedMetrics, CaptureSummary, ChaosSummary, DistributedSummary,
-    GeneratorLag, LatencyStats, LiveSnapshot, OpenFileLimit,
+    GeneratorLag, LatencyStats, LiveSnapshot, OpenFileLimit, SlowReplies,
 };
 #[cfg(feature = "scenario")]
 pub use report::PhaseTarget;

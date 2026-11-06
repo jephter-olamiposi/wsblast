@@ -456,7 +456,11 @@ fn render_latency_table(html: &mut String, view: &ReportView<'_>) {
     for (_, stats) in &columns {
         let _ = write!(html, "<td class=\"num\">{}</td>", stats.count);
     }
-    html.push_str("</tr>\n</tbody></table></div>\n</section>\n");
+    html.push_str("</tr>\n</tbody></table></div>\n");
+    if let Some(hint) = crate::report::coordinated_omission_hint(view.metrics) {
+        let _ = writeln!(html, "<p class=\"note\">{}</p>", escape(&hint));
+    }
+    html.push_str("</section>\n");
 }
 
 fn render_errors(html: &mut String, view: &ReportView<'_>) {

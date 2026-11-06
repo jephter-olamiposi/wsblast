@@ -593,6 +593,67 @@ pub struct AggregatedMetrics {
     /// to spare.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_file_limit: Option<OpenFileLimit>,
+    /// Echo replies far slower than the run's p99 RTT, in an echo run
+    /// without a send schedule (no `--rate`); absent from paced runs, from
+    /// runs with no such reply and from reports written before it was
+    /// added. See METHODOLOGY.md, section 4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slow_replies: Option<SlowReplies>,
+}
+
+/// Replies that took far longer than the run's p99 RTT, in an echo run
+/// without a send schedule.
+///
+/// Such a connection sends its next request only when the reply to the
+/// last one arrives, so while it waits for a slow reply it sends nothing,
+/// and the requests it would have sent meanwhile are never measured: a
+/// stall barely moves the percentiles. `wait_share` is the part of the
+/// connections' waiting time these replies took. When it is 1% or more,
+/// more than 1% of a steady rate's requests would have been due during
+/// them, so the reports suggest `--rate`, whose response time counts them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SlowReplies {
+    /// Replies above this took part: ten times the p99 RTT, at least 1 ms.
+    pub threshold_us: u64,
+    /// Number of such replies.
+    pub count: u64,
+    /// Their RTT over the sum of all RTTs, between 0.0 and 1.0.
+    pub wait_share: f64,
+}
+
+impl SlowReplies {
+    /// The share of waiting time from which reports suggest `--rate`.
+    pub const HINT_SHARE: f64 = 0.01;
+
+    /// The slow replies of an RTT distribution; `None` when it has none.
+    pub(crate) fn of(rtt: &Histogram<u64>) -> Option<Self> {
+        if rtt.is_empty() {
+            return None;
+        }
+        let threshold_us = rtt.value_at_quantile(0.99).saturating_mul(10).max(1_000);
+        let (mut count, mut slow, mut total) = (0u64, 0u128, 0u128);
+        for bucket in rtt.iter_recorded() {
+            let value = bucket.value_iterated_to();
+            let wait = u128::from(value) * u128::from(bucket.count_at_value());
+            total += wait;
+            if value > threshold_us {
+                count += bucket.count_at_value();
+                slow += wait;
+            }
+        }
+        (count > 0).then(|| Self {
+            threshold_us,
+            count,
+            wait_share: slow as f64 / total.max(1) as f64,
+        })
+    }
+
+    /// Whether the slow replies took enough of the waiting time for the
+    /// reports to suggest `--rate`.
+    pub fn hides_a_stall(&self) -> bool {
+        self.wait_share >= Self::HINT_SHARE
+    }
 }
 
 /// How late the load generator woke up from a fixed short sleep, measured
@@ -957,6 +1018,13 @@ impl MetricsTotals {
             message_rtt: LatencyStats::from_histogram(&self.rtt),
             response_time: LatencyStats::from_histogram(&self.response),
             time_series: TimeSeries::default(),
+            // A paced run's response time already counts the requests that
+            // waited behind a slow reply.
+            slow_replies: if self.response.is_empty() {
+                SlowReplies::of(&self.rtt)
+            } else {
+                None
+            },
             error_breakdown,
             capture: None,
             distributed: None,
@@ -1035,6 +1103,40 @@ impl AggregatedMetrics {
 #[cfg(test)]
 mod aggregation_tests {
     use super::*;
+
+    fn rtt_histogram(samples: &[(u64, u64)]) -> Histogram<u64> {
+        let mut hist = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap();
+        for &(value, count) in samples {
+            hist.record_n(value, count).unwrap();
+        }
+        hist
+    }
+
+    #[test]
+    fn slow_replies_are_measured_against_ten_times_p99() {
+        // 1,000 replies of 1 ms and two of 500 ms: the two took half of
+        // the waiting time.
+        let slow = SlowReplies::of(&rtt_histogram(&[(1_000, 1_000), (500_000, 2)])).unwrap();
+        assert_eq!(slow.threshold_us, 10_000);
+        assert_eq!(slow.count, 2);
+        assert!((slow.wait_share - 0.5).abs() < 0.01, "{slow:?}");
+        assert!(slow.hides_a_stall());
+
+        // One 20 ms reply among 100,000 of 1 ms: noted, but too small a
+        // share of the run to hide a stall.
+        let rare = SlowReplies::of(&rtt_histogram(&[(1_000, 100_000), (20_000, 1)])).unwrap();
+        assert_eq!(rare.count, 1);
+        assert!(!rare.hides_a_stall(), "{rare:?}");
+    }
+
+    #[test]
+    fn no_slow_replies_below_the_threshold_or_its_floor() {
+        assert!(SlowReplies::of(&rtt_histogram(&[(1_000, 1_000), (5_000, 50)])).is_none());
+        // Replies of 50 µs and 900 µs: ten times p99 would be 9 ms, and no
+        // reply under the 1 ms floor counts anyway.
+        assert!(SlowReplies::of(&rtt_histogram(&[(50, 1_000), (900, 5)])).is_none());
+        assert!(SlowReplies::of(&rtt_histogram(&[])).is_none());
+    }
 
     #[test]
     fn reconnect_handshakes_do_not_inflate_established_connections() {

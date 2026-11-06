@@ -191,6 +191,35 @@ async fn stalls_show_up_in_paced_response_time() {
     );
 }
 
+/// Without --rate the same stalls barely move the percentiles, because a
+/// connection sends nothing while it waits; the run records the slow
+/// replies, so the reports can say so.
+#[tokio::test]
+async fn unpaced_runs_flag_the_slow_replies_a_stall_causes() {
+    let mock = Mock::start(
+        MockConfig::builder().stall(Duration::from_millis(400), Duration::from_millis(150)),
+    )
+    .await;
+    let unpaced = run(load(&mock.url).duration(Duration::from_millis(1800))).await;
+    let paced = run(load(&mock.url)
+        .duration(Duration::from_millis(1800))
+        .rate_per_connection(100))
+    .await;
+    mock.stop().await;
+
+    // Four stalls of 150 ms in 1.8 s: about a third of the waiting time.
+    let slow = unpaced.slow_replies.as_ref().expect("slow replies");
+    assert!(slow.count >= 2, "{slow:?}");
+    assert!(slow.wait_share > 0.1 && slow.hides_a_stall(), "{slow:?}");
+    assert!(
+        unpaced.message_rtt.p99_us < 100_000,
+        "{:?}",
+        unpaced.message_rtt
+    );
+    // Response time already counts the requests that waited.
+    assert!(paced.slow_replies.is_none(), "{:?}", paced.slow_replies);
+}
+
 #[cfg(feature = "capture")]
 #[tokio::test]
 async fn replay_reproduces_the_recorded_frames() {

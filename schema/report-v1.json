@@ -345,6 +345,16 @@
             "sufficient": { "description": "Whether soft_limit is at least needed. wsblast warns before the run when it is not.", "type": "boolean" }
           }
         },
+        "slow_replies": {
+          "description": "Echo replies slower than ten times the p99 RTT (and than 1 ms), in an echo run without --rate. Present only when the run had such replies; absent from paced runs, whose response time already counts requests that waited, and from reports written before this field was added. When wait_share is 0.01 or more the reports note that the percentiles leave out the time those replies took. See METHODOLOGY.md section 4.",
+          "type": "object",
+          "required": ["threshold_us", "count", "wait_share"],
+          "properties": {
+            "threshold_us": { "description": "Ten times the p99 RTT, at least 1,000 µs.", "$ref": "#/$defs/count" },
+            "count": { "description": "Replies slower than threshold_us.", "$ref": "#/$defs/count" },
+            "wait_share": { "description": "Their RTT over the sum of all RTTs.", "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        },
         "chaos": {
           "description": "Faults the run injected on the client side (--chaos-* or a scenario phase's chaos mapping). Present only when the run injected faults; absent from other reports and from reports written before this field was added. None of these events is counted as an error or adds a latency sample by itself; see METHODOLOGY.md section 13.",
           "type": "object",
