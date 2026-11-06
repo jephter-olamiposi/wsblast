@@ -6,6 +6,7 @@ use crate::config::LoadTestConfig;
 #[cfg(feature = "scenario")]
 use crate::config::{ScenarioConfig, ScenarioPhase};
 use crate::connect::ConnectTarget;
+use crate::histogram::LatencyRecorder;
 use crate::lag::{LagProbe, LagTotals};
 use crate::metrics::{AggregatedMetrics, LiveMetrics, LiveSnapshot, OpenFileLimit, WorkerMetrics};
 #[cfg(feature = "scenario")]
@@ -364,6 +365,7 @@ impl Runner {
         &self,
         target: &Arc<ConnectTarget>,
         interval_store: &Arc<IntervalStore>,
+        latency: &Arc<LatencyRecorder>,
         start_time: Instant,
         capture: &SessionCapture,
     ) -> Vec<tokio::task::JoinHandle<WorkerMetrics>> {
@@ -380,11 +382,11 @@ impl Runner {
             }
             let wanted = self.config.stage_target(start_time.elapsed());
             while open.len() < wanted {
-                let Ok(metrics) = WorkerMetrics::new(Arc::clone(&self.live_metrics)) else {
-                    break;
-                };
-                let metrics =
-                    metrics.with_interval(IntervalRecorder::new(Arc::clone(interval_store)));
+                let metrics = WorkerMetrics::with_latency(
+                    Arc::clone(&self.live_metrics),
+                    Arc::clone(latency),
+                )
+                .with_interval(IntervalRecorder::new(Arc::clone(interval_store)));
                 let token = self.cancel_token.child_token();
                 let session = self.create_session(next_id, target, token.clone(), metrics, capture);
                 open.push((token, tokio::spawn(session.run())));
@@ -433,7 +435,11 @@ impl Runner {
         // Resolve the target and load the TLS roots once, before the clock
         // starts, so neither is counted in the run time or handshake latency.
         let target = tokio::select! {
-            target = ConnectTarget::prepare(&self.config.target_url, self.config.connect_timeout) => {
+            target = ConnectTarget::prepare(
+                &self.config.target_url,
+                self.config.connect_timeout,
+                self.config.connections,
+            ) => {
                 Arc::new(target)
             }
             _ = self.cancel_token.cancelled() => {
@@ -473,7 +479,14 @@ impl Runner {
     #[cfg(feature = "distributed")]
     pub(crate) async fn prepare_target(&self) -> Arc<ConnectTarget> {
         self.warn_about_limits();
-        Arc::new(ConnectTarget::prepare(&self.config.target_url, self.config.connect_timeout).await)
+        Arc::new(
+            ConnectTarget::prepare(
+                &self.config.target_url,
+                self.config.connect_timeout,
+                self.config.connections,
+            )
+            .await,
+        )
     }
 
     /// The latency histograms of the run in progress, once its clock has
@@ -534,6 +547,9 @@ impl Runner {
         let capture: SessionCapture = ();
         let interval = interval_for(self.config.duration);
         let interval_store = IntervalStore::new(start_time, interval);
+        // One set of latency histograms for every worker of this run, so
+        // memory does not grow with the number of connections.
+        let latency = Arc::new(LatencyRecorder::new());
         #[cfg(feature = "distributed")]
         {
             *self.intervals.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -577,8 +593,11 @@ impl Runner {
                     break;
                 }
 
-                let metrics = WorkerMetrics::new(Arc::clone(&self.live_metrics))?
-                    .with_interval(IntervalRecorder::new(Arc::clone(&interval_store)));
+                let metrics = WorkerMetrics::with_latency(
+                    Arc::clone(&self.live_metrics),
+                    Arc::clone(&latency),
+                )
+                .with_interval(IntervalRecorder::new(Arc::clone(&interval_store)));
                 handles.push(tokio::spawn(
                     self.create_session(
                         worker_id,
@@ -604,7 +623,7 @@ impl Runner {
             // Every slot a staged run opens is one it tried, so none is
             // reported as not started.
             let (handles, ()) = tokio::join!(
-                self.run_stages(&target, &interval_store, start_time, &capture),
+                self.run_stages(&target, &interval_store, &latency, start_time, &capture),
                 self.wait_until_done(start_time)
             );
             let opened = handles.len() as u64;

@@ -92,6 +92,23 @@ impl IntervalStore {
             .clone()
     }
 
+    /// Adds latency samples, in microseconds, to interval `bucket`.
+    pub(crate) fn absorb_samples(&self, bucket: u64, samples: &[u64]) {
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let hist = match buckets.entry(bucket) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => match interval_histogram() {
+                Some(hist) => entry.insert(hist),
+                None => return,
+            },
+        };
+        for &micros in samples {
+            let _ = hist.record(micros);
+        }
+    }
+
+    /// Adds a whole histogram to interval `bucket`.
+    #[cfg(test)]
     pub(crate) fn absorb(&self, bucket: u64, hist: &Histogram<u64>) {
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
         match buckets.get_mut(&bucket) {
@@ -334,12 +351,19 @@ pub(crate) fn last_completed(since_start: Duration, interval: Duration) -> Optio
     u64::try_from(index).ok()?.checked_sub(1)
 }
 
+/// Samples a worker holds before handing them to the store.
+const FLUSH_SAMPLES: usize = 64;
+
 /// A worker's latency samples for the interval it is currently in.
+///
+/// The worker keeps at most [`FLUSH_SAMPLES`] samples and hands them to the
+/// run's [`IntervalStore`] when the batch is full or the interval changes,
+/// so it holds a few hundred bytes instead of a histogram of its own.
 #[derive(Clone, Debug)]
 pub(crate) struct IntervalRecorder {
     store: Arc<IntervalStore>,
     bucket: u64,
-    hist: Histogram<u64>,
+    samples: Vec<u64>,
 }
 
 impl IntervalRecorder {
@@ -347,7 +371,7 @@ impl IntervalRecorder {
         Some(Self {
             store,
             bucket: 0,
-            hist: interval_histogram()?,
+            samples: Vec::new(),
         })
     }
 
@@ -358,14 +382,20 @@ impl IntervalRecorder {
             self.flush();
             self.bucket = bucket;
         }
-        let _ = self.hist.record(micros);
+        if self.samples.capacity() == 0 {
+            self.samples.reserve_exact(FLUSH_SAMPLES);
+        }
+        self.samples.push(micros);
+        if self.samples.len() == FLUSH_SAMPLES {
+            self.flush();
+        }
     }
 
     /// Hands the samples held for the current interval to the store.
     pub(crate) fn flush(&mut self) {
-        if !self.hist.is_empty() {
-            self.store.absorb(self.bucket, &self.hist);
-            self.hist.reset();
+        if !self.samples.is_empty() {
+            self.store.absorb_samples(self.bucket, &self.samples);
+            self.samples.clear();
         }
     }
 }

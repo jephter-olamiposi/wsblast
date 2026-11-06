@@ -2,6 +2,7 @@
 //! live progress, and the merge into [`AggregatedMetrics`].
 
 use crate::error::{ErrorCategory, Result as WsResult, WsBlastError};
+use crate::histogram::LatencyRecorder;
 use crate::timeseries::{IntervalRecorder, TimeSeries};
 use hdrhistogram::Histogram;
 use serde::{Deserialize, Serialize};
@@ -159,14 +160,15 @@ pub(crate) enum ErrorScope {
     SentMessage,
 }
 
-/// Task-local metrics container owned by a single worker to eliminate mutex contention.
+/// Metrics of a single worker: its own counters, and the run's shared,
+/// lock-free latency histograms it records into.
 #[derive(Clone, Debug)]
 pub struct WorkerMetrics {
-    pub(crate) handshake_hist: Histogram<u64>,
-    pub(crate) rtt_hist: Histogram<u64>,
-    /// Paced echo latency measured from each request's scheduled send time.
-    /// Created on the first sample, so unpaced runs do not pay for it.
-    pub(crate) response_hist: Option<Histogram<u64>>,
+    /// Handshake latency, round-trip time and, for paced echo, the latency
+    /// measured from each request's scheduled send time. Every worker of a
+    /// run shares one recorder, so memory does not grow with the number of
+    /// connections.
+    pub(crate) latency: Arc<LatencyRecorder>,
     pub(crate) messages_sent: u64,
     pub(crate) messages_recv: u64,
     pub(crate) bytes_sent: u64,
@@ -195,27 +197,29 @@ pub struct WorkerMetrics {
 }
 
 fn latency_histogram() -> WsResult<Histogram<u64>> {
-    Histogram::new_with_bounds(1, 60_000_000, 3)
-        .map_err(|e| WsBlastError::Metrics(format!("invalid latency histogram bounds: {e}")))
+    crate::histogram::latency_histogram()
+        .ok_or_else(|| WsBlastError::Metrics("invalid latency histogram bounds".to_string()))
 }
 
 impl WorkerMetrics {
-    /// Initializes histograms covering 1 µs to 60s at 3 significant figures.
-    ///
-    /// The fixed bounds prevent memory reallocations on the latency measurement hot path.
+    /// Metrics for a worker that records into latency histograms of its
+    /// own, covering 1 µs to 60 s at 3 significant figures.
     ///
     /// # Errors
     ///
-    /// Returns [`WsBlastError::Metrics`] if the histogram configuration is rejected
-    /// by the underlying implementation.
+    /// Never fails; the `Result` is kept for callers of earlier versions.
     pub fn new(live: Arc<LiveMetrics>) -> WsResult<Self> {
-        let handshake_hist = latency_histogram()?;
-        let rtt_hist = latency_histogram()?;
+        Ok(Self::with_latency(
+            live,
+            Arc::new(LatencyRecorder::with_shards(1)),
+        ))
+    }
 
-        Ok(Self {
-            handshake_hist,
-            rtt_hist,
-            response_hist: None,
+    /// Metrics for a worker that records into the run's shared latency
+    /// histograms.
+    pub(crate) fn with_latency(live: Arc<LiveMetrics>, latency: Arc<LatencyRecorder>) -> Self {
+        Self {
+            latency,
             messages_sent: 0,
             messages_recv: 0,
             bytes_sent: 0,
@@ -230,7 +234,7 @@ impl WorkerMetrics {
             chaos: None,
             shard: live.assign_shard(),
             live,
-        })
+        }
     }
 
     /// The live counter shard this worker updates.
@@ -273,7 +277,7 @@ impl WorkerMetrics {
     #[inline]
     fn record_handshake_latency(&mut self, duration: Duration) {
         let micros = duration.as_micros().clamp(1, 60_000_000) as u64;
-        let _ = self.handshake_hist.record(micros);
+        self.latency.record_handshake(self.shard, micros);
         self.counters()
             .active_connections
             .fetch_add(1, Ordering::Relaxed);
@@ -313,7 +317,7 @@ impl WorkerMetrics {
         self.bytes_recv += bytes as u64;
         if let Some(rtt_dur) = rtt {
             let micros = rtt_dur.as_micros().clamp(1, 60_000_000) as u64;
-            let _ = self.rtt_hist.record(micros);
+            self.latency.record_rtt(self.shard, micros);
             if !self.interval_uses_response
                 && let Some(interval) = self.interval.as_mut()
             {
@@ -333,12 +337,7 @@ impl WorkerMetrics {
     #[inline]
     pub(crate) fn record_response_time(&mut self, duration: Duration) {
         let micros = duration.as_micros().clamp(1, 60_000_000) as u64;
-        if self.response_hist.is_none() {
-            self.response_hist = latency_histogram().ok();
-        }
-        if let Some(hist) = self.response_hist.as_mut() {
-            let _ = hist.record(micros);
-        }
+        self.latency.record_response(self.shard, micros);
         if let Some(interval) = self.interval.as_mut() {
             interval.record(micros);
         }
@@ -808,6 +807,9 @@ pub(crate) struct MetricsTotals {
     pub(crate) errors: HashMap<ErrorCategory, u64>,
     /// Injected faults, when any worker injected them.
     pub(crate) chaos: Option<ChaosSummary>,
+    /// The latency recorders already added, so the recorder that every
+    /// worker of a run shares is added once.
+    pub(crate) absorbed: Vec<Arc<LatencyRecorder>>,
 }
 
 impl MetricsTotals {
@@ -827,6 +829,7 @@ impl MetricsTotals {
             interrupted: 0,
             errors: HashMap::new(),
             chaos: None,
+            absorbed: Vec::new(),
         })
     }
 
@@ -839,10 +842,10 @@ impl MetricsTotals {
 
     /// Adds one worker's metrics.
     pub(crate) fn add_worker(&mut self, w: WorkerMetrics) {
-        let _ = self.handshake.add(&w.handshake_hist);
-        let _ = self.rtt.add(&w.rtt_hist);
-        if let Some(hist) = &w.response_hist {
-            let _ = self.response.add(hist);
+        if !self.absorbed.iter().any(|r| Arc::ptr_eq(r, &w.latency)) {
+            w.latency
+                .add_to(&mut self.handshake, &mut self.rtt, &mut self.response);
+            self.absorbed.push(Arc::clone(&w.latency));
         }
         self.messages_sent += w.messages_sent;
         self.messages_recv += w.messages_recv;

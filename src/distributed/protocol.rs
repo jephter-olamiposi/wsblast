@@ -985,6 +985,7 @@ impl WireTotals {
             interrupted: self.interrupted,
             errors: self.errors,
             chaos: self.chaos,
+            absorbed: Vec::new(),
         })
     }
 }

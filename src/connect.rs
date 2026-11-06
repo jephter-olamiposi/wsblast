@@ -7,6 +7,11 @@
 //! addresses so a host that resolves to an unreachable address family first
 //! does not stall every connection. The address that answered is tried first
 //! by later connections, so only the first few pay for the race.
+//!
+//! Each connection's read buffer is sized from the run's connection count
+//! ([`read_buffer_size`]): the WebSocket library's 128 KiB default suits a
+//! few busy connections, but at 10,000 connections it alone would take
+//! 1.3 GB.
 
 use crate::error::ErrorCategory;
 use futures_util::StreamExt;
@@ -18,12 +23,29 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::handshake::client::Request;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 use url::{Host, Url};
 
 /// How long a connection attempt runs before the next address is tried in
 /// parallel, as recommended by RFC 8305 (Happy Eyeballs v2).
 const ATTEMPT_DELAY: Duration = Duration::from_millis(250);
+
+/// Memory the read buffers of all of a run's connections start with.
+const READ_BUFFER_BUDGET: usize = 64 * 1024 * 1024;
+/// The WebSocket library's default read buffer, kept for runs of up to 512
+/// connections.
+const MAX_READ_BUFFER: usize = 128 * 1024;
+/// The smallest read buffer: one page, enough for typical messages in one
+/// read. A larger message grows the buffer as it arrives.
+const MIN_READ_BUFFER: usize = 4 * 1024;
+
+/// The initial read buffer of each connection of a run that opens up to
+/// `connections` at once: an equal share of [`READ_BUFFER_BUDGET`], between
+/// 4 KiB and 128 KiB.
+pub(crate) fn read_buffer_size(connections: usize) -> usize {
+    (READ_BUFFER_BUDGET / connections.max(1)).clamp(MIN_READ_BUFFER, MAX_READ_BUFFER)
+}
 
 pub(crate) type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -36,16 +58,20 @@ pub(crate) struct ConnectTarget {
     /// connection; later connections try it first.
     preferred: AtomicUsize,
     connector: Connector,
+    /// WebSocket settings of every connection: the library defaults with a
+    /// read buffer sized for the run.
+    ws_config: WebSocketConfig,
 }
 
 impl ConnectTarget {
     /// Resolves `url`, allowing it `timeout`, and prepares the TLS
-    /// configuration for `wss://` targets.
+    /// configuration for `wss://` targets, for a run that opens up to
+    /// `connections` connections at once.
     ///
     /// A resolution failure is not returned as an error: it is kept and
     /// reported by every worker as a connection failure, the same way a
     /// per-connection failure would be.
-    pub(crate) async fn prepare(url: &Url, timeout: Duration) -> Self {
+    pub(crate) async fn prepare(url: &Url, timeout: Duration, connections: usize) -> Self {
         let connector = if url.scheme() == "wss" {
             rustls_connector()
         } else {
@@ -58,6 +84,7 @@ impl ConnectTarget {
             addrs,
             preferred: AtomicUsize::new(0),
             connector,
+            ws_config: WebSocketConfig::default().read_buffer_size(read_buffer_size(connections)),
         }
     }
 
@@ -89,7 +116,7 @@ impl ConnectTarget {
         let (ws_stream, _) = tokio_tungstenite::client_async_tls_with_config(
             request,
             tcp,
-            None,
+            Some(self.ws_config),
             Some(self.connector.clone()),
         )
         .await
@@ -212,6 +239,16 @@ mod tests {
     }
 
     #[test]
+    fn read_buffers_share_a_fixed_budget_within_bounds() {
+        assert_eq!(read_buffer_size(0), MAX_READ_BUFFER);
+        assert_eq!(read_buffer_size(50), MAX_READ_BUFFER);
+        assert_eq!(read_buffer_size(512), MAX_READ_BUFFER);
+        assert_eq!(read_buffer_size(1024), 64 * 1024);
+        assert_eq!(read_buffer_size(10_000), 6_710);
+        assert_eq!(read_buffer_size(100_000), MIN_READ_BUFFER);
+    }
+
+    #[test]
     fn families_alternate_starting_with_the_first() {
         let input = [
             addr("[::1]:80"),
@@ -269,6 +306,7 @@ mod tests {
             addrs: Ok(vec![addr("192.0.2.1:9"), open].into()),
             preferred: AtomicUsize::new(0),
             connector: Connector::Plain,
+            ws_config: WebSocketConfig::default(),
         };
         let request = "ws://127.0.0.1/".into_client_request().unwrap();
         // The server never upgrades, so only the TCP step can be observed.

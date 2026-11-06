@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Memory per connection is about 36 times lower.** Each connection used to hold its own latency histograms (about 136 KiB each for handshake latency, round-trip time and response time), a 20 KB time-series histogram and the WebSocket library's 128 KiB read buffer: about 575 KB per connection, so 4,000 connections needed 2.3 GB. Every worker of a run now records into one shared set of histograms with lock-free atomic counters, split into one shard per CPU core, and moves its time-series samples to the run in batches of 64. Read buffers start at an equal share of 64 MiB, between 4 KiB and 128 KiB, so runs of up to 512 connections keep the 128 KiB default. Each additional connection now costs about 16 KB, and 4,000 connections use about 140 MB. Percentiles are unchanged: the shared histograms use the same buckets, so the merged histogram is identical. See METHODOLOGY.md, section 10.
+
 ## [0.2.1] - 2026-11-05
 
 0.2.1 brings back, rebuilt and tested, the features 0.2.0 removed: Prometheus and OpenTelemetry export, frame capture, the mock server, distributed load generation, chaos injection, and JWT and OAuth2 authentication. Only `compression` stays out, because the WebSocket library has no permessage-deflate support. It also corrects coordinated omission in paced runs, records a per-interval time series in every report, adds load stages, HTML reports and per-phase scenario SLOs, and rebuilds the live dashboard. The library API is a compatible superset of 0.2.0.

@@ -170,6 +170,7 @@ pub mod distributed;
 mod error;
 #[cfg(any(feature = "prometheus", feature = "otel"))]
 mod export;
+mod histogram;
 mod html;
 mod lag;
 mod metrics;
