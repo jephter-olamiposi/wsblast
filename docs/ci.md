@@ -506,7 +506,7 @@ wsblast render report.json --format markdown -o report.md
 wsblast render report.json --format text                # terminal tables on stdout
 ```
 
-`wsblast render` reads any schema 1.x report, including reports written by wsblast 0.2.0. Parts an older report lacks are left out of the page; a report without a time series has no charts. The JSON report does not record `--rate`, `--stages` or the run's date, so the rendered page shows the rate as not recorded and the date as the time the JSON file was last modified. Without `-o` the rendered report is printed to stdout; with `-o` it is written to the file only.
+`wsblast render` reads any schema 1.x report, including reports written by wsblast 0.2.0. Parts an older report lacks are left out of the page; a report without a time series has no charts. Reports from wsblast 0.2.2 on record `--rate` and `--stages`; for older reports the rendered page shows the rate as not recorded and leaves the stages out. No report records the run's date, so the page shows the time the JSON file was last modified. Without `-o` the rendered report is printed to stdout; with `-o` it is written to the file only.
 
 Exit codes of `wsblast render`: 0 when the report was rendered, whatever its SLO result; 1 when the file is missing or unreadable, is not JSON, is neither a wsblast report nor a comparison JSON, or has a schema version other than 1.x, or when the output file cannot be written. Gate on the run's own exit code, not on `render`.
 

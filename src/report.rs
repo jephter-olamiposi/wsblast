@@ -107,7 +107,18 @@ pub(crate) struct StageReport {
 
 /// Describes load stages as `DURATION:TARGET` pairs, the syntax of
 /// `--stages`.
+#[cfg(feature = "scenario")]
 pub(crate) fn stage_list_label(stages: &[crate::config::Stage]) -> String {
+    stages
+        .iter()
+        .map(|stage| format!("{:?}:{}", stage.duration, stage.target))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Describes recorded load stages as `DURATION:TARGET` pairs, the syntax of
+/// `--stages`.
+fn stage_reports_label(stages: &[StageReport]) -> String {
     stages
         .iter()
         .map(|stage| format!("{:?}:{}", stage.duration, stage.target))
@@ -119,12 +130,7 @@ impl PhaseReport {
     /// What the phase ran: its stages, or its connection count.
     pub(crate) fn load_label(&self) -> String {
         if !self.stages.is_empty() {
-            return self
-                .stages
-                .iter()
-                .map(|stage| format!("{:?}:{}", stage.duration, stage.target))
-                .collect::<Vec<_>>()
-                .join(", ");
+            return stage_reports_label(&self.stages);
         }
         match self.connections {
             1 => "1 connection".to_string(),
@@ -1022,12 +1028,6 @@ fn time_windows(metrics: &AggregatedMetrics) -> Vec<TimeWindow> {
         .collect()
 }
 
-/// Describes a staged load profile as `DURATION:TARGET` pairs, the syntax of
-/// `--stages`.
-fn stages_label(config: &LoadTestConfig) -> String {
-    stage_list_label(&config.stages)
-}
-
 /// The text report's rate row: the per-connection rate, `Unthrottled`, or a
 /// note that a saved report does not record it.
 fn rate_label(rate_per_conn: Option<u64>) -> String {
@@ -1105,9 +1105,9 @@ pub(crate) struct ReportView<'a> {
     /// Messages per second per connection, 0 for unthrottled; `None` when
     /// the source does not record it.
     pub(crate) rate_per_conn: Option<u64>,
-    /// The `--stages` profile as `DURATION:TARGET` pairs, if the run had one
-    /// and the source records it.
-    pub(crate) stages: Option<String>,
+    /// The `--stages` profile; empty for a constant connection count or
+    /// when the source does not record it.
+    pub(crate) stages: Vec<StageReport>,
     /// Every executed scenario phase; empty outside scenarios.
     pub(crate) phase_targets: &'a [PhaseTarget],
     /// The metrics and SLO result of every executed scenario phase; empty
@@ -1121,6 +1121,12 @@ pub(crate) struct ReportView<'a> {
 }
 
 impl<'a> ReportView<'a> {
+    /// The `--stages` profile as `DURATION:TARGET` pairs, if the run had one
+    /// and the source records it.
+    pub(crate) fn stages_label(&self) -> Option<String> {
+        (!self.stages.is_empty()).then(|| stage_reports_label(&self.stages))
+    }
+
     /// The view of a live run.
     pub(crate) fn from_config(
         config: &'a LoadTestConfig,
@@ -1134,7 +1140,14 @@ impl<'a> ReportView<'a> {
             connections: config.connections,
             mode: Cow::Owned(format!("{:?}", config.mode)),
             rate_per_conn: Some(config.rate_per_conn),
-            stages: (!config.stages.is_empty()).then(|| stages_label(config)),
+            stages: config
+                .stages
+                .iter()
+                .map(|stage| StageReport {
+                    duration: stage.duration,
+                    target: stage.target,
+                })
+                .collect(),
             phase_targets,
             phases,
             timestamp: Some((
@@ -1155,6 +1168,11 @@ pub(crate) struct SavedReport {
     target_url: String,
     connections: usize,
     mode: String,
+    /// Absent in reports written before 0.2.2 and in scenario reports.
+    #[serde(default)]
+    rate_per_conn: Option<u64>,
+    #[serde(default)]
+    stages: Vec<StageReport>,
     #[serde(default)]
     phase_targets: Vec<PhaseTarget>,
     metrics: AggregatedMetrics,
@@ -1190,15 +1208,15 @@ impl SavedReport {
         serde_json::from_value(value).map_err(|e| format!("not a wsblast JSON report: {e}"))
     }
 
-    /// The view the renderers read. The JSON report does not record the
-    /// message rate or the load stages, so both are unknown.
+    /// The view the renderers read. Reports written before 0.2.2 do not
+    /// record the message rate or the load stages, so both are unknown.
     pub(crate) fn view(&self, timestamp: Option<(&'static str, String)>) -> ReportView<'_> {
         ReportView {
             target_url: &self.target_url,
             connections: self.connections,
             mode: Cow::Borrowed(&self.mode),
-            rate_per_conn: None,
-            stages: None,
+            rate_per_conn: self.rate_per_conn,
+            stages: self.stages.clone(),
             phase_targets: &self.phase_targets,
             phases: &self.phases,
             timestamp,
@@ -1313,7 +1331,7 @@ fn render_text_report(view: &ReportView<'_>) -> String {
         "Connections (Concurrency)",
         &view.connections.to_string(),
     ]);
-    if let Some(stages) = &view.stages {
+    if let Some(stages) = &view.stages_label() {
         meta_table.add_row(vec!["Load Stages", stages]);
     }
     meta_table.add_row(vec![
@@ -1553,6 +1571,13 @@ struct JsonReport<'a> {
     connections: usize,
     duration_secs: f64,
     mode: &'a str,
+    /// Messages per second per connection, 0 for unthrottled; omitted for a
+    /// scenario, whose phases set their own rates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rate_per_conn: Option<u64>,
+    /// The `--stages` profile; omitted for a constant connection count.
+    #[serde(skip_serializing_if = "<[StageReport]>::is_empty")]
+    stages: &'a [StageReport],
     /// Every executed scenario phase in run order; omitted outside scenarios.
     #[serde(skip_serializing_if = "<[PhaseTarget]>::is_empty")]
     phase_targets: &'a [PhaseTarget],
@@ -1571,6 +1596,10 @@ fn render_json_report(view: &ReportView<'_>) -> String {
         connections: view.connections,
         duration_secs: view.metrics.elapsed.as_secs_f64(),
         mode: &view.mode,
+        rate_per_conn: view
+            .rate_per_conn
+            .filter(|_| view.phase_targets.is_empty() && view.phases.is_empty()),
+        stages: &view.stages,
         phase_targets: view.phase_targets,
         metrics: view.metrics,
         slo: view.slo,
@@ -1599,7 +1628,7 @@ fn render_markdown_report(view: &ReportView<'_>) -> String {
         "- **Concurrency:** `{}` workers\n",
         view.connections
     ));
-    if let Some(stages) = &view.stages {
+    if let Some(stages) = &view.stages_label() {
         md.push_str(&format!("- **Load Stages:** `{stages}`\n"));
     }
     if let Some(distributed) = &metrics.distributed {
@@ -3060,6 +3089,61 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&single).unwrap();
         assert!(value.get("phases").is_none(), "{single}");
         assert!(SavedReport::parse(&single).unwrap().phases.is_empty());
+    }
+
+    #[test]
+    fn json_reports_record_the_rate_and_stages_for_rendering_later() {
+        use clap::Parser;
+
+        let cli = crate::cli::Cli::parse_from([
+            "wsblast",
+            "ws://127.0.0.1:9001",
+            "--stages",
+            "3s:30,4s:30,2s:0",
+            "-r",
+            "20",
+            "--format",
+            "json",
+        ]);
+        let config = LoadTestConfig::from_cli(cli).expect("valid config");
+        let slo = evaluate_slos(&SloThresholds::default(), &sample_metrics());
+        let json = render_report(&config, &sample_metrics(), &slo);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["rate_per_conn"], 20);
+        assert_eq!(value["stages"].as_array().map(Vec::len), Some(3));
+        assert_eq!(value["stages"][0]["target"], 30);
+
+        let saved = SavedReport::parse(&json).unwrap();
+        let view = saved.view(None);
+        assert_eq!(view.rate_per_conn, Some(20));
+        assert_eq!(view.stages_label().as_deref(), Some("3s:30, 4s:30, 2s:0"));
+        let html = crate::html::render_html_report(&view);
+        assert!(html.contains("3s:30, 4s:30, 2s:0"), "{html}");
+        assert!(html.contains("20 msg/s per connection"), "{html}");
+
+        // A constant run records its rate but no stages; a scenario neither.
+        let constant = render_report(&report_config("json"), &sample_metrics(), &slo);
+        let value: serde_json::Value = serde_json::from_str(&constant).unwrap();
+        assert_eq!(value["rate_per_conn"], 0);
+        assert!(value.get("stages").is_none(), "{constant}");
+        let scenario = render_scenario_report(
+            &report_config("json"),
+            &sample_metrics(),
+            &slo,
+            &[],
+            &[phase_report("warmup", &SloThresholds::new())],
+        );
+        let value: serde_json::Value = serde_json::from_str(&scenario).unwrap();
+        assert!(value.get("rate_per_conn").is_none(), "{scenario}");
+
+        // Reports written before the fields existed still read back.
+        let mut old: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let object = old.as_object_mut().unwrap();
+        object.remove("rate_per_conn");
+        object.remove("stages");
+        let saved = SavedReport::parse(&old.to_string()).unwrap();
+        assert_eq!(saved.view(None).rate_per_conn, None);
+        assert!(saved.view(None).stages.is_empty());
     }
 
     fn strip_ansi(text: &str) -> String {

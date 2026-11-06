@@ -4,6 +4,30 @@
   "connections": 20,
   "duration_secs": 25.004,
   "mode": "Echo",
+  "rate_per_conn": 0,
+  "stages": [
+    {
+      "duration": {
+        "secs": 5,
+        "nanos": 0
+      },
+      "target": 20
+    },
+    {
+      "duration": {
+        "secs": 15,
+        "nanos": 0
+      },
+      "target": 20
+    },
+    {
+      "duration": {
+        "secs": 5,
+        "nanos": 0
+      },
+      "target": 0
+    }
+  ],
   "metrics": {
     "total_connections_attempted": 20,
     "total_connections_established": 18,

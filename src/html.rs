@@ -200,7 +200,7 @@ fn render_header(html: &mut String, view: &ReportView<'_>) {
         "<dt>{connections_label}</dt><dd>{}</dd>",
         view.connections
     );
-    if let Some(stages) = &view.stages {
+    if let Some(stages) = &view.stages_label() {
         let _ = writeln!(
             html,
             "<dt>Load stages</dt><dd><code>{}</code></dd>",
@@ -1821,7 +1821,7 @@ mod tests {
             connections: 4,
             mode: Cow::Borrowed("Echo"),
             rate_per_conn: Some(10),
-            stages: None,
+            stages: Vec::new(),
             phase_targets: phases,
             phases: &[],
             timestamp: Some(("Finished", "2026-10-25T10:00:00.000Z".into())),
@@ -2012,7 +2012,10 @@ mod tests {
         for phases in [&phases[..], &[]] {
             let mut v = view(&metrics, &slo, phases, &target);
             v.mode = Cow::Owned(format!("Echo{evil}"));
-            v.stages = Some(evil.to_string());
+            v.stages = vec![crate::report::StageReport {
+                duration: std::time::Duration::from_secs(3),
+                target: 30,
+            }];
             v.timestamp = Some(("Saved", evil.to_string()));
             let html = render_html_report(&v);
             assert_well_formed(&html);

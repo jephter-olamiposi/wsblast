@@ -258,10 +258,36 @@ fn render_writes_html_from_a_saved_report() {
     assert_eq!(html.matches("<svg class=\"chart\"").count(), 4);
     assert!(html.contains("FAIL: 2 of 3 SLO checks failed"), "{html}");
     assert!(html.contains("Response Time (from schedule)"));
-    assert!(html.contains("Not recorded in the JSON report"));
+    assert!(html.contains("20 msg/s per connection"), "{html}");
     assert!(html.contains("Report saved"));
     assert!(!html.contains("http://") && !html.contains("https://"));
     let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn render_shows_the_stages_and_marks_what_older_reports_lack() {
+    let staged = wsblast(&[os("render"), fixture("staged.json").as_os_str()]);
+    assert_eq!(staged.code, Some(0), "{}", staged.stderr);
+    assert!(
+        staged
+            .stdout
+            .contains("<dt>Load stages</dt><dd><code>5s:20, 15s:20, 5s:0</code>")
+    );
+    assert!(staged.stdout.contains("<dt>Rate</dt><dd>Unthrottled</dd>"));
+
+    // A report written before 0.2.2 records neither the rate nor the stages.
+    let mut old: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture("staged.json")).unwrap()).unwrap();
+    let object = old.as_object_mut().unwrap();
+    object.remove("rate_per_conn");
+    object.remove("stages");
+    let path = scratch("pre-0.2.2.json");
+    std::fs::write(&path, old.to_string()).unwrap();
+    let rendered = wsblast(&[os("render"), path.as_os_str()]);
+    assert_eq!(rendered.code, Some(0), "{}", rendered.stderr);
+    assert!(rendered.stdout.contains("Not recorded in the JSON report"));
+    assert!(!rendered.stdout.contains("Load stages"));
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]
@@ -271,8 +297,7 @@ fn render_defaults_to_html_on_stdout_and_markdown_matches_the_live_report() {
     assert_eq!(html.code, Some(0), "{}", html.stderr);
     assert!(html.stdout.starts_with("<!doctype html>"));
 
-    // Markdown does not show the rate, the one setting a JSON report lacks,
-    // so a saved report renders exactly as the live run printed it.
+    // A saved report renders in Markdown exactly as the live run printed it.
     for (name, format) in [("constant", "markdown"), ("scenario", "markdown")] {
         let rendered = wsblast(&[
             os("render"),
