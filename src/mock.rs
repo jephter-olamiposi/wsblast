@@ -765,12 +765,7 @@ async fn run_session<S>(
         };
         match event {
             Event::Cancelled => {
-                close(
-                    &mut sink,
-                    CloseCode::Away,
-                    "server shutting down".to_string(),
-                )
-                .await;
+                shut_down(&mut sink, &mut stream).await;
                 return;
             }
             Event::Due => {
@@ -778,7 +773,7 @@ async fn run_session<S>(
                     tokio::select! {
                         () = tokio::time::sleep_until(release.into()) => {}
                         () = cancel.cancelled() => {
-                            close(&mut sink, CloseCode::Away, "server shutting down".to_string()).await;
+                            shut_down(&mut sink, &mut stream).await;
                             return;
                         }
                     }
@@ -882,6 +877,18 @@ async fn close<S: AsyncRead + AsyncWrite + Unpin>(
         reason: Utf8Bytes::from(reason),
     };
     let _ = tokio::time::timeout(CLOSE_GRACE, sink.send(Message::Close(Some(frame)))).await;
+}
+
+/// Closes a session because the server is stopping. The close handshake is
+/// completed before the socket is dropped: dropped while frames the client
+/// sent are still unread, it would end with a TCP reset, which the client
+/// counts as a read error.
+async fn shut_down<S: AsyncRead + AsyncWrite + Unpin>(
+    sink: &mut WsSink<S>,
+    stream: &mut WsStream<S>,
+) {
+    close(sink, CloseCode::Away, "server shutting down".to_string()).await;
+    drain(stream).await;
 }
 
 /// Reads until the client finishes the close handshake or `CLOSE_GRACE`

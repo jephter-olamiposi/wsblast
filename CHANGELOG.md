@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - docs/benchmarks.md compares wsblast with k6 and Artillery on throughput per core, memory per connection and a stalling server, and `scripts/compare/run.sh` reproduces it.
 
 ### Fixed
+- When `wsblast mock` stops, it completes the WebSocket close handshake before dropping each connection. It used to send its close frame and drop the socket at once, so a request the client had already sent was left unread and the socket closed with a TCP reset; on Windows the client then counted a read error instead of the close.
 - `install.sh` no longer fails when the GitHub API is rate limited or blocked: it finds the latest release through the release page instead.
 
 ## [0.2.2] - 2026-11-06
