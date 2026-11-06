@@ -259,9 +259,9 @@ fn run_compare(cli: &Cli) -> Result<()> {
             } else {
                 report::render_comparison_view(&view, crate::cli::OutputFormat::Text)
             };
-            println!("{summary}");
+            crate::output::outln!("{summary}");
         }
-        None => println!("{rendered}"),
+        None => crate::output::outln!("{rendered}"),
     }
 
     if cli.fail_on_regression && !comparison.regressions.is_empty() {

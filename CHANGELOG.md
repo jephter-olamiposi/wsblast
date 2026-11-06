@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - JSON reports record `rate_per_conn` (`--rate`) and `stages` (`--stages`), both optional in `schema/report-v1.json`, so `wsblast render` shows the rate and the load stages of a saved run as the live report does. Scenario reports leave out `rate_per_conn`, since each phase sets its own rate.
 
+### Fixed
+- Output piped into a reader that exits early (`wsblast ... | head -n 5`) no longer makes wsblast panic. The rest of the output is dropped, the run carries on, and the exit code still reports the SLO result.
+
 ## [0.2.1] - 2026-11-05
 
 0.2.1 brings back, rebuilt and tested, the features 0.2.0 removed: Prometheus and OpenTelemetry export, frame capture, the mock server, distributed load generation, chaos injection, and JWT and OAuth2 authentication. Only `compression` stays out, because the WebSocket library has no permessage-deflate support. It also corrects coordinated omission in paced runs, records a per-interval time series in every report, adds load stages, HTML reports and per-phase scenario SLOs, and rebuilds the live dashboard. The library API is a compatible superset of 0.2.0.

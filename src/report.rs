@@ -1297,9 +1297,9 @@ pub(crate) fn emit_scenario_report(
             } else {
                 render_view(&view, OutputFormat::Text)
             };
-            println!("{summary}");
+            crate::output::outln!("{summary}");
         }
-        None => println!("{output}"),
+        None => crate::output::outln!("{output}"),
     }
     Ok(())
 }

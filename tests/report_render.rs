@@ -551,3 +551,22 @@ fn render_names_the_feature_a_comparison_json_needs() {
         result.stderr
     );
 }
+
+/// A reader that exits early, as in `wsblast --compare a b | head -1`, must
+/// not make wsblast panic, and the exit code must stay the comparison's.
+#[cfg(all(unix, feature = "compare"))]
+#[test]
+fn a_closed_stdout_does_not_panic_or_change_the_exit_code() {
+    let report = fixture("constant.json");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_wsblast"))
+        .args([os("--compare"), report.as_os_str(), report.as_os_str()])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+}

@@ -631,7 +631,7 @@ where
         .as_ref()
         .map(|phase| format!(" phase '{}'", phase.name))
         .unwrap_or_default();
-    println!(
+    crate::output::outln!(
         "wsblast agent: test from {peer}{phase_label}: {} with {sizing}",
         config.target_url
     );

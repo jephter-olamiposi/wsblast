@@ -959,7 +959,7 @@ pub(crate) async fn run_command(args: &crate::cli::MockArgs) -> Result<()> {
     let cancel = CancellationToken::new();
     let _signals = crate::runner::spawn_signal_listener(cancel.clone());
     let server = MockServer::bind(config).await?;
-    println!(
+    crate::output::outln!(
         "wsblast mock listening on {} ({})",
         server.url(),
         server.config.describe()
@@ -970,7 +970,7 @@ pub(crate) async fn run_command(args: &crate::cli::MockArgs) -> Result<()> {
     let last = server.run(cancel.clone()).await?;
     cancel.cancel();
     let _ = printer.await;
-    println!(
+    crate::output::outln!(
         "wsblast mock stopped: {} connections accepted, {} rejected, {} frames received, {} sent",
         last.connections_accepted,
         last.connections_rejected,
@@ -995,7 +995,7 @@ async fn print_stats(stats: MockStatsHandle, cancel: CancellationToken) {
         if now == previous && now.connections_active == 0 {
             continue;
         }
-        println!(
+        crate::output::outln!(
             "[stats] connections: {} active, {} accepted, {} rejected | frames: {} received, {} sent | rate: {} recv/s, {} sent/s",
             now.connections_active,
             now.connections_accepted,

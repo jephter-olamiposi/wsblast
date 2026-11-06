@@ -92,11 +92,11 @@ pub(crate) async fn run_agent_command(args: &crate::cli::AgentArgs) -> crate::Re
     let cancel = tokio_util::sync::CancellationToken::new();
     let _signals = crate::runner::spawn_signal_listener(cancel.clone());
     let server = AgentServer::bind(config).await?;
-    println!(
+    crate::output::outln!(
         "wsblast agent listening on {} (protocol {PROTOCOL_VERSION}, one test at a time)",
         server.url()
     );
     server.run(cancel).await?;
-    println!("wsblast agent stopped");
+    crate::output::outln!("wsblast agent stopped");
     Ok(())
 }

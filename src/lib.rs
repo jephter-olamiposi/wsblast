@@ -177,6 +177,7 @@ mod metrics;
 #[cfg(feature = "mock")]
 #[cfg_attr(docsrs, doc(cfg(feature = "mock")))]
 pub mod mock;
+mod output;
 mod report;
 mod runner;
 #[cfg(feature = "compare")]
