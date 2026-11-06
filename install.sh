@@ -2,7 +2,7 @@
 # wsblast installer
 # Installs the pre-compiled wsblast binary for macOS or Linux.
 # Usage: curl -fsSL https://raw.githubusercontent.com/jephter-olamiposi/wsblast/main/install.sh | sh
-# Set WSBLAST_VERSION (e.g. v0.1.1) to install a specific release without querying the GitHub API.
+# Set WSBLAST_VERSION (e.g. v0.2.2) to install a specific release without querying the GitHub API.
 # Set WSBLAST_INSTALL_DIR to install somewhere other than /usr/local/bin.
 #
 # Release archives are built by dist (see dist-workspace.toml). Each release
@@ -56,17 +56,18 @@ if [ -n "${WSBLAST_VERSION:-}" ]; then
     LATEST_TAG="$WSBLAST_VERSION"
 else
     RELEASE_URL="https://api.github.com/repos/${REPO}/releases/latest"
-    if ! RELEASE_JSON="$(curl -fsSL "$RELEASE_URL")"; then
-        echo "Error: could not query the latest wsblast release from ${RELEASE_URL}."
-        echo "Check your network connection or GitHub API rate limit, or pin a version with:"
-        echo "  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | WSBLAST_VERSION=v0.1.1 sh"
-        exit 1
+    LATEST_TAG=""
+    if RELEASE_JSON="$(curl -fsSL "$RELEASE_URL" 2>/dev/null)"; then
+        LATEST_TAG="$(printf '%s\n' "$RELEASE_JSON" | grep '"tag_name":' | head -n 1 | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
     fi
-    LATEST_TAG="$(printf '%s\n' "$RELEASE_JSON" | grep '"tag_name":' | head -n 1 | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
     if [ -z "$LATEST_TAG" ]; then
-        echo "Error: the GitHub API response from ${RELEASE_URL} did not contain a release tag."
-        echo "Pin a version with:"
-        echo "  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | WSBLAST_VERSION=v0.1.1 sh"
+        # The API is rate limited; the release page redirects to the latest tag.
+        LATEST_TAG="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" 2>/dev/null | sed -n 's#.*/releases/tag/##p')"
+    fi
+    if [ -z "$LATEST_TAG" ]; then
+        echo "Error: could not find the latest wsblast release on GitHub."
+        echo "Check your network connection, or pin a version with:"
+        echo "  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | WSBLAST_VERSION=v0.2.2 sh"
         exit 1
     fi
 fi
