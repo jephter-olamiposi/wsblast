@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - docs/benchmarks.md compares wsblast with k6 and Artillery on throughput per core, memory per connection and a stalling server, and `scripts/compare/run.sh` reproduces it.
 
+### Fixed
+- `install.sh` no longer fails when the GitHub API is rate limited or blocked: it finds the latest release through the release page instead.
+
 ## [0.2.2] - 2026-11-06
 
 0.2.2 cuts memory per connection from about 575 KB to about 16 KB, so 4,000 connections need about 140 MB instead of 2.3 GB, with identical percentiles. It adds scripted mock replies (`wsblast mock --rules`) and a slow-consumer fault (`--chaos-read-pause`), records the rate and load stages in JSON reports, and changes `-o` to keep the terminal readable. The library API is a compatible superset of 0.2.1.
