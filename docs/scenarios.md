@@ -204,6 +204,7 @@ A phase's `chaos` mapping injects client-side faults into that phase, with the k
 | `corrupt` | number, 0 to 100 | `0` | Percentage of data sends with one byte changed. `drop` and `corrupt` add up to at most 100. |
 | `close` | number, 0 to 100 | `0` | Percentage of replies (of sends in stream mode) after which the client closes the connection; the worker reconnects. |
 | `close_mode` | `abrupt` or `graceful` | `abrupt` | `abrupt` closes the TCP connection without a Close frame; `graceful` sends a Close frame with code 1001 first. |
+| `read_pause` | duration, or `DURATION:JITTER` | none | A slow consumer: after every received data frame, wait this long, plus a value drawn uniformly from 0 to `JITTER`, before reading the next. Works in every mode, `listen` and `graphql-ws` included. |
 | `seed` | integer | `--chaos-seed`, else picked per run | Seed of the phase's decisions. |
 
 ```yaml
@@ -375,7 +376,7 @@ The whole file is validated before any connection is opened, including phases th
 | `max_error_rate` outside 0 to 1 | `phase 'spike': slo: Configuration error: Invalid threshold specification: max_error_rate must be between 0.0 and 1.0, received 1.5` |
 | `chaos` percentage outside 0 to 100, or `drop` and `corrupt` adding up to more than 100 | `phase 'flaky': chaos: Configuration error: Invalid option: chaos drop percentage must be between 0 and 100, received 150` |
 | Unparsable `chaos` delay | `phase 'flaky': chaos: Configuration error: Invalid duration 'soon': ...` |
-| `chaos` in a `listen` or `graphql-ws` phase without actions | `Unsupported option combination: phase 'watch': chaos injection needs data sends to act on; Listen mode sends none, use --mode echo or stream, or an action script` (exit code 1, when the phase will run) |
+| `chaos` with a send-side key (`delay`, `drop`, `corrupt`, `close`) in a `listen` or `graphql-ws` phase without actions | `Unsupported option combination: phase 'watch': chaos injection needs data sends to act on; Listen mode sends none, use --mode echo or stream, or an action script (--chaos-read-pause works in every mode)` (exit code 1, when the phase will run) |
 | `--phase` names a missing phase | `phase 'nope' not found; available phases: soak, spike` |
 | A phase that will run has no target from the command line, the phase or the scenario | ``phase 'spike': no target URL; set `target` on this phase or at the top level of the scenario, or pass a URL on the command line`` |
 

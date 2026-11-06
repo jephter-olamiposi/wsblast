@@ -379,6 +379,15 @@ impl WorkerMetrics {
         }
     }
 
+    /// Counts a pause chaos took after reading a data frame.
+    #[inline]
+    #[cfg(feature = "chaos")]
+    pub(crate) fn record_chaos_read_pause(&mut self) {
+        if let Some(chaos) = self.chaos.as_mut() {
+            chaos.read_pauses += 1;
+        }
+    }
+
     /// Counts a connection that chaos closed. It is not an error.
     #[inline]
     pub(crate) fn record_chaos_close(&mut self) {
@@ -655,6 +664,9 @@ pub struct ChaosSummary {
     pub corrupted: u64,
     /// Connections closed by `--chaos-close`.
     pub closes: u64,
+    /// Pauses `--chaos-read-pause` took after a received data frame.
+    #[serde(default)]
+    pub read_pauses: u64,
 }
 
 impl ChaosSummary {
@@ -673,6 +685,7 @@ impl ChaosSummary {
         self.dropped += other.dropped;
         self.corrupted += other.corrupted;
         self.closes += other.closes;
+        self.read_pauses += other.read_pauses;
     }
 }
 

@@ -432,6 +432,19 @@ impl WorkerSession {
                 schedule.advance();
             }
 
+            // A slow consumer takes its read pause after the reply is
+            // recorded. Like a send delay, it moves every later slot, so it
+            // is never counted as response time.
+            if let Some(pause) = self.chaos_read_pause() {
+                if !self.chaos_pause(pause).await {
+                    let _ = sink.send(Message::Close(None)).await;
+                    break;
+                }
+                if let Some(schedule) = schedule.as_mut() {
+                    schedule.shift(pause);
+                }
+            }
+
             #[cfg(feature = "scenario")]
             if !self.apply_think_time().await {
                 let _ = sink.send(Message::Close(None)).await;
@@ -467,6 +480,7 @@ impl WorkerSession {
 
         let mut ticker = interval(pacing_duration);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut read_resume: Option<Instant> = None;
 
         loop {
             tokio::select! {
@@ -517,13 +531,21 @@ impl WorkerSession {
                 } => {
                     let _ = sink.send(Message::Ping(Bytes::from_static(b"hb"))).await;
                 }
-                msg_opt = stream.next() => {
+                // A slow consumer stops reading until its pause ends; sends
+                // and keepalives go on, and the server's frames wait in the
+                // socket buffers.
+                () = sleep_until_resume(read_resume), if read_resume.is_some() => {
+                    read_resume = None;
+                }
+                msg_opt = stream.next(), if read_resume.is_none() => {
                     match msg_opt {
                         Some(Ok(Message::Text(t))) => {
                             self.metrics.record_message_recv(t.len(), None);
+                            read_resume = self.chaos_read_pause().map(|p| Instant::now() + p);
                         }
                         Some(Ok(Message::Binary(b))) => {
                             self.metrics.record_message_recv(b.len(), None);
+                            read_resume = self.chaos_read_pause().map(|p| Instant::now() + p);
                         }
                         Some(Ok(Message::Ping(p))) => {
                             let _ = sink.send(Message::Pong(p)).await;
@@ -558,6 +580,7 @@ impl WorkerSession {
         let (mut sink, mut stream) = ws_stream.split();
 
         let mut ping_ticker = self.keepalive_ticker();
+        let mut read_resume: Option<Instant> = None;
 
         loop {
             tokio::select! {
@@ -571,13 +594,21 @@ impl WorkerSession {
                 } => {
                     let _ = sink.send(Message::Ping(Bytes::from_static(b"hb"))).await;
                 }
-                msg_opt = stream.next() => {
+                // A slow consumer stops reading until its pause ends; sends
+                // and keepalives go on, and the server's frames wait in the
+                // socket buffers.
+                () = sleep_until_resume(read_resume), if read_resume.is_some() => {
+                    read_resume = None;
+                }
+                msg_opt = stream.next(), if read_resume.is_none() => {
                     match msg_opt {
                         Some(Ok(Message::Text(t))) => {
                             self.metrics.record_message_recv(t.len(), None);
+                            read_resume = self.chaos_read_pause().map(|p| Instant::now() + p);
                         }
                         Some(Ok(Message::Binary(b))) => {
                             self.metrics.record_message_recv(b.len(), None);
+                            read_resume = self.chaos_read_pause().map(|p| Instant::now() + p);
                         }
                         Some(Ok(Message::Ping(p))) => {
                             let _ = sink.send(Message::Pong(p)).await;
@@ -760,6 +791,15 @@ impl WorkerSession {
                                             self.metrics.record_response_time(
                                                 SendSchedule::response_time(due, start_time, rtt),
                                             );
+                                        }
+                                        if let Some(pause) = self.chaos_read_pause() {
+                                            if !self.chaos_pause(pause).await {
+                                                let _ = sink.send(Message::Close(None)).await;
+                                                break 'script;
+                                            }
+                                            if let Some(schedule) = schedule.as_mut() {
+                                                schedule.shift(pause);
+                                            }
                                         }
                                     }
                                     Ok(Ok(None)) => break 'script,
@@ -945,6 +985,27 @@ impl WorkerSession {
         self.metrics.record_chaos_delayed();
         tokio::select! {
             _ = tokio::time::sleep(delay) => true,
+            _ = self.cancel_token.cancelled() => false,
+        }
+    }
+
+    /// The pause chaos takes after a received data frame, counted; `None`
+    /// without `--chaos-read-pause`.
+    #[inline]
+    fn chaos_read_pause(&mut self) -> Option<Duration> {
+        #[cfg(feature = "chaos")]
+        if let Some(pause) = self.chaos.as_mut().and_then(|chaos| chaos.read_pause()) {
+            self.metrics.record_chaos_read_pause();
+            return Some(pause);
+        }
+        None
+    }
+
+    /// Sleeps a chaos read pause between a reply and the next send. Returns
+    /// false when the run was cancelled meanwhile.
+    async fn chaos_pause(&self, pause: Duration) -> bool {
+        tokio::select! {
+            _ = tokio::time::sleep(pause) => true,
             _ = self.cancel_token.cancelled() => false,
         }
     }
@@ -1191,6 +1252,7 @@ impl WorkerSession {
 
         // Handle incoming messages (data, error, complete, ka).
         let mut subscription_complete = false;
+        let mut read_resume: Option<Instant> = None;
         let mut cancelled = false;
         loop {
             tokio::select! {
@@ -1208,7 +1270,10 @@ impl WorkerSession {
                 } => {
                     let _ = sink.send(Message::Ping(Bytes::from_static(b"hb"))).await;
                 }
-                msg_result = stream.next() => {
+                () = sleep_until_resume(read_resume), if read_resume.is_some() => {
+                    read_resume = None;
+                }
+                msg_result = stream.next(), if read_resume.is_none() => {
                     match msg_result {
                         Some(Ok(Message::Text(text))) => {
                             if let Ok(msg) = serde_json::from_str::<GraphQLWSMessage>(&text) {
@@ -1216,6 +1281,9 @@ impl WorkerSession {
                                     GraphQLWSMessage::Data { id: _, payload: _ }
                                     | GraphQLWSMessage::Next { id: _, payload: _ } => {
                                         self.metrics.record_message_recv(text.len(), None);
+                                        read_resume = self
+                                            .chaos_read_pause()
+                                            .map(|p| Instant::now() + p);
                                     }
                                     GraphQLWSMessage::Error { .. } => {
                                         self.metrics.record_error(
@@ -1362,6 +1430,14 @@ fn reply_matches(rule: &ReplyMatch, frame: &Message, sent: Option<&Message>, seq
                 _ => false,
             }
         }
+    }
+}
+
+/// Waits until a slow consumer's read pause ends; never ready without one.
+async fn sleep_until_resume(resume: Option<Instant>) {
+    match resume {
+        Some(at) => tokio::time::sleep_until(at.into()).await,
+        None => std::future::pending().await,
     }
 }
 

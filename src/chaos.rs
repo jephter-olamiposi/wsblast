@@ -1,5 +1,6 @@
 //! Client-side fault injection (`--chaos-*`): delayed, dropped and corrupted
-//! data sends and connections closed by the client.
+//! data sends, connections closed by the client, and a client that reads
+//! slowly.
 //!
 //! Every decision is drawn from a small seeded generator owned by each
 //! worker, so a run with `--chaos-seed` makes the same decisions in the same
@@ -50,6 +51,12 @@ pub struct ChaosConfig {
     pub close_percent: f64,
     /// How a chaos close ends the connection.
     pub close_mode: ChaosCloseMode,
+    /// Pause after reading every data frame, before reading the next: a
+    /// slow consumer.
+    pub read_pause: Duration,
+    /// Extra read pause drawn uniformly from 0 to this, added to
+    /// `read_pause`.
+    pub read_jitter: Duration,
     /// Seed of the generator behind every decision. Without one, the run
     /// picks a seed and reports it.
     pub seed: Option<u64>,
@@ -93,6 +100,16 @@ impl ChaosConfig {
         self
     }
 
+    /// Pauses `pause`, plus up to `jitter` drawn uniformly, after reading
+    /// every data frame and before reading the next, so frames the server
+    /// sends meanwhile wait in the socket buffers: a slow consumer.
+    #[must_use]
+    pub fn with_read_pause(mut self, pause: Duration, jitter: Duration) -> Self {
+        self.read_pause = pause;
+        self.read_jitter = jitter;
+        self
+    }
+
     /// Seeds the generator, for a run that repeats the same decisions.
     #[must_use]
     pub fn with_seed(mut self, seed: u64) -> Self {
@@ -102,11 +119,22 @@ impl ChaosConfig {
 
     /// Whether any knob injects something.
     pub(crate) fn is_active(&self) -> bool {
+        self.acts_on_sends() || self.pauses_reads()
+    }
+
+    /// Whether a knob acts on data sends, which listen and GraphQL mode do
+    /// not make.
+    pub(crate) fn acts_on_sends(&self) -> bool {
         !self.delay.is_zero()
             || !self.jitter.is_zero()
             || self.drop_percent > 0.0
             || self.corrupt_percent > 0.0
             || self.close_percent > 0.0
+    }
+
+    /// Whether reads are paused, which works in every mode.
+    pub(crate) fn pauses_reads(&self) -> bool {
+        !self.read_pause.is_zero() || !self.read_jitter.is_zero()
     }
 
     /// Checks the percentages.
@@ -146,7 +174,8 @@ impl ChaosConfig {
     }
 }
 
-/// Parses `DURATION[:JITTER]`, the value of `--chaos-delay`.
+/// Parses `DURATION[:JITTER]`, the value of `--chaos-delay` and
+/// `--chaos-read-pause`.
 ///
 /// # Errors
 ///
@@ -164,11 +193,20 @@ pub(crate) fn parse_delay(raw: &str) -> Result<(Duration, Duration)> {
     Ok((delay, jitter))
 }
 
+/// Mixed into the seed of the read-pause generator, so it draws a sequence
+/// apart from the send decisions'.
+const READ_STREAM: u64 = 0x7265_6164_7061_7573;
+
 /// One worker's chaos settings and generator.
 #[derive(Debug, Clone)]
 pub(crate) struct ChaosState {
     config: ChaosConfig,
     rng: XorShift64,
+    /// Draws the read-pause jitter. Reads interleave with sends in an order
+    /// that depends on timing, so they draw from their own generator and
+    /// the send decisions of a seeded run stay the same with or without
+    /// read pauses.
+    read_rng: XorShift64,
 }
 
 impl ChaosState {
@@ -180,6 +218,9 @@ impl ChaosState {
         Self {
             config: config.clone(),
             rng: XorShift64::new(seed ^ splitmix64(worker_id as u64)),
+            read_rng: XorShift64::new(
+                splitmix64(seed ^ READ_STREAM) ^ splitmix64(worker_id as u64),
+            ),
         }
     }
 
@@ -202,6 +243,20 @@ impl ChaosState {
             plan.corrupt = !plan.drop && draw < drop + corrupt;
         }
         plan
+    }
+
+    /// How long to pause after reading a data frame; `None` without
+    /// `--chaos-read-pause`.
+    pub(crate) fn read_pause(&mut self) -> Option<Duration> {
+        if !self.config.pauses_reads() {
+            return None;
+        }
+        let mut pause = self.config.read_pause;
+        if !self.config.read_jitter.is_zero() {
+            let jitter = self.config.read_jitter.as_nanos().min(u128::from(u64::MAX)) as u64;
+            pause += Duration::from_nanos(self.read_rng.at_most(jitter));
+        }
+        Some(pause)
     }
 
     /// Whether to close the connection now, after a reply (after a send in
@@ -437,6 +492,32 @@ mod tests {
             (0..64).map(|_| chaos.plan_send().drop).collect::<Vec<_>>()
         };
         assert_ne!(draws(0), draws(1));
+    }
+
+    #[test]
+    fn read_pauses_stay_in_bounds_and_leave_send_decisions_unchanged() {
+        let sends = ChaosConfig::new()
+            .with_delay(Duration::ZERO, Duration::from_millis(4))
+            .with_drop(30.0)
+            .with_seed(9);
+        let with_reads = sends
+            .clone()
+            .with_read_pause(Duration::from_millis(10), Duration::from_millis(5));
+        let mut plain = ChaosState::new(&sends, 2);
+        let mut slow = ChaosState::new(&with_reads, 2);
+        assert_eq!(plain.read_pause(), None);
+        for _ in 0..200 {
+            // Reads interleave with sends; the send decisions must not move.
+            let pause = slow.read_pause().unwrap();
+            assert!((Duration::from_millis(10)..=Duration::from_millis(15)).contains(&pause));
+            assert_eq!(slow.plan_send(), plain.plan_send());
+        }
+        assert!(with_reads.is_active() && with_reads.pauses_reads());
+        assert!(
+            !ChaosConfig::new()
+                .with_read_pause(Duration::from_millis(1), Duration::ZERO)
+                .acts_on_sends()
+        );
     }
 
     #[test]

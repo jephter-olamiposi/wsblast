@@ -1791,8 +1791,13 @@ pub(crate) fn agents_label(
 /// The injected faults of a run, as the text, Markdown and HTML reports
 /// show them.
 pub(crate) fn chaos_label(chaos: &ChaosSummary) -> String {
+    let read_pauses = if chaos.read_pauses > 0 {
+        format!(", {} read pauses", chaos.read_pauses)
+    } else {
+        String::new()
+    };
     format!(
-        "{} delayed, {} dropped, {} corrupted, {} closes (seed {}; not counted as errors)",
+        "{} delayed, {} dropped, {} corrupted, {} closes{read_pauses} (seed {}; not counted as errors)",
         chaos.delayed, chaos.dropped, chaos.corrupted, chaos.closes, chaos.seed
     )
 }
@@ -2245,6 +2250,7 @@ mod tests {
             dropped: 3,
             corrupted: 2,
             closes: 1,
+            read_pauses: 0,
         });
         let line = "7 delayed, 3 dropped, 2 corrupted, 1 closes (seed 42; not counted as errors)";
         let text = render_report(&report_config("text"), &metrics, &slo);

@@ -354,7 +354,8 @@
             "delayed": { "description": "Data sends held back by --chaos-delay.", "$ref": "#/$defs/count" },
             "dropped": { "description": "Data sends skipped by --chaos-drop. They are not in total_messages_sent.", "$ref": "#/$defs/count" },
             "corrupted": { "description": "Data sends whose payload --chaos-corrupt changed. They are in total_messages_sent.", "$ref": "#/$defs/count" },
-            "closes": { "description": "Connections the client closed for --chaos-close. They are not errors; a worker that reconnects afterwards adds to total_reconnects.", "$ref": "#/$defs/count" }
+            "closes": { "description": "Connections the client closed for --chaos-close. They are not errors; a worker that reconnects afterwards adds to total_reconnects.", "$ref": "#/$defs/count" },
+            "read_pauses": { "description": "Pauses --chaos-read-pause took, one after every received data frame. Absent from reports written before wsblast 0.2.2; readers should treat a missing value as 0.", "$ref": "#/$defs/count" }
           }
         },
         "distributed": {

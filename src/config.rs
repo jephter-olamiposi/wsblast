@@ -626,7 +626,7 @@ impl LoadTestConfigBuilder {
             Some(chaos) => {
                 chaos.validate()?;
                 if chaos.is_active() {
-                    validate_chaos_mode(self.mode, false, "")?;
+                    validate_chaos_mode(&chaos, self.mode, false, "")?;
                     Some(chaos.seeded())
                 } else {
                     None
@@ -680,11 +680,20 @@ impl LoadTestConfigBuilder {
 /// mode, unless an action script sends them. `prefix` names where the
 /// chaos comes from, such as a scenario phase.
 #[cfg(feature = "chaos")]
-pub(crate) fn validate_chaos_mode(mode: TestMode, has_actions: bool, prefix: &str) -> Result<()> {
+pub(crate) fn validate_chaos_mode(
+    chaos: &crate::chaos::ChaosConfig,
+    mode: TestMode,
+    has_actions: bool,
+    prefix: &str,
+) -> Result<()> {
+    // A read pause needs only received frames, which every mode has.
+    if !chaos.acts_on_sends() {
+        return Ok(());
+    }
     let sends_data = has_actions || matches!(mode, TestMode::Echo | TestMode::Stream);
     if !sends_data {
         return Err(ConfigError::UnsupportedOption(format!(
-            "{prefix}chaos injection needs data sends to act on; {mode:?} mode sends none, use --mode echo or stream, or an action script"
+            "{prefix}chaos injection needs data sends to act on; {mode:?} mode sends none, use --mode echo or stream, or an action script (--chaos-read-pause works in every mode)"
         ))
         .into());
     }
@@ -1357,6 +1366,8 @@ pub(crate) struct ChaosYaml {
     #[serde(default)]
     pub(crate) close_mode: Option<crate::chaos::ChaosCloseMode>,
     #[serde(default)]
+    pub(crate) read_pause: Option<String>,
+    #[serde(default)]
     pub(crate) seed: Option<u64>,
 }
 
@@ -1378,6 +1389,13 @@ impl ChaosYaml {
             .transpose()
             .map_err(invalid)?
             .unwrap_or_default();
+        let (read_pause, read_jitter) = self
+            .read_pause
+            .as_deref()
+            .map(crate::chaos::parse_delay)
+            .transpose()
+            .map_err(invalid)?
+            .unwrap_or_default();
         let chaos = crate::chaos::ChaosConfig {
             delay,
             jitter,
@@ -1385,6 +1403,8 @@ impl ChaosYaml {
             corrupt_percent: self.corrupt.unwrap_or(0.0),
             close_percent: self.close.unwrap_or(0.0),
             close_mode: self.close_mode.unwrap_or_default(),
+            read_pause,
+            read_jitter,
             seed: self.seed,
         };
         chaos.validate().map_err(invalid)?;
@@ -1780,8 +1800,9 @@ impl ScenarioConfig {
                 SLO_LATENCY_KEYS,
             )?;
             #[cfg(feature = "chaos")]
-            if phase.chaos.as_ref().is_some_and(|chaos| chaos.is_active()) {
+            if let Some(chaos) = phase.chaos.as_ref().filter(|chaos| chaos.is_active()) {
                 validate_chaos_mode(
+                    chaos,
                     mode,
                     !phase.actions.is_empty(),
                     &format!("phase '{}': ", phase.name),
@@ -2368,6 +2389,12 @@ fn chaos_from_cli(cli: &Cli) -> Result<Option<crate::chaos::ChaosConfig>> {
         .map(crate::chaos::parse_delay)
         .transpose()?
         .unwrap_or_default();
+    let (read_pause, read_jitter) = cli
+        .chaos_read_pause
+        .as_deref()
+        .map(crate::chaos::parse_delay)
+        .transpose()?
+        .unwrap_or_default();
     let chaos = crate::chaos::ChaosConfig {
         delay,
         jitter,
@@ -2375,6 +2402,8 @@ fn chaos_from_cli(cli: &Cli) -> Result<Option<crate::chaos::ChaosConfig>> {
         corrupt_percent: cli.chaos_corrupt.unwrap_or(0.0),
         close_percent: cli.chaos_close.unwrap_or(0.0),
         close_mode: cli.chaos_close_mode,
+        read_pause,
+        read_jitter,
         seed: cli.chaos_seed,
     };
     Ok(Some(chaos))
@@ -4121,6 +4150,22 @@ phases:
             "{err}"
         );
         assert!(listen.validate_slo_mode(TestMode::Stream, None).is_ok());
+
+        // A read pause alone is a slow consumer, which listen mode can be.
+        let slow =
+            ScenarioConfig::from_yaml(&yaml("    chaos:\n      read_pause: \"40ms:10ms\"\n"))
+                .unwrap();
+        assert!(slow.validate_slo_mode(TestMode::Listen, None).is_ok());
+        let chaos = slow.compile(None).unwrap()[0].chaos.clone().unwrap();
+        assert_eq!(
+            (chaos.read_pause, chaos.read_jitter),
+            (Duration::from_millis(40), Duration::from_millis(10))
+        );
+        let cli = match_config(&["--mode", "listen", "--chaos-read-pause", "25ms"]).unwrap();
+        assert_eq!(
+            cli.chaos().map(|chaos| chaos.read_pause),
+            Some(Duration::from_millis(25))
+        );
     }
 
     #[test]

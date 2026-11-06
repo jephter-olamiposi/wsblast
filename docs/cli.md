@@ -63,6 +63,7 @@ subcommand.
 | Option | Default | Description |
 | :--- | :--- | :--- |
 | `--chaos-delay`, `--chaos-drop`, `--chaos-corrupt`, `--chaos-close` | | Client-side fault injection; `--chaos-close-mode abrupt\|graceful`, `--chaos-seed N` for reproducible runs |
+| `--chaos-read-pause DURATION[:JITTER]` | | A slow consumer: pause after every received data frame before reading the next. Works in every mode |
 
 ## Capture and live export
 

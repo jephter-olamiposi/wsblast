@@ -93,6 +93,7 @@ html\:"A self-contained HTML page with charts of the time series, to open in a b
 '--chaos-close=[Chaos\: close the connection after this percentage (0 to 100) of replies, or of sends in stream mode; the worker reconnects, and closes are not errors]:PERCENT:_default' \
 '--chaos-close-mode=[How --chaos-close ends a connection]:MODE:((abrupt\:"Closes the TCP connection without a WebSocket Close frame"
 graceful\:"Sends a Close frame with code 1001 (going away), then closes the TCP connection without waiting for the server'\''s Close frame"))' \
+'--chaos-read-pause=[Chaos\: a slow consumer; after reading each data frame, pause DURATION, plus up to JITTER drawn uniformly, before reading the next (e.g. '\''50ms'\'' or '\''50ms\:20ms'\''); works in every mode]:DURATION[:JITTER]:_default' \
 '--chaos-seed=[Chaos\: seed of every chaos decision, to repeat a run'\''s faults \[default\: picked per run and shown in the report\]]:N:_default' \
 '-o+[Write the report to FILE in the --format format; the terminal then shows the text summary]:FILE:_files' \
 '--output=[Write the report to FILE in the --format format; the terminal then shows the text summary]:FILE:_files' \

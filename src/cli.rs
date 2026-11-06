@@ -388,6 +388,11 @@ pub(crate) struct Cli {
     )]
     pub chaos_close_mode: crate::chaos::ChaosCloseMode,
 
+    /// Chaos: a slow consumer; after reading each data frame, pause DURATION, plus up to JITTER drawn uniformly, before reading the next (e.g. '50ms' or '50ms:20ms'); works in every mode
+    #[cfg(feature = "chaos")]
+    #[arg(long = "chaos-read-pause", value_name = "DURATION[:JITTER]")]
+    pub chaos_read_pause: Option<String>,
+
     /// Chaos: seed of every chaos decision, to repeat a run's faults [default: picked per run and shown in the report]
     #[cfg(feature = "chaos")]
     #[arg(long = "chaos-seed", value_name = "N")]

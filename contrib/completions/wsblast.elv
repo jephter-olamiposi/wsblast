@@ -81,6 +81,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --chaos-corrupt 'Chaos: change one byte of the payload of this percentage (0 to 100) of data sends; echo replies are still matched and timed'
             cand --chaos-close 'Chaos: close the connection after this percentage (0 to 100) of replies, or of sends in stream mode; the worker reconnects, and closes are not errors'
             cand --chaos-close-mode 'How --chaos-close ends a connection'
+            cand --chaos-read-pause 'Chaos: a slow consumer; after reading each data frame, pause DURATION, plus up to JITTER drawn uniformly, before reading the next (e.g. ''50ms'' or ''50ms:20ms''); works in every mode'
             cand --chaos-seed 'Chaos: seed of every chaos decision, to repeat a run''s faults [default: picked per run and shown in the report]'
             cand -o 'Write the report to FILE in the --format format; the terminal then shows the text summary'
             cand --output 'Write the report to FILE in the --format format; the terminal then shows the text summary'

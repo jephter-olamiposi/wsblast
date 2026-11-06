@@ -279,6 +279,12 @@ pub(crate) struct WireChaos {
     pub(crate) close_percent: f64,
     /// The `--chaos-close-mode` value, as spelled on the command line.
     pub(crate) close_mode: String,
+    /// The `--chaos-read-pause` pause and jitter; zero from a coordinator
+    /// that predates them.
+    #[serde(default)]
+    pub(crate) read_pause: Duration,
+    #[serde(default)]
+    pub(crate) read_jitter: Duration,
     /// This agent's seed, derived from the run's seed and the agent's
     /// position, so every agent draws decisions of its own.
     pub(crate) seed: u64,
@@ -299,6 +305,8 @@ impl WireChaos {
                 .to_possible_value()
                 .map(|value| value.get_name().to_string())
                 .unwrap_or_default(),
+            read_pause: chaos.read_pause,
+            read_jitter: chaos.read_jitter,
             seed,
         }
     }
@@ -314,9 +322,10 @@ impl WireChaos {
             .with_drop(self.drop_percent)
             .with_corrupt(self.corrupt_percent)
             .with_close(self.close_percent, close_mode)
+            .with_read_pause(self.read_pause, self.read_jitter)
             .with_seed(self.seed);
         chaos.validate()?;
-        crate::config::validate_chaos_mode(mode, scripted, "")?;
+        crate::config::validate_chaos_mode(&chaos, mode, scripted, "")?;
         Ok(chaos)
     }
 }
@@ -1486,6 +1495,7 @@ phases:
             .with_drop(10.0)
             .with_corrupt(5.5)
             .with_close(2.0, ChaosCloseMode::Graceful)
+            .with_read_pause(Duration::from_millis(7), Duration::from_millis(1))
             .with_seed(99);
         let whole = config(
             LoadTestConfig::builder("ws://127.0.0.1:9/")
@@ -1531,6 +1541,7 @@ phases:
             dropped: 2,
             corrupted: 3,
             closes: 4,
+            read_pauses: 6,
         });
         let json = serde_json::to_string(&WireTotals::from(&totals)).unwrap();
         let back: WireTotals = serde_json::from_str(&json).unwrap();

@@ -3292,3 +3292,85 @@ async fn output_file_gets_the_format_and_stdout_the_text_summary() {
     let _ = std::fs::remove_dir_all(&dir);
     cancel_server.cancel();
 }
+
+/// A slow consumer in stream mode: reads pause after every frame while the
+/// paced sends go on, so far fewer frames are read than sent, and nothing
+/// is an error.
+#[cfg(feature = "chaos")]
+#[tokio::test]
+async fn test_chaos_read_pause_slows_reads_while_stream_sends_continue() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+    let metrics = run(echo_test_config(&target_url)
+        .mode(wsblast::TestMode::Stream)
+        .connections(2)
+        .rate_per_connection(200)
+        .duration(Duration::from_millis(1500))
+        .chaos(
+            wsblast::ChaosConfig::new()
+                .with_read_pause(Duration::from_millis(50), Duration::ZERO)
+                .with_seed(5),
+        ))
+    .await;
+
+    let chaos = chaos_of(&metrics);
+    assert_no_errors(&metrics);
+    assert!(metrics.total_messages_sent > 400, "{metrics:?}");
+    assert!(
+        metrics.total_messages_recv * 4 < metrics.total_messages_sent,
+        "{metrics:?}"
+    );
+    // One pause per frame read.
+    assert_eq!(
+        chaos.read_pauses, metrics.total_messages_recv,
+        "{metrics:?}"
+    );
+    assert_eq!((chaos.delayed, chaos.dropped, chaos.closes), (0, 0, 0));
+    cancel_server.cancel();
+}
+
+/// In echo mode the pause comes after the reply is recorded and moves the
+/// paced schedule, so neither RTT nor response time includes it.
+#[cfg(feature = "chaos")]
+#[tokio::test]
+async fn test_chaos_read_pause_in_paced_echo_is_never_latency() {
+    let (target_url, cancel_server) = spawn_echo_server().await;
+    let metrics = run(echo_test_config(&target_url)
+        .rate_per_connection(50)
+        .duration(Duration::from_millis(1500))
+        .chaos(
+            wsblast::ChaosConfig::new()
+                .with_read_pause(Duration::from_millis(40), Duration::ZERO)
+                .with_seed(6),
+        ))
+    .await;
+
+    assert_no_errors(&metrics);
+    let chaos = chaos_of(&metrics);
+    assert!(chaos.read_pauses > 10, "{metrics:?}");
+    // A 40 ms pause per request: well under the 50/s the schedule asks for,
+    // without the requests piling up as response time.
+    assert!(metrics.throughput_msg_per_sec < 30.0, "{metrics:?}");
+    assert!(metrics.response_time.p99_us < 30_000, "{metrics:?}");
+    assert!(metrics.message_rtt.p99_us < 30_000, "{metrics:?}");
+    cancel_server.cancel();
+}
+
+/// A read pause needs only received frames, so listen mode accepts it while
+/// still rejecting the send-side knobs.
+#[cfg(feature = "chaos")]
+#[test]
+fn test_chaos_read_pause_is_accepted_in_listen_mode() {
+    let base = || LoadTestConfig::builder("ws://127.0.0.1:9001").mode(wsblast::TestMode::Listen);
+    let pause =
+        wsblast::ChaosConfig::new().with_read_pause(Duration::from_millis(5), Duration::ZERO);
+    assert!(base().chaos(pause.clone()).build().is_ok());
+    let err = base()
+        .chaos(pause.with_drop(1.0))
+        .build()
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("--chaos-read-pause works in every mode"),
+        "{err}"
+    );
+}
