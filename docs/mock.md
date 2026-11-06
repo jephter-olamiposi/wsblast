@@ -1,6 +1,6 @@
 # Mock server
 
-`wsblast mock` runs a `ws://` test target on your machine, or a `wss://` one with a certificate. By default it echoes every text and binary frame back. Flags add the failure modes a real server has, so you can see what each one does to a wsblast report, and test a CI gate against a server whose behaviour you know in advance. With `--replay` it plays back the traffic of a real server recorded with `--capture`.
+`wsblast mock` runs a `ws://` test target on your machine, or a `wss://` one with a certificate. By default it echoes every text and binary frame back. Flags add the failure modes a real server has, so you can see what each one does to a wsblast report, and test a CI gate against a server whose behaviour you know in advance. With `--replay` it plays back the traffic of a real server recorded with `--capture`, and with `--rules` it answers like a real API: matched requests get templated replies, their own delay or a close.
 
 It is part of the default build (Cargo feature `mock`). The same server is available to Rust tests as [`wsblast::mock`](https://docs.rs/wsblast/latest/wsblast/mock/index.html).
 
@@ -14,6 +14,7 @@ Contents:
 6. [Testing a CI gate against the mock](#6-testing-a-ci-gate-against-the-mock)
 7. [Using the mock from Rust tests](#7-using-the-mock-from-rust-tests)
 8. [Serving wss:// (TLS)](#8-serving-wss-tls)
+9. [Scripted replies (`--rules`)](#9-scripted-replies---rules)
 
 ## 1. Flags
 
@@ -27,6 +28,7 @@ Contents:
 | `--stall-every DURATION` | off | Stop replying on every connection at each multiple of this period. Needs `--stall-for`. |
 | `--stall-for DURATION` | off | How long each stall lasts. Must be shorter than `--stall-every`. |
 | `--replay FILE` | off | Instead of echoing, send each connection the frames a `--capture` file recorded as received. |
+| `--rules FILE` | off | Answer frames as a YAML rules file says: match by text or JSON field, reply from templates, delay or close. Cannot be combined with `--replay`. See [section 9](#9-scripted-replies---rules). |
 | `--tls-cert PEM` | off | Serve `wss://` with this PEM certificate chain. Needs `--tls-key`. See [section 8](#8-serving-wss-tls). |
 | `--tls-key PEM` | off | PEM private key (PKCS#8, PKCS#1 or SEC1) for `--tls-cert`. |
 
@@ -226,3 +228,72 @@ SSL_CERT_FILE=mock-cert.pem wsblast wss://localhost:9001 -c 10 -d 10s
 
 Connect with a name the certificate lists. The mock's startup line shows the address it bound (`wss://127.0.0.1:9001`). Both commands above list `127.0.0.1` and `::1` as well as `localhost`; a certificate issued only for `localhost` fails verification at an IP address, which wsblast reports as `tls_handshake` errors. With mkcert's CA installed, `SSL_CERT_FILE` is not needed.
 
+## 9. Scripted replies (`--rules`)
+
+A rules file makes the mock answer like the API you are testing instead of echoing: a subscription gets an acknowledgement carrying its id, a `ping` gets a `pong`, and a connection closes after its hundredth message. There is no scripting language: a rule matches a frame, and says what to send back and when.
+
+```yaml
+version: "1.0"
+rules:
+  # A JSON request whose "type" is "subscribe" gets an ack with its id,
+  # then a data frame, both 20 ms later.
+  - match: { json: /type, equals: subscribe }
+    reply:
+      - '{"type":"ack","id":{{json:/id}}}'
+      - '{"type":"data","seq":{{seq}}}'
+    delay: 20ms
+  # The text frame "ping" gets "pong".
+  - match: { text: ping }
+    reply: pong
+  # From the 100th frame on, the connection closes with code 4000.
+  - after: 100
+    close: { code: 4000, reason: done }
+# What a frame no rule matches gets: echo (the default) or ignore.
+unmatched: echo
+```
+
+```bash
+wsblast mock --rules rules.yaml
+```
+
+**Matching.** Rules are tried in order and the first one that applies decides; later rules are not looked at. A rule applies when:
+
+| Key | Meaning |
+| :--- | :--- |
+| `match: { text: T }` | The frame is a text frame equal to `T`. |
+| `match: { json: /pointer }` | The frame is JSON (text, or UTF-8 binary) with a value at the [RFC 6901](https://www.rfc-editor.org/rfc/rfc6901) pointer. |
+| `match: { json: /pointer, equals: V }` | The same, and the value equals `V`, compared as JSON: `equals: 7` matches the number 7, `equals: "7"` the string. |
+| no `match` | Every text and binary frame. |
+| `after: N` | Only from the connection's `N`-th received frame on, counting from 1. Combines with `match`. |
+
+**What a rule does.** A rule needs `reply`, `close` or both:
+
+| Key | Meaning |
+| :--- | :--- |
+| `reply` | One template, or a list sent in order as text frames. `reply: []` sends nothing, to swallow a frame. |
+| `delay` | Hold this rule's replies for this long instead of `--delay`. `--jitter` still adds to it. |
+| `close` | After the replies, close the connection: `close: 4000`, or `close: { code: 4000, reason: done }`. Codes 1000-1003, 1007-1014 and 3000-4999 can be sent; the reason is at most 123 bytes. |
+
+**Templates.** A reply is literal text with these placeholders:
+
+| Placeholder | Becomes |
+| :--- | :--- |
+| `{{json:/pointer}}` | The request's JSON value at the pointer, written as JSON: a string keeps its quotes, so `{"id":{{json:/id}}}` stays valid JSON for numeric and string ids. `null` when the request has no such value or is not JSON. |
+| `{{seq}}` | The request's number on its connection, from 1. |
+| `{{request}}` | The request itself, as text. |
+
+Any other `{{...}}` is an error when the file is loaded, so a typo cannot silently send a literal placeholder.
+
+**Timing.** All replies of one rule are due at the same time: the rule's `delay` (or `--delay`) plus jitter after the request arrived. As with echoing, replies keep the order of their requests, stalls hold them back, `--close-after` counts every reply frame, and `--reject-ratio` still applies to upgrades.
+
+**Validation.** The file is checked when the mock starts. A missing `version: "1.0"`, an unknown key, a pointer that does not start with `/`, `after: 0`, a close code that cannot be sent or an unknown placeholder is an error that names the rule (`rule 2: close code 1005 cannot be sent`), and the mock exits with code 1 before listening.
+
+**Correlating replies in a load test.** The client side of the first example is `--match json:/id` with a payload that carries `{{seq}}`, so every request is timed to the reply that echoes its id, and frames the server pushes in between (the data frames above) are skipped and counted as unsolicited:
+
+```bash
+wsblast mock --rules rules.yaml &
+wsblast ws://127.0.0.1:9001 -c 50 -d 30s -r 10 \
+  -p '{"type":"subscribe","id":{{seq}}}' --match json:/id
+```
+
+From Rust, [`MockConfigBuilder::rules`](https://docs.rs/wsblast/latest/wsblast/mock/struct.MockConfigBuilder.html#method.rules) loads the same file.

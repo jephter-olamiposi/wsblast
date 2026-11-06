@@ -117,6 +117,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --stall-every 'Stop replying on every connection at each multiple of this period (needs --stall-for)'
             cand --stall-for 'How long each stall lasts; shorter than --stall-every'
             cand --replay 'Instead of echoing, send each connection the frames a --capture file recorded as received, with their timing'
+            cand --rules 'Answer frames as a YAML rules file says: match by text or JSON field, reply from templates, delay or close'
             cand --tls-cert 'PEM certificate chain to serve wss:// instead of ws:// (clients must trust it, e.g. with SSL_CERT_FILE)'
             cand --tls-key 'PEM private key for --tls-cert'
             cand -h 'Print help'

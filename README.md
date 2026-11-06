@@ -45,7 +45,8 @@ whether the server met its SLOs. At a high level, it provides:
   shows up where it happened instead of in the run's averages.
 * **Distributed load**: `wsblast agent` on several machines generates one run's
   load, with histograms merged exactly on the coordinator.
-* **Test tooling**: a mock server that can misbehave on purpose,
+* **Test tooling**: a mock server that can misbehave on purpose or answer
+  from a rules file,
   multi-phase YAML scenarios, client-side fault injection, frame capture,
   Prometheus and OpenTelemetry export, HTML reports and a live terminal
   dashboard.
@@ -181,7 +182,7 @@ docker build -t wsblast https://github.com/jephter-olamiposi/wsblast.git
 | `graphql-ws` | yes | GraphQL subscriptions over `graphql-transport-ws` and legacy `graphql-ws` |
 | `prometheus` | yes | A live `/metrics` endpoint for the duration of a run |
 | `capture` | yes | A JSON Lines record of every frame and connection event |
-| `mock` | yes | `wsblast mock`, a local test server with configurable faults |
+| `mock` | yes | `wsblast mock`, a local test server with configurable faults and scripted replies |
 | `distributed` | yes | `wsblast agent` and `--agents` for load from several machines |
 | `chaos` | yes | Client-side fault injection that does not skew the measurements |
 | `otel` | no | Export to an OpenTelemetry collector over OTLP/HTTP |
@@ -208,7 +209,7 @@ enable only what they need.
 * [Live export](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/export.md):
   Prometheus and OpenTelemetry.
 * [Mock server](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/mock.md):
-  testing a gate against known failures.
+  testing a gate against known failures, and scripted replies.
 
 ## Getting Help
 

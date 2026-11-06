@@ -584,6 +584,10 @@ pub(crate) struct MockArgs {
     #[arg(long = "replay", value_name = "FILE")]
     pub replay: Option<PathBuf>,
 
+    /// Answer frames as a YAML rules file says: match by text or JSON field, reply from templates, delay or close
+    #[arg(long = "rules", value_name = "FILE", conflicts_with = "replay")]
+    pub rules: Option<PathBuf>,
+
     /// PEM certificate chain to serve wss:// instead of ws:// (clients must trust it, e.g. with SSL_CERT_FILE)
     #[arg(long = "tls-cert", value_name = "PEM", requires = "tls_key")]
     pub tls_cert: Option<PathBuf>,

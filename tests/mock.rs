@@ -313,12 +313,14 @@ async fn cancel_closes_open_connections() {
 
 #[tokio::test]
 async fn invalid_mock_flags_exit_with_one() {
-    let cases: [&[&str]; 5] = [
+    let cases: [&[&str]; 7] = [
         &["--reject-ratio", "1.5"],
         &["--close-after", "0"],
         &["--stall-every", "1s"],
         &["--stall-every", "100ms", "--stall-for", "100ms"],
         &["--delay", "soon"],
+        &["--rules", "does-not-exist.yaml"],
+        &["--rules", "a.yaml", "--replay", "b.jsonl"],
     ];
     for args in cases {
         let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_wsblast"))
@@ -572,4 +574,142 @@ async fn mock_tls_flags_need_each_other_and_valid_files() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains(expected), "{args:?}: {stderr}");
     }
+}
+
+/// Writes a rules file under the test's target directory.
+fn rules_file(name: &str, text: &str) -> std::path::PathBuf {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("mock-rules");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}-{}.yaml", std::process::id()));
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn rules_reply_by_json_field_and_text_echo_the_rest_and_close() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let rules = rules_file(
+        "contract",
+        r#"
+version: "1.0"
+rules:
+  - match: { json: /type, equals: subscribe }
+    reply: ['{"type":"ack","id":{{json:/id}}}', '{"type":"data","n":{{seq}}}']
+  - match: { text: ping }
+    reply: pong
+  - after: 4
+    close: { code: 4000, reason: done }
+"#,
+    );
+    let mock = Mock::start(MockConfig::builder().rules(&rules)).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(mock.url.as_str())
+        .await
+        .unwrap();
+    ws.send(Message::text(r#"{"type":"subscribe","id":"s1"}"#))
+        .await
+        .unwrap();
+    let mut texts = Vec::new();
+    for _ in 0..2 {
+        texts.push(recv_text(&mut ws).await);
+    }
+    assert_eq!(
+        texts,
+        [r#"{"type":"ack","id":"s1"}"#, r#"{"type":"data","n":1}"#]
+    );
+
+    ws.send(Message::text("ping")).await.unwrap();
+    assert_eq!(recv_text(&mut ws).await, "pong");
+    ws.send(Message::text("anything")).await.unwrap();
+    assert_eq!(
+        recv_text(&mut ws).await,
+        "anything",
+        "unmatched frames are echoed"
+    );
+
+    // The fourth frame reaches the closing rule.
+    ws.send(Message::text("bye")).await.unwrap();
+    let close = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("a close in time");
+    match close {
+        Some(Ok(Message::Close(Some(frame)))) => {
+            assert_eq!(u16::from(frame.code), 4000);
+            assert_eq!(frame.reason.as_str(), "done");
+        }
+        other => panic!("expected a close frame, got {other:?}"),
+    }
+    drop(ws);
+    let stats = mock.stop().await;
+    assert_eq!(stats.frames_received, 4);
+    assert_eq!(stats.frames_sent, 4);
+}
+
+async fn recv_text<S>(ws: &mut tokio_tungstenite::WebSocketStream<S>) -> String
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use futures_util::StreamExt;
+    match tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("a reply in time")
+    {
+        Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => text.to_string(),
+        other => panic!("expected a text frame, got {other:?}"),
+    }
+}
+
+/// The use case rules exist for: a server that pushes other frames between
+/// replies, answered by id. With `--match json:/id` wsblast skips the
+/// pushes and times each request to the reply that carries its id.
+#[tokio::test]
+async fn load_test_matches_rule_replies_by_id_and_skips_pushed_frames() {
+    let rules = rules_file(
+        "correlated",
+        r#"
+version: "1.0"
+rules:
+  - match: { json: /id }
+    reply: ['{"type":"tick"}', '{"type":"reply","id":{{json:/id}}}']
+    delay: 5ms
+"#,
+    );
+    let mock = Mock::start(MockConfig::builder().rules(&rules)).await;
+    let metrics = run(load(&mock.url)
+        .payload_text(r#"{"id":{{seq}}}"#)
+        .reply_match(wsblast::ReplyMatch::JsonPointer("/id".to_string())))
+    .await;
+    mock.stop().await;
+
+    assert!(metrics.total_messages_sent > 10, "{metrics:?}");
+    assert_eq!(metrics.error_rate, 0.0, "{metrics:?}");
+    // Every request was answered by its own reply; each tick was skipped.
+    assert!(
+        metrics.total_unsolicited_frames >= metrics.message_rtt.count - 2,
+        "{metrics:?}"
+    );
+    assert!(metrics.message_rtt.min_us >= 5_000, "{metrics:?}");
+}
+
+#[tokio::test]
+async fn rules_and_replay_cannot_be_combined_and_bad_files_name_the_rule() {
+    let good = rules_file("ok", "version: \"1.0\"\nrules: [{reply: x}]\n");
+    let err = MockConfig::builder()
+        .rules(&good)
+        .replay(&good)
+        .build()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("cannot be combined"), "{err}");
+    let bad = rules_file(
+        "bad",
+        "version: \"1.0\"\nrules: [{reply: x}, {close: 1005}]\n",
+    );
+    let err = MockConfig::builder()
+        .rules(&bad)
+        .build()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("rule 2") && err.contains("1005"), "{err}");
 }

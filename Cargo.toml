@@ -105,7 +105,7 @@ capture = []
 # `wsblast mock`: a WebSocket test server with delays, stalls, rejections,
 # closes and capture replay, over ws:// or wss://, also usable in-process as
 # `wsblast::mock`. TLS uses tokio-rustls, already in the tree.
-mock = ["dep:tokio-rustls"]
+mock = ["dep:tokio-rustls", "dep:serde_norway"]
 # `--chaos-*`: client-side fault injection (delayed, dropped and corrupted
 # sends, client-side closes), also usable in-process as `wsblast::ChaosConfig`.
 chaos = []

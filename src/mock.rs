@@ -10,7 +10,10 @@
 //! - answering a fraction of upgrade requests with HTTP 503,
 //! - periodic server-wide stalls, during which no connection gets a reply,
 //! - replaying the frames a capture file (`wsblast --capture`) recorded as
-//!   received, with their original timing, instead of echoing.
+//!   received, with their original timing, instead of echoing,
+//! - scripted replies from a rules file ([`MockConfigBuilder::rules`]):
+//!   frames matched by text or by a JSON field get templated replies, an
+//!   own delay or a close, instead of an echo.
 //!
 //! Run it in-process to test a load test or a CI gate against known
 //! behaviour:
@@ -48,6 +51,7 @@
 use crate::error::{ConfigError, Result, WsBlastError};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use rules::{Decision, Rules};
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -63,6 +67,8 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::frame::{CloseFrame, Utf8Bytes};
 use tokio_util::sync::CancellationToken;
+
+mod rules;
 
 /// Address `wsblast mock` listens on by default.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:9001";
@@ -87,6 +93,7 @@ pub struct MockConfig {
     reject_ratio: f64,
     stall: Option<Stall>,
     replay: Option<Arc<ReplayScript>>,
+    rules: Option<Arc<Rules>>,
     seed: Option<u64>,
     tls: Option<Arc<rustls::ServerConfig>>,
 }
@@ -120,14 +127,23 @@ impl MockConfig {
     /// prints it at startup.
     pub fn describe(&self) -> String {
         let mut parts = Vec::new();
-        match &self.replay {
-            Some(script) => parts.push(format!(
+        match (&self.replay, &self.rules) {
+            (Some(script), _) => parts.push(format!(
                 "replay {} frames of {} recorded connections from {}",
                 script.frame_count(),
                 script.workers.len(),
                 script.source
             )),
-            None => parts.push("echo".to_string()),
+            (None, Some(rules)) => parts.push(format!(
+                "{} rules from {}, unmatched frames {}",
+                rules.len(),
+                rules.source,
+                match rules.unmatched {
+                    rules::Unmatched::Echo => "echoed",
+                    rules::Unmatched::Ignore => "ignored",
+                }
+            )),
+            (None, None) => parts.push("echo".to_string()),
         }
         if !self.delay.is_zero() {
             parts.push(format!("delay {:?}", self.delay));
@@ -163,6 +179,7 @@ pub struct MockConfigBuilder {
     stall_every: Option<Duration>,
     stall_for: Option<Duration>,
     replay: Option<PathBuf>,
+    rules: Option<PathBuf>,
     seed: Option<u64>,
     tls: Option<(PathBuf, PathBuf)>,
 }
@@ -178,6 +195,7 @@ impl Default for MockConfigBuilder {
             stall_every: None,
             stall_for: None,
             replay: None,
+            rules: None,
             seed: None,
             tls: None,
         }
@@ -235,6 +253,17 @@ impl MockConfigBuilder {
         self
     }
 
+    /// Answers frames as the rules file at `path` says, instead of echoing:
+    /// the first rule whose match fits a frame sends its templated replies,
+    /// after its own delay if it sets one, and closes the connection if it
+    /// says so. The file is read by [`build`](Self::build); its format is
+    /// described in `docs/mock.md`. Cannot be combined with
+    /// [`replay`](Self::replay).
+    pub fn rules(mut self, path: impl Into<PathBuf>) -> Self {
+        self.rules = Some(path.into());
+        self
+    }
+
     /// Seeds the generator behind jitter and rejections, for repeatable
     /// runs. Without a seed every server draws a different sequence.
     pub fn seed(mut self, seed: u64) -> Self {
@@ -259,8 +288,9 @@ impl MockConfigBuilder {
     /// Returns [`ConfigError::InvalidOption`] for an empty listen address, a
     /// reject ratio outside 0.0 to 1.0, a close-after of 0, a stall that is
     /// zero or not shorter than its period, a replay file that cannot be
-    /// read, is not a capture file or holds no received data frames, or a
-    /// certificate or key that is not valid PEM or does not match, and
+    /// read, is not a capture file or holds no received data frames, a rules
+    /// file that cannot be read or is invalid, rules combined with replay, or
+    /// a certificate or key that is not valid PEM or does not match, and
     /// [`ConfigError::PayloadFile`] for a certificate or key file that
     /// cannot be read.
     pub fn build(self) -> Result<MockConfig> {
@@ -297,10 +327,21 @@ impl MockConfigBuilder {
                 ));
             }
         };
+        if self.replay.is_some() && self.rules.is_some() {
+            return Err(invalid(
+                "--rules and --replay cannot be combined: replay sends recorded frames, rules answer received ones",
+            ));
+        }
         let replay = self
             .replay
             .as_deref()
             .map(ReplayScript::load)
+            .transpose()?
+            .map(Arc::new);
+        let rules = self
+            .rules
+            .as_deref()
+            .map(Rules::load)
             .transpose()?
             .map(Arc::new);
         let tls = self
@@ -316,6 +357,7 @@ impl MockConfigBuilder {
             reject_ratio: self.reject_ratio,
             stall,
             replay,
+            rules,
             seed: self.seed,
             tls,
         })
@@ -519,12 +561,17 @@ impl Shared {
 
     /// Delay plus jitter for one reply.
     fn reply_delay(&self, rng: &mut XorShift64) -> Duration {
+        self.reply_delay_from(self.config.delay, rng)
+    }
+
+    /// `base` plus jitter for one reply: the server's delay, or a rule's.
+    fn reply_delay_from(&self, base: Duration, rng: &mut XorShift64) -> Duration {
         let config = &self.config;
         if config.jitter.is_zero() {
-            return config.delay;
+            return base;
         }
         let jitter_ns = u64::try_from(config.jitter.as_nanos()).unwrap_or(u64::MAX);
-        config.delay + Duration::from_nanos(rng.at_most(jitter_ns))
+        base + Duration::from_nanos(rng.at_most(jitter_ns))
     }
 }
 
@@ -611,10 +658,18 @@ async fn serve_connection<S>(
 type WsSink<S> = SplitSink<WebSocketStream<S>, Message>;
 type WsStream<S> = SplitStream<WebSocketStream<S>>;
 
+/// An entry of a session's reply queue.
+enum Queued {
+    Frame(Message),
+    /// Close the connection with this code and reason, as a rule says.
+    Close(u16, String),
+}
+
 /// What a session sends next.
 enum Outgoing<'a> {
-    /// Received frames waiting for their reply time, in arrival order.
-    Echo(VecDeque<(Instant, Message)>),
+    /// Replies waiting for their send time, in the order their frames
+    /// arrived: echoes, or what the rules decided.
+    Echo(VecDeque<(Instant, Queued)>),
     /// A recorded connection's frames, sent at `start + offset + delay`.
     Replay {
         frames: &'a [ReplayFrame],
@@ -641,16 +696,16 @@ impl Outgoing<'_> {
         }
     }
 
-    fn pop(&mut self) -> Option<Message> {
+    fn pop(&mut self) -> Option<Queued> {
         match self {
-            Self::Echo(queue) => queue.pop_front().map(|(_, msg)| msg),
+            Self::Echo(queue) => queue.pop_front().map(|(_, item)| item),
             Self::Replay {
                 frames, next, due, ..
             } => {
                 let frame = frames.get(*next)?;
                 *next += 1;
                 *due = None;
-                Some(frame.message.clone())
+                Some(Queued::Frame(frame.message.clone()))
             }
         }
     }
@@ -676,13 +731,16 @@ async fn run_session<S>(
         None => Outgoing::Echo(VecDeque::new()),
     };
     let mut replies = 0u64;
+    // Data frames received on this connection, for rules' `after` and
+    // `{{seq}}`.
+    let mut received = 0u64;
 
     loop {
         let due = outgoing.next_due(shared, &mut rng);
         tokio::select! {
             biased;
             () = cancel.cancelled() => {
-                close(&mut sink, CloseCode::Away, "server shutting down").await;
+                close(&mut sink, CloseCode::Away, "server shutting down".to_string()).await;
                 return;
             }
             () = sleep_until(due) => {
@@ -690,19 +748,27 @@ async fn run_session<S>(
                     tokio::select! {
                         () = tokio::time::sleep_until(release.into()) => {}
                         () = cancel.cancelled() => {
-                            close(&mut sink, CloseCode::Away, "server shutting down").await;
+                            close(&mut sink, CloseCode::Away, "server shutting down".to_string()).await;
                             return;
                         }
                     }
                 }
-                let Some(msg) = outgoing.pop() else { continue };
+                let msg = match outgoing.pop() {
+                    None => continue,
+                    Some(Queued::Frame(msg)) => msg,
+                    Some(Queued::Close(code, reason)) => {
+                        close(&mut sink, CloseCode::from(code), reason).await;
+                        drain(&mut stream).await;
+                        return;
+                    }
+                };
                 if sink.send(msg).await.is_err() {
                     return;
                 }
                 shared.counters.sent.fetch_add(1, Ordering::Relaxed);
                 replies += 1;
                 if shared.config.close_after == Some(replies) {
-                    close(&mut sink, CloseCode::Normal, "close-after").await;
+                    close(&mut sink, CloseCode::Normal, "close-after".to_string()).await;
                     drain(&mut stream).await;
                     return;
                 }
@@ -710,8 +776,9 @@ async fn run_session<S>(
             msg = stream.next() => match msg {
                 Some(Ok(msg @ (Message::Text(_) | Message::Binary(_)))) => {
                     shared.counters.received.fetch_add(1, Ordering::Relaxed);
+                    received += 1;
                     if let Outgoing::Echo(queue) = &mut outgoing {
-                        queue.push_back((Instant::now() + shared.reply_delay(&mut rng), msg));
+                        queue_replies(queue, msg, received, shared, &mut rng);
                     }
                 }
                 Some(Ok(Message::Close(_))) => {
@@ -721,6 +788,40 @@ async fn run_session<S>(
                 }
                 Some(Ok(_)) => {}
                 Some(Err(_)) | None => return,
+            }
+        }
+    }
+}
+
+/// Queues what the server sends for `msg`, the `seq`-th data frame of the
+/// connection: an echo, or what the rules decide. Every frame of one
+/// decision is due at the same time.
+fn queue_replies(
+    queue: &mut VecDeque<(Instant, Queued)>,
+    msg: Message,
+    seq: u64,
+    shared: &Shared,
+    rng: &mut XorShift64,
+) {
+    let decision = match &shared.config.rules {
+        Some(rules) => rules.decide(&msg, seq),
+        None => Decision::Echo,
+    };
+    match decision {
+        Decision::Echo => {
+            queue.push_back((Instant::now() + shared.reply_delay(rng), Queued::Frame(msg)));
+        }
+        Decision::Ignore => {}
+        Decision::Reply {
+            frames,
+            delay,
+            close,
+        } => {
+            let base = delay.unwrap_or(shared.config.delay);
+            let due = Instant::now() + shared.reply_delay_from(base, rng);
+            queue.extend(frames.into_iter().map(|f| (due, Queued::Frame(f))));
+            if let Some((code, reason)) = close {
+                queue.push_back((due, Queued::Close(code, reason)));
             }
         }
     }
@@ -736,11 +837,11 @@ async fn sleep_until(due: Option<Instant>) {
 async fn close<S: AsyncRead + AsyncWrite + Unpin>(
     sink: &mut WsSink<S>,
     code: CloseCode,
-    reason: &'static str,
+    reason: String,
 ) {
     let frame = CloseFrame {
         code,
-        reason: Utf8Bytes::from_static(reason),
+        reason: Utf8Bytes::from(reason),
     };
     let _ = tokio::time::timeout(CLOSE_GRACE, sink.send(Message::Close(Some(frame)))).await;
 }
@@ -950,6 +1051,9 @@ pub(crate) async fn run_command(args: &crate::cli::MockArgs) -> Result<()> {
     }
     if let Some(path) = &args.replay {
         builder = builder.replay(path);
+    }
+    if let Some(path) = &args.rules {
+        builder = builder.rules(path);
     }
     if let (Some(cert), Some(key)) = (&args.tls_cert, &args.tls_key) {
         builder = builder.tls(cert, key);

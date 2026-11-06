@@ -126,6 +126,7 @@ complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l reject-ratio -d
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l stall-every -d 'Stop replying on every connection at each multiple of this period (needs --stall-for)' -r
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l stall-for -d 'How long each stall lasts; shorter than --stall-every' -r
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l replay -d 'Instead of echoing, send each connection the frames a --capture file recorded as received, with their timing' -r -F
+complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l rules -d 'Answer frames as a YAML rules file says: match by text or JSON field, reply from templates, delay or close' -r -F
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l tls-cert -d 'PEM certificate chain to serve wss:// instead of ws:// (clients must trust it, e.g. with SSL_CERT_FILE)' -r -F
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l tls-key -d 'PEM private key for --tls-cert' -r -F
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -s h -l help -d 'Print help'

@@ -380,7 +380,7 @@ _wsblast() {
             return 0
             ;;
         wsblast__subcmd__mock)
-            opts="-h --listen --delay --jitter --close-after --reject-ratio --stall-every --stall-for --replay --tls-cert --tls-key --help"
+            opts="-h --listen --delay --jitter --close-after --reject-ratio --stall-every --stall-for --replay --rules --tls-cert --tls-key --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -415,6 +415,10 @@ _wsblast() {
                     return 0
                     ;;
                 --replay)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --rules)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

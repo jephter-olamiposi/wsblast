@@ -2062,13 +2062,21 @@ fn invalid_phase(phase: &str, message: &str) -> ConfigError {
 /// 1015, and reserves 1016-2999 for future protocol use.
 #[cfg(feature = "scenario")]
 pub(crate) fn validate_close_code(code: u16) -> Result<u16> {
-    match code {
-        1000..=1003 | 1007..=1014 | 3000..=4999 => Ok(code),
-        _ => Err(ConfigError::InvalidScenario(format!(
+    if is_sendable_close_code(code) {
+        Ok(code)
+    } else {
+        Err(ConfigError::InvalidScenario(format!(
             "close code {code} cannot be sent; use 1000-1003, 1007-1014 or 3000-4999"
         ))
-        .into()),
+        .into())
     }
+}
+
+/// Whether an endpoint may send close code `code`: 1000-1003 and 1007-1011
+/// from RFC 6455, 1012-1014 from the IANA registry, and 3000-4999.
+#[cfg(any(feature = "scenario", feature = "mock"))]
+pub(crate) fn is_sendable_close_code(code: u16) -> bool {
+    matches!(code, 1000..=1003 | 1007..=1014 | 3000..=4999)
 }
 
 #[cfg(feature = "graphql-ws")]

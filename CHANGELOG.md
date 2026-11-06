@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - With `-o FILE`, the report is written to the file in the `--format` format and the terminal shows the text summary. Before, the report was also printed to stdout in the file's format, so a JSON or HTML report filled the terminal or CI log. Without `-o`, the report is printed to stdout as before. `--compare` follows the same rule.
 
 ### Added
+- `wsblast mock --rules FILE` answers frames from a YAML rules file instead of echoing. A rule matches a text frame, or a JSON value at a pointer (optionally equal to a value), from the connection's N-th frame on (`after`), and replies with templated text frames (`{{json:/pointer}}`, `{{seq}}`, `{{request}}`), after its own delay, then optionally closes with a code and reason. The first matching rule wins; unmatched frames are echoed or ignored. Templates that copy the request's id pair with the client's `--match json:/path`, so a load test can time each request to its own reply while the mock pushes other frames. The library equivalent is `MockConfigBuilder::rules`. See docs/mock.md, section 9.
 - JSON reports record `rate_per_conn` (`--rate`) and `stages` (`--stages`), both optional in `schema/report-v1.json`, so `wsblast render` shows the rate and the load stages of a saved run as the live report does. Scenario reports leave out `rate_per_conn`, since each phase sets its own rate.
 
 ### Fixed
