@@ -9,6 +9,7 @@ use bytes::Bytes;
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use std::sync::Arc;
 
+use futures_util::future::BoxFuture;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_tungstenite::tungstenite::Error as TungsteniteError;
@@ -99,7 +100,10 @@ impl WorkerSession {
     /// followed by a fresh handshake after an exponential backoff, until the
     /// run is cancelled. Echo mode needs the fresh socket: a late reply on the
     /// old one would be attributed to the next request.
-    pub(crate) async fn run(mut self) -> WorkerMetrics {
+    ///
+    /// The session is boxed: an `async fn` taking `self` by value keeps two
+    /// copies of it in the task.
+    pub(crate) async fn run(mut self: Box<Self>) -> WorkerMetrics {
         let client_req = match self.build_handshake_request() {
             Ok(req) => req,
             Err(cat) => {
@@ -113,58 +117,28 @@ impl WorkerSession {
         let mut connected_before = false;
 
         loop {
-            #[cfg_attr(not(feature = "auth"), allow(unused_mut))]
-            let mut request = client_req.clone();
-            // A refreshed token is read per attempt, so reconnects present
-            // the latest one.
-            #[cfg(feature = "auth")]
-            if let Some(auth) = &self.config.live_auth {
-                auth.apply(request.headers_mut());
-            }
-            let handshake_start = Instant::now();
-            let connect_fut =
-                tokio::time::timeout(self.config.connect_timeout, self.target.connect(request));
-            let connect_result = tokio::select! {
-                biased;
-                _ = self.cancel_token.cancelled() => {
-                    // The run ended during this slot's first handshake, before
-                    // it could succeed or fail: report it apart from failures.
-                    if !connected_before && self.metrics.errors.is_empty() {
-                        self.metrics.interrupted = true;
-                    }
-                    break;
-                }
-                res = connect_fut => res,
-            };
-
-            match connect_result {
-                Ok(Ok(ws_stream)) => {
-                    if connected_before {
-                        self.metrics.record_reconnect(handshake_start.elapsed());
-                    } else {
-                        self.metrics.record_handshake(handshake_start.elapsed());
+            // The session starts outside the handshake's match, so nothing
+            // from the handshake stays in this task while the session runs:
+            // the socket has moved into the boxed session loop.
+            let end = {
+                let session = match self.handshake(&client_req, connected_before).await {
+                    Handshake::Open(ws_stream) => {
                         connected_before = true;
+                        backoff.reset();
+                        Some(self.session(ws_stream))
                     }
-                    backoff.reset();
-
-                    let end = self.run_session(ws_stream).await;
-                    self.metrics.record_connection_closed();
-                    if end == SessionEnd::Finished {
-                        break;
-                    }
+                    Handshake::Failed => None,
+                    Handshake::Stop => break,
+                };
+                match session {
+                    Some(session) => Some(session.await),
+                    None => None,
                 }
-                Ok(Err(ConnectError::Static(cat))) => {
-                    // Retrying cannot help, as with a bad handshake request.
-                    self.metrics.record_connection_failed(cat);
+            };
+            if let Some(end) = end {
+                self.metrics.record_connection_closed();
+                if end == SessionEnd::Finished {
                     break;
-                }
-                Ok(Err(ConnectError::Tungstenite(err))) => {
-                    self.metrics
-                        .record_connection_failed(categorize_tungstenite_error(&err));
-                }
-                Err(_) => {
-                    self.metrics
-                        .record_connection_failed(ErrorCategory::Timeout);
                 }
             }
 
@@ -181,44 +155,103 @@ impl WorkerSession {
         self.metrics
     }
 
-    /// Drives one established connection with the configured session loop.
+    /// Opens one connection, recording its handshake latency or why it
+    /// failed.
+    async fn handshake(&mut self, client_req: &Request, connected_before: bool) -> Handshake {
+        #[cfg_attr(not(feature = "auth"), allow(unused_mut))]
+        let mut request = client_req.clone();
+        // A refreshed token is read per attempt, so reconnects present the
+        // latest one.
+        #[cfg(feature = "auth")]
+        if let Some(auth) = &self.config.live_auth {
+            auth.apply(request.headers_mut());
+        }
+        let handshake_start = Instant::now();
+        // The handshake future is over 9 KB with its TLS state. Boxed, it is
+        // freed once the connection is open instead of staying in the task.
+        let connect_fut = tokio::time::timeout(
+            self.config.connect_timeout,
+            Box::pin(self.target.connect(request)),
+        );
+        let connect_result = tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => {
+                // The run ended during this slot's first handshake, before
+                // it could succeed or fail: report it apart from failures.
+                if !connected_before && self.metrics.errors.is_empty() {
+                    self.metrics.interrupted = true;
+                }
+                return Handshake::Stop;
+            }
+            res = connect_fut => res,
+        };
+        match connect_result {
+            Ok(Ok(ws_stream)) => {
+                if connected_before {
+                    self.metrics.record_reconnect(handshake_start.elapsed());
+                } else {
+                    self.metrics.record_handshake(handshake_start.elapsed());
+                }
+                Handshake::Open(ws_stream)
+            }
+            Ok(Err(ConnectError::Static(cat))) => {
+                // Retrying cannot help, as with a bad handshake request.
+                self.metrics.record_connection_failed(cat);
+                Handshake::Stop
+            }
+            Ok(Err(ConnectError::Tungstenite(err))) => {
+                self.metrics
+                    .record_connection_failed(categorize_tungstenite_error(&err));
+                Handshake::Failed
+            }
+            Err(_) => {
+                self.metrics
+                    .record_connection_failed(ErrorCategory::Timeout);
+                Handshake::Failed
+            }
+        }
+    }
+
+    /// The session loop that drives one established connection.
     ///
     /// With capture on, the socket is wrapped so every frame is recorded.
     /// Without it the loops run on the bare socket, so a run that does not
     /// capture pays nothing for the feature.
-    async fn run_session(
-        &mut self,
-        ws_stream: tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    ) -> SessionEnd {
+    ///
+    /// The loop is boxed, and built here rather than in an `async fn`, so
+    /// the connection's task holds only the state of its own mode's loop.
+    /// Awaited inline, every connection would reserve room for the largest
+    /// loop and for the handshake, about 12 KB instead of about 3 KB.
+    fn session(&mut self, ws_stream: crate::connect::WsStream) -> BoxFuture<'_, SessionEnd> {
         #[cfg(feature = "capture")]
         if let Some(capture) = self.capture.clone() {
             let stream = crate::capture::CaptureStream::open(ws_stream, capture, self.worker_id);
-            return self.run_mode(stream).await;
+            return self.mode_loop(stream);
         }
-        self.run_mode(ws_stream).await
+        self.mode_loop(ws_stream)
     }
 
-    async fn run_mode<S>(&mut self, ws_stream: S) -> SessionEnd
+    fn mode_loop<'a, S>(&'a mut self, ws_stream: S) -> BoxFuture<'a, SessionEnd>
     where
         S: futures_util::Sink<Message, Error = TungsteniteError>
             + futures_util::Stream<Item = std::result::Result<Message, TungsteniteError>>
-            + Unpin,
+            + Unpin
+            + Send
+            + 'a,
     {
         #[cfg(feature = "scenario")]
         if let Some(phase) = self.scenario.clone()
             && !phase.actions.is_empty()
         {
-            return self.run_action_loop(ws_stream, phase).await;
+            return Box::pin(self.run_action_loop(ws_stream, phase));
         }
 
         match self.config.mode {
-            TestMode::Echo => self.run_echo_loop(ws_stream).await,
-            TestMode::Stream => self.run_stream_loop(ws_stream).await,
-            TestMode::Listen => self.run_listen_loop(ws_stream).await,
+            TestMode::Echo => Box::pin(self.run_echo_loop(ws_stream)),
+            TestMode::Stream => Box::pin(self.run_stream_loop(ws_stream)),
+            TestMode::Listen => Box::pin(self.run_listen_loop(ws_stream)),
             #[cfg(feature = "graphql-ws")]
-            TestMode::GraphQLWS => self.run_graphql_ws_loop(ws_stream).await,
+            TestMode::GraphQLWS => Box::pin(self.run_graphql_ws_loop(ws_stream)),
         }
     }
 
@@ -1543,6 +1576,18 @@ pub(crate) struct SendPlan {
     pub(crate) drop: bool,
     /// Corrupt the payload.
     pub(crate) corrupt: bool,
+}
+
+/// What one handshake attempt of a connection slot produced.
+// The socket is not boxed: the value lives only from the handshake to the
+// boxed session loop it moves into, and a box would cost an allocation.
+#[allow(clippy::large_enum_variant)]
+enum Handshake {
+    Open(crate::connect::WsStream),
+    /// The attempt failed; the slot may retry.
+    Failed,
+    /// The run ended, or the failure is one a retry cannot fix.
+    Stop,
 }
 
 /// The send times of a paced echo session or echo action script.

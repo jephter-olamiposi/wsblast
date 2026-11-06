@@ -604,14 +604,16 @@ async fn accept_connection(
     let Some(acceptor) = tls else {
         return serve_connection(tcp, shared, plan, cancel).await;
     };
+    // The TLS handshake and session are boxed: their state is about 11 KB,
+    // and inline it would be reserved by every plain connection's task too.
     let accepted = tokio::select! {
-        accepted = tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(tcp)) => accepted,
+        accepted = tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, Box::pin(acceptor.accept(tcp))) => accepted,
         () = cancel.cancelled() => return,
     };
     // A failed or timed-out TLS handshake is the client's problem, like a
     // failed WebSocket handshake: the connection is dropped and not counted.
     if let Ok(Ok(stream)) = accepted {
-        serve_connection(stream, shared, plan, cancel).await;
+        Box::pin(serve_connection(stream, shared, plan, cancel)).await;
     }
 }
 

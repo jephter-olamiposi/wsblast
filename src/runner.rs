@@ -389,7 +389,7 @@ impl Runner {
                 .with_interval(IntervalRecorder::new(Arc::clone(interval_store)));
                 let token = self.cancel_token.child_token();
                 let session = self.create_session(next_id, target, token.clone(), metrics, capture);
-                open.push((token, tokio::spawn(session.run())));
+                open.push((token, tokio::spawn(Box::new(session).run())));
                 next_id += 1;
             }
             // Ramp down by closing the most recently opened connections.
@@ -598,16 +598,14 @@ impl Runner {
                     Arc::clone(&latency),
                 )
                 .with_interval(IntervalRecorder::new(Arc::clone(&interval_store)));
-                handles.push(tokio::spawn(
-                    self.create_session(
-                        worker_id,
-                        &target,
-                        self.cancel_token.clone(),
-                        metrics,
-                        &capture,
-                    )
-                    .run(),
-                ));
+                let session = self.create_session(
+                    worker_id,
+                    &target,
+                    self.cancel_token.clone(),
+                    metrics,
+                    &capture,
+                );
+                handles.push(tokio::spawn(Box::new(session).run()));
 
                 if let Some(delay) = spawn_delay {
                     tokio::select! {
