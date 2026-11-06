@@ -191,13 +191,14 @@ async fn stalls_show_up_in_paced_response_time() {
     );
 }
 
-/// Without --rate the same stalls barely move the percentiles, because a
-/// connection sends nothing while it waits; the run records the slow
-/// replies, so the reports can say so.
+/// Without --rate stalls barely move the percentiles, because a connection
+/// sends nothing while it waits; the run records the slow replies, so the
+/// reports can say so. The stalls are long next to Windows' 15.6 ms timer
+/// tick, so they stay above ten times p99 there too.
 #[tokio::test]
 async fn unpaced_runs_flag_the_slow_replies_a_stall_causes() {
     let mock = Mock::start(
-        MockConfig::builder().stall(Duration::from_millis(400), Duration::from_millis(150)),
+        MockConfig::builder().stall(Duration::from_millis(600), Duration::from_millis(250)),
     )
     .await;
     let unpaced = run(load(&mock.url).duration(Duration::from_millis(1800))).await;
@@ -207,7 +208,7 @@ async fn unpaced_runs_flag_the_slow_replies_a_stall_causes() {
     .await;
     mock.stop().await;
 
-    // Four stalls of 150 ms in 1.8 s: about a third of the waiting time.
+    // Two stalls of 250 ms in 1.8 s: over a quarter of the waiting time.
     let slow = unpaced.slow_replies.as_ref().expect("slow replies");
     assert!(slow.count >= 2, "{slow:?}");
     assert!(slow.wait_share > 0.1 && slow.hides_a_stall(), "{slow:?}");

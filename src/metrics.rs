@@ -593,7 +593,7 @@ pub struct AggregatedMetrics {
     /// to spare.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_file_limit: Option<OpenFileLimit>,
-    /// Echo replies far slower than the run's p99 RTT, in an echo run
+    /// Echo replies far slower than the run's median RTT, in an echo run
     /// without a send schedule (no `--rate`); absent from paced runs, from
     /// runs with no such reply and from reports written before it was
     /// added. See METHODOLOGY.md, section 4.
@@ -601,29 +601,36 @@ pub struct AggregatedMetrics {
     pub slow_replies: Option<SlowReplies>,
 }
 
-/// Replies that took far longer than the run's p99 RTT, in an echo run
+/// Replies that took far longer than the run's median RTT, in an echo run
 /// without a send schedule.
 ///
 /// Such a connection sends its next request only when the reply to the
 /// last one arrives, so while it waits for a slow reply it sends nothing,
 /// and the requests it would have sent meanwhile are never measured: a
 /// stall barely moves the percentiles. `wait_share` is the part of the
-/// connections' waiting time these replies took. When it is 1% or more,
-/// more than 1% of a steady rate's requests would have been due during
-/// them, so the reports suggest `--rate`, whose response time counts them.
+/// connections' waiting time these replies took, and `reply_share` the
+/// part of the replies they were. When they took 1% or more of the waiting
+/// time but were under 1% of the replies, so above p99, more than 1% of a
+/// steady rate's requests would have been due during them and no
+/// percentile up to p99 shows it: the reports then suggest `--rate`, whose
+/// response time counts those requests.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct SlowReplies {
-    /// Replies above this took part: ten times the p99 RTT, at least 1 ms.
+    /// Replies above this took part: ten times the median RTT, at least
+    /// 10 ms, above the scheduling noise of a busy machine.
     pub threshold_us: u64,
     /// Number of such replies.
     pub count: u64,
+    /// Their number over the number of all replies, between 0.0 and 1.0.
+    pub reply_share: f64,
     /// Their RTT over the sum of all RTTs, between 0.0 and 1.0.
     pub wait_share: f64,
 }
 
 impl SlowReplies {
-    /// The share of waiting time from which reports suggest `--rate`.
+    /// The share of waiting time from which, and of replies below which,
+    /// reports suggest `--rate`.
     pub const HINT_SHARE: f64 = 0.01;
 
     /// The slow replies of an RTT distribution; `None` when it has none.
@@ -631,7 +638,7 @@ impl SlowReplies {
         if rtt.is_empty() {
             return None;
         }
-        let threshold_us = rtt.value_at_quantile(0.99).saturating_mul(10).max(1_000);
+        let threshold_us = rtt.value_at_quantile(0.5).saturating_mul(10).max(10_000);
         let (mut count, mut slow, mut total) = (0u64, 0u128, 0u128);
         for bucket in rtt.iter_recorded() {
             let value = bucket.value_iterated_to();
@@ -645,14 +652,15 @@ impl SlowReplies {
         (count > 0).then(|| Self {
             threshold_us,
             count,
+            reply_share: count as f64 / rtt.len() as f64,
             wait_share: slow as f64 / total.max(1) as f64,
         })
     }
 
-    /// Whether the slow replies took enough of the waiting time for the
-    /// reports to suggest `--rate`.
+    /// Whether the slow replies took enough of the waiting time, while too
+    /// few to reach p99, for the reports to suggest `--rate`.
     pub fn hides_a_stall(&self) -> bool {
-        self.wait_share >= Self::HINT_SHARE
+        self.wait_share >= Self::HINT_SHARE && self.reply_share < Self::HINT_SHARE
     }
 }
 
@@ -1113,14 +1121,29 @@ mod aggregation_tests {
     }
 
     #[test]
-    fn slow_replies_are_measured_against_ten_times_p99() {
+    fn slow_replies_are_measured_against_ten_times_the_median() {
         // 1,000 replies of 1 ms and two of 500 ms: the two took half of
-        // the waiting time.
+        // the waiting time, and p99 is 1 ms.
         let slow = SlowReplies::of(&rtt_histogram(&[(1_000, 1_000), (500_000, 2)])).unwrap();
         assert_eq!(slow.threshold_us, 10_000);
         assert_eq!(slow.count, 2);
         assert!((slow.wait_share - 0.5).abs() < 0.01, "{slow:?}");
+        assert!(slow.reply_share < 0.01, "{slow:?}");
         assert!(slow.hides_a_stall());
+
+        // Slow replies that are 10% of all: p99 shows them already.
+        let common = SlowReplies::of(&rtt_histogram(&[(1_000, 900), (50_000, 100)])).unwrap();
+        assert_eq!(common.count, 100);
+        assert!(common.wait_share > 0.8, "{common:?}");
+        assert!(!common.hides_a_stall(), "{common:?}");
+
+        // A 4 ms median sets the threshold above the 10 ms floor (the
+        // histogram reports the top of the median's 2 µs bucket).
+        let slower = SlowReplies::of(&rtt_histogram(&[(4_000, 1_000), (100_000, 1)])).unwrap();
+        assert!(
+            (40_000..40_100).contains(&slower.threshold_us),
+            "{slower:?}"
+        );
 
         // One 20 ms reply among 100,000 of 1 ms: noted, but too small a
         // share of the run to hide a stall.
@@ -1132,9 +1155,9 @@ mod aggregation_tests {
     #[test]
     fn no_slow_replies_below_the_threshold_or_its_floor() {
         assert!(SlowReplies::of(&rtt_histogram(&[(1_000, 1_000), (5_000, 50)])).is_none());
-        // Replies of 50 µs and 900 µs: ten times p99 would be 9 ms, and no
-        // reply under the 1 ms floor counts anyway.
-        assert!(SlowReplies::of(&rtt_histogram(&[(50, 1_000), (900, 5)])).is_none());
+        // A 65 µs median with scheduling blips of up to 9 ms: ten times the
+        // median is 650 µs, but nothing under the 10 ms floor counts.
+        assert!(SlowReplies::of(&rtt_histogram(&[(65, 100_000), (9_000, 500)])).is_none());
         assert!(SlowReplies::of(&rtt_histogram(&[])).is_none());
     }
 

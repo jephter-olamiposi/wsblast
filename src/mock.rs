@@ -746,13 +746,34 @@ async fn run_session<S>(
 
     loop {
         let due = outgoing.next_due(shared, &mut rng);
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
-                close(&mut sink, CloseCode::Away, "server shutting down".to_string()).await;
+        // A reply that is already due goes out at once. Waiting for it on a
+        // timer would hold it until the timer's next 1 ms tick, which put
+        // up to a millisecond into every RTT measured against the mock.
+        let event = if due.is_some_and(|due| due <= Instant::now()) {
+            if cancel.is_cancelled() {
+                Event::Cancelled
+            } else {
+                Event::Due
+            }
+        } else {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => Event::Cancelled,
+                () = sleep_until(due) => Event::Due,
+                msg = stream.next() => Event::Received(msg),
+            }
+        };
+        match event {
+            Event::Cancelled => {
+                close(
+                    &mut sink,
+                    CloseCode::Away,
+                    "server shutting down".to_string(),
+                )
+                .await;
                 return;
             }
-            () = sleep_until(due) => {
+            Event::Due => {
                 if let Some(release) = shared.stall_release(Instant::now()) {
                     tokio::select! {
                         () = tokio::time::sleep_until(release.into()) => {}
@@ -782,7 +803,7 @@ async fn run_session<S>(
                     return;
                 }
             }
-            msg = stream.next() => match msg {
+            Event::Received(msg) => match msg {
                 Some(Ok(msg @ (Message::Text(_) | Message::Binary(_)))) => {
                     shared.counters.received.fetch_add(1, Ordering::Relaxed);
                     received += 1;
@@ -797,9 +818,17 @@ async fn run_session<S>(
                 }
                 Some(Ok(_)) => {}
                 Some(Err(_)) | None => return,
-            }
+            },
         }
     }
+}
+
+/// What woke a mock session up.
+enum Event {
+    Cancelled,
+    /// The next outgoing frame is due.
+    Due,
+    Received(Option<std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>),
 }
 
 /// Queues what the server sends for `msg`, the `seq`-th data frame of the

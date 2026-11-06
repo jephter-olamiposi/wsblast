@@ -1817,7 +1817,8 @@ pub(crate) fn chaos_label(chaos: &ChaosSummary) -> String {
 /// generator was saturated, or whose limit was too low, are listed.
 /// The note reports add below the latency percentiles when an echo run
 /// without `--rate` spent at least 1% of its waiting time on replies far
-/// slower than its p99: the percentiles then leave a stall out.
+/// slower than its median and too few to reach p99: the percentiles then
+/// leave a stall out.
 pub(crate) fn coordinated_omission_hint(metrics: &AggregatedMetrics) -> Option<String> {
     let slow = metrics
         .slow_replies
@@ -1988,12 +1989,14 @@ mod tests {
         let mut slow = crate::metrics::SlowReplies {
             threshold_us: 15_000,
             count: 1,
+            reply_share: 0.0001,
             wait_share: 0.004,
         };
         metrics.slow_replies = Some(slow.clone());
         assert!(!view(&metrics, "text").contains("Note:"));
 
         slow.count = 20;
+        slow.reply_share = 0.0008;
         slow.wait_share = 0.084;
         metrics.slow_replies = Some(slow);
         let text = view(&metrics, "text");

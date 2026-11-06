@@ -346,12 +346,13 @@
           }
         },
         "slow_replies": {
-          "description": "Echo replies slower than ten times the p99 RTT (and than 1 ms), in an echo run without --rate. Present only when the run had such replies; absent from paced runs, whose response time already counts requests that waited, and from reports written before this field was added. When wait_share is 0.01 or more the reports note that the percentiles leave out the time those replies took. See METHODOLOGY.md section 4.",
+          "description": "Echo replies slower than ten times the median RTT (and than 10 ms), in an echo run without --rate. Present only when the run had such replies; absent from paced runs, whose response time already counts requests that waited, and from reports written before this field was added. When wait_share is 0.01 or more and reply_share under 0.01, the reports note that the percentiles leave out the time those replies took. See METHODOLOGY.md section 4.",
           "type": "object",
-          "required": ["threshold_us", "count", "wait_share"],
+          "required": ["threshold_us", "count", "reply_share", "wait_share"],
           "properties": {
-            "threshold_us": { "description": "Ten times the p99 RTT, at least 1,000 µs.", "$ref": "#/$defs/count" },
+            "threshold_us": { "description": "Ten times the median RTT, at least 10,000 µs.", "$ref": "#/$defs/count" },
             "count": { "description": "Replies slower than threshold_us.", "$ref": "#/$defs/count" },
+            "reply_share": { "description": "Their number over the number of all replies.", "type": "number", "minimum": 0, "maximum": 1 },
             "wait_share": { "description": "Their RTT over the sum of all RTTs.", "type": "number", "minimum": 0, "maximum": 1 }
           }
         },

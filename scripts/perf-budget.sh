@@ -19,8 +19,8 @@ MAX_BINARY_MIB=12          # about 7 MiB
 MAX_STARTUP_MS=100         # a few ms for --version
 MAX_MB_AT_2000=80          # about 40 MB
 MAX_KB_PER_CONNECTION=32   # about 10 KB
-MIN_ECHO_MSG_PER_SEC=5000  # about 30,000 with 50 connections
-MIN_LARGE_MSG_PER_SEC=1000 # about 7,000 64 KiB messages with 10 connections
+MIN_ECHO_MSG_PER_SEC=50000 # about 135,000 with 50 connections
+MIN_LARGE_MSG_PER_SEC=10000 # about 27,000 64 KiB messages with 10 connections
 
 BIN=${1:?usage: scripts/perf-budget.sh path/to/wsblast}
 BIN=$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")
