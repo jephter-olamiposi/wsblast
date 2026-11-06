@@ -1,0 +1,16 @@
+# Paced load for the memory check: VUS virtual users arrive within a
+# second, and each sends one message a second for DURATION seconds.
+#   VUS=1000 DURATION=20 artillery run -t ws://127.0.0.1:9001 artillery-paced.yml
+config:
+  processor: "./artillery-processor.js"
+  phases:
+    - duration: 1
+      arrivalCount: "{{ $env.VUS }}"
+scenarios:
+  - engine: ws
+    flow:
+      - function: setDeadline
+      - loop:
+          - send: "hello"
+          - think: 1
+        whileTrue: beforeDeadline

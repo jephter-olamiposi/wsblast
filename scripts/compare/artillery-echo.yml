@@ -1,0 +1,22 @@
+# Unpaced echo: each virtual user keeps one WebSocket and sends the next
+# message when the previous reply arrives (the match makes it wait), for
+# DURATION seconds.
+#   VUS=50 DURATION=20 artillery run -t ws://127.0.0.1:9001 artillery-echo.yml
+config:
+  processor: "./artillery-processor.js"
+  phases:
+    - duration: 1
+      arrivalCount: "{{ $env.VUS }}"
+  ws:
+    timeout: 30
+scenarios:
+  - engine: ws
+    flow:
+      - function: setDeadline
+      - loop:
+          - send:
+              payload: "hello"
+              match:
+                regexp: "hello"
+                value: "hello"
+        whileTrue: beforeDeadline

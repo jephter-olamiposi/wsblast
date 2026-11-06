@@ -210,6 +210,9 @@ enable only what they need.
   Prometheus and OpenTelemetry.
 * [Mock server](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/mock.md):
   testing a gate against known failures, and scripted replies.
+* [Benchmarks](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/benchmarks.md):
+  throughput per core, memory per connection and a server stall, compared
+  with k6 and Artillery.
 
 ## Getting Help
 
