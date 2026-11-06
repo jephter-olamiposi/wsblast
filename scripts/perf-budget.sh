@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Performance budget: fails when a release build of wsblast gets bigger,
-# slower to start, heavier per connection or slower on echo than the limits
+# slower to start, heavier in memory or slower on echo than the limits
 # below. CI runs it on Linux (the memory check reads /proc); run it locally
 # with:
 #
@@ -17,8 +17,10 @@ set -euo pipefail
 # Limits, with what a build measured when they were set (Linux, 2 cores).
 MAX_BINARY_MIB=12          # about 7 MiB
 MAX_STARTUP_MS=100         # a few ms for --version
+MAX_MB_AT_2000=100         # about 55 MB
 MAX_KB_PER_CONNECTION=48   # about 16 KB
-MIN_ECHO_MSG_PER_SEC=5000  # about 25,000 with 50 connections
+MIN_ECHO_MSG_PER_SEC=5000  # about 30,000 with 50 connections
+MIN_LARGE_MSG_PER_SEC=1000 # about 7,000 64 KiB messages with 10 connections
 
 BIN=${1:?usage: scripts/perf-budget.sh path/to/wsblast}
 BIN=$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")
@@ -83,11 +85,14 @@ for _ in $(seq 50); do
 done
 URL="ws://127.0.0.1:$PORT"
 
-# 3. Memory per connection: the slope between 2,000 and 4,000 paced
-# connections. The runtime's fixed cost cancels out, and so do the read
-# buffers, which share a fixed 64 MiB from 512 connections on.
+# 3. Memory: the peak with 2,000 paced connections, and the slope between
+# 2,000 and 4,000. In the slope the runtime's fixed cost cancels out, and so
+# do the read buffers, which share a fixed 16 MiB from 1,024 connections on.
 small=$(peak_rss_kb "$BIN" "$URL" -c 2000 -d 4s -r 1 --no-progress)
 large=$(peak_rss_kb "$BIN" "$URL" -c 4000 -d 4s -r 1 --no-progress)
+small_mb=$(( small / 1024 ))
+check "Memory, 2,000 connections" "$small_mb" "$MAX_MB_AT_2000" MB \
+  "$([ "$small_mb" -le "$MAX_MB_AT_2000" ] && echo 0 || echo 1)"
 per_conn=$(( (large - small) / 2000 ))
 check "Memory per connection" "$per_conn" "$MAX_KB_PER_CONNECTION" KB \
   "$([ "$per_conn" -le "$MAX_KB_PER_CONNECTION" ] && echo 0 || echo 1)"
@@ -97,6 +102,15 @@ check "Memory per connection" "$per_conn" "$MAX_KB_PER_CONNECTION" KB \
 throughput=$(sed -n 's/.*"throughput_msg_per_sec": *\([0-9]*\).*/\1/p' "$WORK/echo.json" | head -n 1)
 check "Echo throughput, 50 conns" "${throughput:-0}" "$MIN_ECHO_MSG_PER_SEC" msg/s \
   "$([ "${throughput:-0}" -ge "$MIN_ECHO_MSG_PER_SEC" ] && echo 0 || echo 1)"
+
+# 5. Echo throughput with 64 KiB messages, which the read buffers take in
+# several reads.
+head -c 49152 /dev/zero | base64 -w 0 > "$WORK/64k.txt"
+"$BIN" "$URL" -c 10 -d 5s --payload-file "$WORK/64k.txt" --no-progress --format json \
+  -o "$WORK/large.json" >/dev/null 2>&1
+large_rate=$(sed -n 's/.*"throughput_msg_per_sec": *\([0-9]*\).*/\1/p' "$WORK/large.json" | head -n 1)
+check "Echo throughput, 64 KiB" "${large_rate:-0}" "$MIN_LARGE_MSG_PER_SEC" msg/s \
+  "$([ "${large_rate:-0}" -ge "$MIN_LARGE_MSG_PER_SEC" ] && echo 0 || echo 1)"
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {

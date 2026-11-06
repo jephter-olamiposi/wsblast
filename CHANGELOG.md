@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Read buffers are 16 KiB at most, and small messages take about a third less CPU.** The WebSocket library fills a connection's whole read buffer with zeros before every read, so each read of a small frame first cleared up to 128 KiB, and every buffer stayed resident in full. Client connections now share 16 MiB of read buffers instead of 64 MiB, between 4 KiB and 16 KiB each (16 KiB up to 1,024 connections), and the mock server reads with 16 KiB instead of 128 KiB. Measured on one core with 50 connections and short text frames, wsblast handles about 104,000 replies per CPU second instead of 70,000, and the mock about 98,000 instead of 67,000. 2,000 connections use about 55 MB instead of 102 MB, and the mock serving them about 53 MB instead of 271 MB. Large messages are as fast as before: buffers grow to a message's size as it arrives.
+
 ### Added
+- The CI performance budget also checks the peak memory of 2,000 connections (at most 100 MB) and echo throughput with 64 KiB messages (at least 1,000 a second).
 - docs/benchmarks.md compares wsblast with k6 and Artillery on throughput per core, memory per connection and a stalling server, and `scripts/compare/run.sh` reproduces it.
 
 ### Fixed

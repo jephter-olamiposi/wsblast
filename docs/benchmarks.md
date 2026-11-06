@@ -54,8 +54,9 @@ column is the slope between the two runs, so fixed costs cancel out.
 | k6 | 164 MB | 537 MB | 254 KB |
 | Artillery | 326 MB | 342 MB | 11 KB |
 
-wsblast's fixed cost includes 64 MiB of read buffers shared by all
-connections (see [METHODOLOGY.md](../METHODOLOGY.md), section 10). k6 runs a
+In wsblast 0.2.2, the fixed cost includes 64 MiB of read buffers shared by
+all connections. Later versions use 16 MiB (see
+[METHODOLOGY.md](../METHODOLOGY.md), section 10). k6 runs a
 JavaScript runtime for each virtual user, which is most of its cost per
 connection. Artillery's Node.js process starts large and then grows slowly.
 

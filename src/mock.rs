@@ -63,9 +63,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
-use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::frame::{CloseFrame, Utf8Bytes};
+use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 use tokio_util::sync::CancellationToken;
 
 mod rules;
@@ -643,7 +643,7 @@ async fn serve_connection<S>(
     }
 
     let ws = tokio::select! {
-        ws = tokio_tungstenite::accept_async(tcp) => ws,
+        ws = tokio_tungstenite::accept_async_with_config(tcp, Some(read_buffer_config())) => ws,
         () = cancel.cancelled() => return,
     };
     let Ok(ws) = ws else {
@@ -709,6 +709,13 @@ impl Outgoing<'_> {
             }
         }
     }
+}
+
+/// The mock reads with the client's largest buffer: the WebSocket library's
+/// 128 KiB default would make every read of a small frame clear 128 KiB
+/// first, so the mock, not the client, would limit a load test.
+fn read_buffer_config() -> WebSocketConfig {
+    WebSocketConfig::default().read_buffer_size(crate::connect::MAX_READ_BUFFER)
 }
 
 async fn run_session<S>(

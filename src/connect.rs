@@ -9,9 +9,12 @@
 //! by later connections, so only the first few pay for the race.
 //!
 //! Each connection's read buffer is sized from the run's connection count
-//! ([`read_buffer_size`]): the WebSocket library's 128 KiB default suits a
-//! few busy connections, but at 10,000 connections it alone would take
-//! 1.3 GB.
+//! ([`read_buffer_size`]). The WebSocket library fills a read buffer's whole
+//! capacity with zeros before every read, so a buffer is resident in full,
+//! and each read of a small frame first clears the whole buffer. Its 128 KiB
+//! default would take 1.3 GB at 10,000 connections and spends more CPU
+//! clearing buffers than handling small messages. 16 KiB, one TLS record,
+//! is as fast as larger buffers for large messages.
 
 use crate::error::ErrorCategory;
 use futures_util::StreamExt;
@@ -32,19 +35,24 @@ use url::{Host, Url};
 const ATTEMPT_DELAY: Duration = Duration::from_millis(250);
 
 /// Memory the read buffers of all of a run's connections start with.
-const READ_BUFFER_BUDGET: usize = 64 * 1024 * 1024;
-/// The WebSocket library's default read buffer, kept for runs of up to 512
-/// connections.
-const MAX_READ_BUFFER: usize = 128 * 1024;
+const READ_BUFFER_BUDGET: usize = 16 * 1024 * 1024;
+/// The largest read buffer, used by runs of up to 1,024 connections and by
+/// every connection of the mock server: one TLS record. Larger buffers read
+/// large messages no faster and make every read of a small one slower.
+pub(crate) const MAX_READ_BUFFER: usize = 16 * 1024;
 /// The smallest read buffer: one page, enough for typical messages in one
 /// read. A larger message grows the buffer as it arrives.
 const MIN_READ_BUFFER: usize = 4 * 1024;
 
 /// The initial read buffer of each connection of a run that opens up to
 /// `connections` at once: an equal share of [`READ_BUFFER_BUDGET`], between
-/// 4 KiB and 128 KiB.
+/// 4 KiB and 16 KiB, rounded down to a power of two. Sizes that are not a
+/// whole number of pages waste the partly used pages around each buffer:
+/// 4,000 connections with 4,194-byte buffers used 13 MB more than with
+/// 4 KiB ones.
 pub(crate) fn read_buffer_size(connections: usize) -> usize {
-    (READ_BUFFER_BUDGET / connections.max(1)).clamp(MIN_READ_BUFFER, MAX_READ_BUFFER)
+    let share = (READ_BUFFER_BUDGET / connections.max(1)).clamp(MIN_READ_BUFFER, MAX_READ_BUFFER);
+    1 << share.ilog2()
 }
 
 pub(crate) type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -242,9 +250,11 @@ mod tests {
     fn read_buffers_share_a_fixed_budget_within_bounds() {
         assert_eq!(read_buffer_size(0), MAX_READ_BUFFER);
         assert_eq!(read_buffer_size(50), MAX_READ_BUFFER);
-        assert_eq!(read_buffer_size(512), MAX_READ_BUFFER);
-        assert_eq!(read_buffer_size(1024), 64 * 1024);
-        assert_eq!(read_buffer_size(10_000), 6_710);
+        assert_eq!(read_buffer_size(1024), MAX_READ_BUFFER);
+        assert_eq!(read_buffer_size(1025), 8 * 1024);
+        assert_eq!(read_buffer_size(2048), 8 * 1024);
+        assert_eq!(read_buffer_size(3000), MIN_READ_BUFFER);
+        assert_eq!(read_buffer_size(4096), MIN_READ_BUFFER);
         assert_eq!(read_buffer_size(100_000), MIN_READ_BUFFER);
     }
 
