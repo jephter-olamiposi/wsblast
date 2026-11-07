@@ -111,3 +111,26 @@ fn a_subcommand_given_first_still_parses() {
     let output = wsblast(&["render", "--help"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
 }
+
+/// The command runs on a thread with its own 8 MiB stack, so it does not
+/// depend on the main thread's: Windows gives that 1 MiB, and an
+/// unoptimized build needs more than that to parse the command line. A
+/// 256 KiB limit on the main thread stands in for Windows here.
+#[cfg(unix)]
+#[test]
+fn the_command_does_not_need_a_large_main_thread_stack() {
+    for args in [&["--version"][..], &["ws://127.0.0.1:1", "-c", "0"]] {
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(r#"ulimit -s 256 && exec "$0" "$@""#)
+            .arg(env!("CARGO_BIN_EXE_wsblast"))
+            .args(args)
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap();
+        let stderr = stderr(&output);
+        assert!(!stderr.contains("overflow"), "{args:?}: {stderr}");
+        let expected = if args[0] == "--version" { 0 } else { 1 };
+        assert_eq!(output.status.code(), Some(expected), "{args:?}: {stderr}");
+    }
+}
