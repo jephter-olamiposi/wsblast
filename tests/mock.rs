@@ -866,8 +866,9 @@ async fn expect_checks_every_reply_of_a_plain_run() {
     mock.stop().await;
     assert_eq!(passing.error_rate, 0.0, "{passing:?}");
     // Every reply failed, and every reply still has its RTT. (The run ends
-    // with the 20th send, so its reply may not be counted.)
-    assert!(failing.message_rtt.count >= 19, "{failing:?}");
+    // with the 20th send, when each of the two connections may still wait
+    // for the reply to its last request, so up to two are not counted.)
+    assert!(failing.message_rtt.count >= 18, "{failing:?}");
     assert_eq!(
         failing.error_breakdown.get(&ErrorCategory::CheckFailed),
         Some(&failing.message_rtt.count),
