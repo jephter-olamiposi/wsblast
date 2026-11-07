@@ -81,6 +81,14 @@ Shape the load with stages: ramp to 200 connections over 30 seconds, hold for
 wsblast ws://127.0.0.1:9001 --stages 30s:200,2m:200,30s:0 -r 10
 ```
 
+Or test connection churn: start 50 new sessions a second for 2 minutes, each
+staying 20 seconds, so about 1,000 are open at once while users keep arriving
+and leaving.
+
+```bash
+wsblast ws://127.0.0.1:9001 --arrival-rate 50 --session-duration 20s -d 2m -r 1
+```
+
 `wsblast mock` starts a local echo server on `127.0.0.1:9001` to test against.
 With `--delay 20ms --stall-every 5s --stall-for 300ms` it answers slowly and
 stalls every 5 seconds. Add `--tui` to any run for the live dashboard.

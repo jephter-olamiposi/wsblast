@@ -7,7 +7,7 @@ use super::protocol::{
 };
 use super::{HANDSHAKE_TIMEOUT, SETUP_TIMEOUT, ws_config};
 use crate::error::{ConfigError, Result};
-use crate::metrics::{LiveMetrics, MetricsTotals};
+use crate::metrics::LiveMetrics;
 use crate::runner::Runner;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
@@ -791,12 +791,8 @@ where
     .await
     .map_err(closed)?;
 
-    let mut totals = MetricsTotals::new().map_err(|e| e.to_string())?;
-    for worker in outcome.worker_metrics {
-        totals.add_worker(worker);
-    }
     let result = WireResult::new(
-        &totals,
+        &outcome.totals,
         ResultMeta {
             elapsed: outcome.elapsed,
             started_at_unix_ms,
@@ -805,6 +801,7 @@ where
             capture_dropped,
             lag: outcome.lag,
             open_file_limit: crate::runner::open_file_limit(connections),
+            arrivals: outcome.arrivals,
         },
         outcome.time_series,
         &outcome.interval_store.buckets(),

@@ -565,7 +565,7 @@ impl Coordinator {
                 "interrupted before the agents started; nothing was run".to_string(),
             ));
         };
-        let (metrics, agents) = self.merge_phase(&phase)?;
+        let (metrics, agents) = self.merge_phase(&phase, self.config.arrivals.as_ref())?;
         Ok(DistributedOutcome {
             metrics: metrics.with_capture(capture),
             agents,
@@ -611,11 +611,7 @@ impl Coordinator {
             if self.cancel.is_cancelled() || session.links.iter().all(Option::is_none) {
                 break;
             }
-            let load = if phase.stages.is_empty() {
-                format!("{} connections for {:?}", phase.connections, phase.duration)
-            } else {
-                format!("stages {}", crate::report::stage_list_label(&phase.stages))
-            };
+            let load = crate::report::phase_start_label(phase);
             // The dashboard shows the phase itself; a line on stderr would
             // be drawn over it.
             if !self.config.tui {
@@ -678,7 +674,7 @@ impl Coordinator {
                 .any(|part| matches!(part, Part::Finished(_)));
             if any {
                 if let Some(progress) = &self.dashboard_progress {
-                    let (metrics, _) = self.merge_phase(&ran)?;
+                    let (metrics, _) = self.merge_phase(&ran, phase.arrivals.as_ref())?;
                     let slo = crate::report::evaluate_slos(&phase.slo, &metrics);
                     progress.end_phase(&phase.name, &slo);
                 }
@@ -1222,8 +1218,13 @@ impl Coordinator {
     /// Merges the results of one phase: the phase's metrics, measured from
     /// its start to its last result, with the agents and their generator
     /// health, and every agent's own metrics.
-    fn merge_phase(&self, run: &PhaseRun) -> Result<(AggregatedMetrics, Vec<AgentOutcome>)> {
+    fn merge_phase(
+        &self,
+        run: &PhaseRun,
+        arrivals: Option<&crate::config::Arrivals>,
+    ) -> Result<(AggregatedMetrics, Vec<AgentOutcome>)> {
         let mut totals = MetricsTotals::new()?;
+        let mut arrival_counts: Option<crate::metrics::ArrivalCounts> = None;
         let mut parts = Vec::new();
         let mut connections = 0u64;
         let mut not_started = 0u64;
@@ -1232,6 +1233,9 @@ impl Coordinator {
             match part {
                 Part::Finished(result) => {
                     totals.add(&result.totals)?;
+                    if let Some(counts) = &result.arrivals {
+                        arrival_counts.get_or_insert_default().add(counts);
+                    }
                     connections += result.connections;
                     not_started += result.not_started;
                     let own = result
@@ -1286,7 +1290,8 @@ impl Coordinator {
         let mut metrics = totals
             .finish(elapsed, connections)
             .with_not_started(not_started)
-            .with_time_series(TimeSeries::merge_parallel(parts));
+            .with_time_series(TimeSeries::merge_parallel(parts))
+            .with_arrivals(arrivals, arrival_counts);
         // The agents' counts add up; their seeds were derived from the
         // run's, which is the one that repeats the run.
         if let (Some(chaos), Some(seed)) = (metrics.chaos.as_mut(), run.chaos_seed) {
@@ -1321,11 +1326,18 @@ impl Coordinator {
             (0..self.agents.len()).map(|_| None).collect();
         let mut started_at: Vec<Option<u64>> = vec![None; self.agents.len()];
         let mut first_chaos_seed: Option<u64> = None;
+        let mut scenario_arrivals: Option<crate::metrics::ArrivalSummary> = None;
 
         for (index, run) in runs {
             let phase = &scenario.phases[*index];
             let target = &scenario.targets[*index];
-            let (phase_metrics, agents) = self.merge_phase(run)?;
+            let (phase_metrics, agents) = self.merge_phase(run, phase.arrivals.as_ref())?;
+            if let Some(phase_arrivals) = &phase_metrics.arrivals {
+                match scenario_arrivals.as_mut() {
+                    Some(all) => all.add_phase(phase_arrivals),
+                    None => scenario_arrivals = Some(*phase_arrivals),
+                }
+            }
             if first_chaos_seed.is_none() {
                 first_chaos_seed = phase_metrics.chaos.as_ref().map(|chaos| chaos.seed);
             }
@@ -1423,6 +1435,7 @@ impl Coordinator {
                     .with_capture(capture),
             )
             .with_distributed(summary);
+        metrics.arrivals = scenario_arrivals;
         // As on one machine, the scenario reports the seed of the first
         // phase that injected faults.
         if let (Some(chaos), Some(seed)) = (metrics.chaos.as_mut(), first_chaos_seed) {

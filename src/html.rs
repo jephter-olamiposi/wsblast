@@ -207,6 +207,13 @@ fn render_header(html: &mut String, view: &ReportView<'_>) {
             escape(stages)
         );
     }
+    if let Some(arrivals) = &view.metrics.arrivals {
+        let _ = writeln!(
+            html,
+            "<dt>Arrivals</dt><dd>{}</dd>",
+            escape(&crate::report::arrival_label(arrivals))
+        );
+    }
     let rate = match view.rate_per_conn {
         Some(0) => "Unthrottled".to_string(),
         Some(rate) => format!("{rate} msg/s per connection"),
@@ -459,6 +466,9 @@ fn render_latency_table(html: &mut String, view: &ReportView<'_>) {
     html.push_str("</tr>\n</tbody></table></div>\n");
     if let Some(hint) = crate::report::coordinated_omission_hint(view.metrics) {
         let _ = writeln!(html, "<p class=\"note\">{}</p>", escape(&hint));
+    }
+    if let Some(note) = crate::report::skipped_arrivals_note(view.metrics) {
+        let _ = writeln!(html, "<p class=\"note\">{}</p>", escape(&note));
     }
     html.push_str("</section>\n");
     if !view.metrics.actions.is_empty() {

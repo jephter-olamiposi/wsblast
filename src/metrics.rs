@@ -202,6 +202,29 @@ pub struct WorkerMetrics {
     shard: usize,
 }
 
+/// What an arrival-rate run did with its arrivals.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "distributed", derive(Serialize, Deserialize))]
+pub(crate) struct ArrivalCounts {
+    /// Sessions started.
+    pub(crate) started: u64,
+    /// Arrivals skipped because `max_connections` sessions were open.
+    pub(crate) skipped: u64,
+    /// The most sessions open at once.
+    pub(crate) peak_open: u64,
+}
+
+impl ArrivalCounts {
+    /// Adds the counts of another machine, so the peak is the sum of the
+    /// machines' peaks.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn add(&mut self, other: &Self) {
+        self.started += other.started;
+        self.skipped += other.skipped;
+        self.peak_open += other.peak_open;
+    }
+}
+
 /// What one worker counted for a named action.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ActionCounts {
@@ -646,6 +669,59 @@ pub struct AggregatedMetrics {
     /// every phase that has it, in name order; empty without names.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<ActionMetrics>,
+    /// Arrival-rate runs only (`--arrival-rate`): the arrival model and what
+    /// the run did with its arrivals. Absent from other runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrivals: Option<ArrivalSummary>,
+}
+
+/// What an arrival-rate run (`--arrival-rate`) did with its arrivals.
+///
+/// Every started session is a connection slot the run tried, so `started`
+/// equals `total_connections_attempted`. In a scenario's merged metrics,
+/// the counts of every arrival phase are added up, `peak_open` is the
+/// highest phase's, and the rate and session duration are the first arrival
+/// phase's. In a distributed run the counts of the agents are added up, so
+/// `peak_open` is the sum of each agent's peak.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ArrivalSummary {
+    /// New sessions per second the run aimed for.
+    pub rate: f64,
+    /// How long each session lasted, in seconds.
+    pub session_duration_secs: f64,
+    /// The cap on sessions open at once, if one was set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_connections: Option<u64>,
+    /// Sessions started.
+    pub started: u64,
+    /// Arrivals skipped because `max_connections` sessions were open. When
+    /// this is not 0, the run applied less load than its rate.
+    pub skipped: u64,
+    /// The most sessions open at once.
+    pub peak_open: u64,
+}
+
+impl ArrivalSummary {
+    pub(crate) fn new(arrivals: &crate::config::Arrivals, counts: ArrivalCounts) -> Self {
+        Self {
+            rate: arrivals.rate,
+            session_duration_secs: arrivals.session_duration.as_secs_f64(),
+            max_connections: arrivals.max_connections.map(|max| max as u64),
+            started: counts.started,
+            skipped: counts.skipped,
+            peak_open: counts.peak_open,
+        }
+    }
+
+    /// Adds the counts of another phase of a scenario: started and skipped
+    /// add up, and the peak is the higher one.
+    #[cfg(feature = "scenario")]
+    pub(crate) fn add_phase(&mut self, other: &Self) {
+        self.started += other.started;
+        self.skipped += other.skipped;
+        self.peak_open = self.peak_open.max(other.peak_open);
+    }
 }
 
 /// The messages of one named scenario action (`name:` on a Send action),
@@ -1058,19 +1134,34 @@ impl MetricsTotals {
         latency_histogram()
     }
 
-    /// Adds one worker's metrics.
+    /// Adds one worker's metrics, and its latency recorder unless an
+    /// earlier worker shared it. The recorder must be complete, so call
+    /// this once the run's workers have stopped; while others still record
+    /// into it, use [`add_worker_counts`](Self::add_worker_counts) and add the
+    /// recorder with [`add_recorder`](Self::add_recorder) at the end.
     pub(crate) fn add_worker(&mut self, w: WorkerMetrics) {
-        if !self.absorbed.iter().any(|r| Arc::ptr_eq(r, &w.latency)) {
-            w.latency
-                .add_to(&mut self.handshake, &mut self.rtt, &mut self.response);
-            for (index, name) in w.latency.action_names().enumerate() {
-                if let Some(action) = self.action(name) {
-                    w.latency
-                        .add_action_to(index, &mut action.rtt, &mut action.response);
-                }
-            }
-            self.absorbed.push(Arc::clone(&w.latency));
+        let latency = Arc::clone(&w.latency);
+        self.add_recorder(&latency);
+        self.add_worker_counts(w);
+    }
+
+    /// Adds a latency recorder's distributions, once however many workers
+    /// share it.
+    pub(crate) fn add_recorder(&mut self, latency: &Arc<LatencyRecorder>) {
+        if self.absorbed.iter().any(|r| Arc::ptr_eq(r, latency)) {
+            return;
         }
+        latency.add_to(&mut self.handshake, &mut self.rtt, &mut self.response);
+        for (index, name) in latency.action_names().enumerate() {
+            if let Some(action) = self.action(name) {
+                latency.add_action_to(index, &mut action.rtt, &mut action.response);
+            }
+        }
+        self.absorbed.push(Arc::clone(latency));
+    }
+
+    /// Adds one worker's counters, but not its latency recorder.
+    pub(crate) fn add_worker_counts(&mut self, w: WorkerMetrics) {
         for (index, name) in w.latency.action_names().enumerate() {
             if let (Some(counts), Some(action)) = (w.actions.get(index), self.action(name)) {
                 action.add_counts(counts);
@@ -1193,6 +1284,7 @@ impl MetricsTotals {
                 .iter()
                 .map(|(name, totals)| ActionMetrics::of(name, totals))
                 .collect(),
+            arrivals: None,
             error_breakdown,
             capture: None,
             distributed: None,
@@ -1246,6 +1338,19 @@ impl AggregatedMetrics {
     ) -> Self {
         self.generator_lag = lag;
         self.open_file_limit = open_file_limit;
+        self
+    }
+
+    /// Attaches what an arrival-rate run did with its arrivals.
+    #[must_use]
+    pub(crate) fn with_arrivals(
+        mut self,
+        arrivals: Option<&crate::config::Arrivals>,
+        counts: Option<ArrivalCounts>,
+    ) -> Self {
+        self.arrivals = arrivals
+            .zip(counts)
+            .map(|(arrivals, counts)| ArrivalSummary::new(arrivals, counts));
         self
     }
 

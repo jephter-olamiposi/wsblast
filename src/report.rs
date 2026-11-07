@@ -132,6 +132,13 @@ impl PhaseReport {
         if !self.stages.is_empty() {
             return stage_reports_label(&self.stages);
         }
+        if let Some(arrivals) = &self.metrics.arrivals {
+            return format!(
+                "{}/s, sessions of {:?}",
+                arrivals.rate,
+                Duration::from_secs_f64(arrivals.session_duration_secs)
+            );
+        }
         match self.connections {
             1 => "1 connection".to_string(),
             n => format!("{n} connections"),
@@ -163,12 +170,27 @@ impl PhaseReport {
 }
 
 /// Whether the text and Markdown reports show the per-phase table: only when
-/// a phase has its own SLO or load stages, so the reports of scenarios with
-/// neither are unchanged.
+/// a phase has its own SLO, load stages or arrival rate, so the reports of
+/// scenarios with none of them are unchanged.
 fn shows_phase_table(phases: &[PhaseReport]) -> bool {
-    phases
-        .iter()
-        .any(|phase| !phase.slo.checks.is_empty() || !phase.stages.is_empty())
+    phases.iter().any(|phase| {
+        !phase.slo.checks.is_empty() || !phase.stages.is_empty() || phase.metrics.arrivals.is_some()
+    })
+}
+
+/// What a scenario phase will run, for the line printed as it starts.
+#[cfg(feature = "scenario")]
+pub(crate) fn phase_start_label(phase: &crate::config::ScenarioPhase) -> String {
+    if let Some(arrivals) = &phase.arrivals {
+        format!(
+            "{}/s arrivals, sessions of {:?}, for {:?}",
+            arrivals.rate, arrivals.session_duration, phase.duration
+        )
+    } else if phase.stages.is_empty() {
+        format!("{} connections for {:?}", phase.connections, phase.duration)
+    } else {
+        format!("stages {}", stage_list_label(&phase.stages))
+    }
 }
 
 /// Combines the evaluation of the whole scenario with each phase's own,
@@ -1392,6 +1414,9 @@ fn render_text_report(view: &ReportView<'_>) -> String {
     if let Some(stages) = &view.stages_label() {
         meta_table.add_row(vec!["Load Stages", stages]);
     }
+    if let Some(arrivals) = &metrics.arrivals {
+        meta_table.add_row(vec!["Arrivals".to_string(), arrival_label(arrivals)]);
+    }
     meta_table.add_row(vec![
         "Elapsed Duration",
         &format!("{:.2?}", metrics.elapsed),
@@ -1511,6 +1536,9 @@ fn render_text_report(view: &ReportView<'_>) -> String {
     out.push_str("\n\n");
     if let Some(hint) = coordinated_omission_hint(metrics) {
         out.push_str(&format!("Note: {hint}\n\n"));
+    }
+    if let Some(note) = skipped_arrivals_note(metrics) {
+        out.push_str(&format!("Note: {note}\n\n"));
     }
     if !metrics.actions.is_empty() {
         let mut table = Table::new();
@@ -1703,6 +1731,9 @@ fn render_markdown_report(view: &ReportView<'_>) -> String {
     if let Some(stages) = &view.stages_label() {
         md.push_str(&format!("- **Load Stages:** `{stages}`\n"));
     }
+    if let Some(arrivals) = &metrics.arrivals {
+        md.push_str(&format!("- **Arrivals:** {}\n", arrival_label(arrivals)));
+    }
     if let Some(distributed) = &metrics.distributed {
         md.push_str(&format!(
             "- **Agents:** {}\n",
@@ -1783,6 +1814,9 @@ fn render_markdown_report(view: &ReportView<'_>) -> String {
     md.push('\n');
     if let Some(hint) = coordinated_omission_hint(metrics) {
         md.push_str(&format!("> **Note:** {hint}\n\n"));
+    }
+    if let Some(note) = skipped_arrivals_note(metrics) {
+        md.push_str(&format!("> **Note:** {note}\n\n"));
     }
     if !metrics.actions.is_empty() {
         md.push_str("### By Action\n\n|");
@@ -1940,6 +1974,38 @@ pub(crate) fn action_rows(metrics: &AggregatedMetrics) -> Vec<[String; 8]> {
             ]
         })
         .collect()
+}
+
+/// How an arrival-rate run described its arrivals and what it did with
+/// them, for the configuration tables of the reports.
+pub(crate) fn arrival_label(arrivals: &crate::metrics::ArrivalSummary) -> String {
+    let session = Duration::from_secs_f64(arrivals.session_duration_secs);
+    let cap = arrivals
+        .max_connections
+        .map(|max| format!(", capped at {max} open"))
+        .unwrap_or_default();
+    format!(
+        "{}/s, sessions of {session:?}{cap}: {} started, {} skipped, peak {} open",
+        arrivals.rate, arrivals.started, arrivals.skipped, arrivals.peak_open
+    )
+}
+
+/// The note reports add when an arrival-rate run skipped arrivals because
+/// `--max-connections` sessions were open.
+pub(crate) fn skipped_arrivals_note(metrics: &AggregatedMetrics) -> Option<String> {
+    let arrivals = metrics.arrivals.as_ref().filter(|a| a.skipped > 0)?;
+    let total = arrivals.started + arrivals.skipped;
+    let expected = (arrivals.rate * arrivals.session_duration_secs).ceil();
+    Some(format!(
+        "{} of {total} arrivals ({:.1}%) were skipped because {} sessions were open, so the \
+         run started fewer sessions than its arrival rate. At {}/s with sessions of {:?}, \
+         about {expected} sessions are open at once; raise --max-connections to start them all.",
+        arrivals.skipped,
+        arrivals.skipped as f64 * 100.0 / total as f64,
+        arrivals.max_connections.unwrap_or(arrivals.peak_open),
+        arrivals.rate,
+        Duration::from_secs_f64(arrivals.session_duration_secs),
+    ))
 }
 
 /// The note reports add below the latency percentiles when an echo run
@@ -2102,6 +2168,7 @@ mod tests {
             open_file_limit: None,
             slow_replies: None,
             actions: Vec::new(),
+            arrivals: None,
         }
     }
 

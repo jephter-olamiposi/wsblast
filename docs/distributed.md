@@ -78,10 +78,11 @@ With N agents, in the order of `--agents`:
 | `-n` | Divided the same way, so the agents together send exactly `-n` messages, up to the usual overshoot of about one message per connection ([METHODOLOGY.md, section 10](../METHODOLOGY.md#10-known-limitations)). |
 | `--ramp-rate` | Divided the same way, so every agent ramps its connections in about the same time as one machine would ramp all of them. |
 | `--stages` | Every agent follows the whole profile and opens its share of the target at every moment: agent `i` opens the part `i` of `target(t)` divided as above. The agents' counts add up to the requested target at every point of the profile, not only at the ends of the stages. |
+| `--arrival-rate` | Divided equally, as a number of sessions per second, so the agents together start sessions at the requested rate. `--session-duration` is unchanged, and `--max-connections` is divided like `-c`. The merged `metrics.arrivals` adds up the agents' counts, so its `peak_open` is the sum of each agent's peak. |
 | `--rate` | Unchanged. It is a rate per connection, so the total rate is the same as on one machine. |
 | Everything else | Unchanged. |
 
-When a share would be zero, the run is rejected before anything connects: more agents than connections (or than the highest stage target), than `-n`, or than a non-zero `--ramp-rate`.
+When a share would be zero, the run is rejected before anything connects: more agents than connections (or than the highest stage target), than `-n`, than a non-zero `--ramp-rate`, or than `--max-connections`.
 
 ## 4. Scenarios, capture, refreshed tokens and live export
 
@@ -195,7 +196,7 @@ A test goes through these steps:
 7. **Next phase.** For a scenario, the coordinator sends the next phase's `prepare` on the same connection, and steps 3 to 6 repeat. An agent waits for it for the phase's duration plus `start_timeout` plus 60 seconds.
 8. **Merge.** The coordinator closes the control connections, merges every result that arrived and prints the report.
 
-The `config` of `prepare` is a dedicated wire structure, not a serialised `LoadTestConfig`: the target, the mode, the connections, ramp rate and request limit of this agent, the duration, the stages and the agent's share of them, the rate, the payload (text as is, binary as base64), the handshake headers (including resolved `--auth-*` credentials), the subprotocol, the timeouts, the ping interval, `--match`, the reconnect setting and the GraphQL settings; and, when they apply, `phase` (the scenario phase's name, think time and actions), `capture` (how many records the agent may still queue), `live_auth` (the refreshed header's name and current value) and `chaos` (the faults to inject, with the agent's seed). SLOs, the report format and file paths stay on the coordinator.
+The `config` of `prepare` is a dedicated wire structure, not a serialised `LoadTestConfig`: the target, the mode, the connections, ramp rate and request limit of this agent, the duration, the stages and the agent's share of them, the agent's share of an arrival-rate model (`arrivals`, absent otherwise), the rate, the payload (text as is, binary as base64), the handshake headers (including resolved `--auth-*` credentials), the subprotocol, the timeouts, the ping interval, `--match`, the reconnect setting and the GraphQL settings; and, when they apply, `phase` (the scenario phase's name, think time and actions), `capture` (how many records the agent may still queue), `live_auth` (the refreshed header's name and current value) and `chaos` (the faults to inject, with the agent's seed). SLOs, the report format and file paths stay on the coordinator.
 
 Version 2 of the protocol added scenario phases, the `capture` and `token` messages and the snapshot's `intervals`. Version 3 added `chaos` to the configuration, and the agent's counts of injected faults, its generator lag and its open file limit to its result. Builds speaking different versions reject each other at the hello, with an error naming both wsblast versions: an agent of an earlier release cannot be given chaos settings it would ignore.
 

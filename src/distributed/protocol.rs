@@ -196,6 +196,14 @@ impl Share {
     }
 }
 
+/// An arrival-rate model on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub(crate) struct WireArrivals {
+    pub(crate) rate: f64,
+    pub(crate) session_duration: Duration,
+    pub(crate) max_connections: Option<usize>,
+}
+
 /// A stage on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WireStage {
@@ -387,6 +395,10 @@ pub(crate) struct WireConfig {
     /// target.
     pub(crate) stages: Vec<WireStage>,
     pub(crate) stage_share: Option<Share>,
+    /// An arrival-rate run's model, with this agent's share of the rate and
+    /// of the session cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) arrivals: Option<WireArrivals>,
     pub(crate) max_requests: Option<u64>,
     pub(crate) rate_per_conn: u64,
     pub(crate) payload: WirePayload,
@@ -455,7 +467,19 @@ pub(crate) fn plan(config: &LoadTestConfig, agents: usize) -> Result<Vec<WireCon
     if agents == 0 {
         return Err(ConfigError::InvalidOption("--agents lists no agent".to_string()).into());
     }
-    if config.connections < agents {
+    if let Some(max) = config
+        .arrivals
+        .and_then(|arrivals| arrivals.max_connections)
+        && max < agents
+    {
+        return Err(ConfigError::InvalidOption(format!(
+            "{agents} agents cannot share --max-connections {max}: every agent needs room for at least one session"
+        ))
+        .into());
+    }
+    // An arrival run's connection count is only what it expects to keep
+    // open; every agent starts sessions at its share of the rate.
+    if config.arrivals.is_none() && config.connections < agents {
         let what = if config.stages.is_empty() {
             format!("{} connections", config.connections)
         } else {
@@ -493,6 +517,10 @@ pub(crate) fn plan(config: &LoadTestConfig, agents: usize) -> Result<Vec<WireCon
                 .max_requests
                 .map(|requests| split(requests, index, agents));
             wire.stage_share = (!config.stages.is_empty()).then_some(share);
+            if let Some(arrivals) = wire.arrivals.as_mut() {
+                arrivals.rate /= agents as f64;
+                arrivals.max_connections = arrivals.max_connections.map(|max| share.of(max));
+            }
             if let Some(data) = wire.data.as_mut() {
                 data.share = Some(share);
             }
@@ -582,6 +610,11 @@ impl WireConfig {
                 })
                 .collect(),
             stage_share: None,
+            arrivals: config.arrivals.map(|arrivals| WireArrivals {
+                rate: arrivals.rate,
+                session_duration: arrivals.session_duration,
+                max_connections: arrivals.max_connections,
+            }),
             max_requests: config.max_requests,
             rate_per_conn: config.rate_per_conn,
             payload,
@@ -643,6 +676,11 @@ impl WireConfig {
             .reply_match(reply_match)
             .reconnect(self.reconnect)
             .progress(false);
+        if let Some(arrivals) = self.arrivals {
+            let mut model = crate::config::Arrivals::new(arrivals.rate, arrivals.session_duration);
+            model.max_connections = arrivals.max_connections;
+            builder = builder.arrivals(model);
+        }
         if let Some(requests) = self.max_requests {
             builder = builder.max_requests(requests);
         }
@@ -946,6 +984,7 @@ impl WirePhase {
             name: self.name,
             target: None,
             duration: config.duration,
+            arrivals: config.arrivals,
             connections: config.connections,
             ramp_rate: config.ramp_rate,
             rate_per_conn: config.rate_per_conn,
@@ -1233,6 +1272,9 @@ pub(crate) struct WireResult {
     /// where the agent cannot read it (Windows).
     #[serde(default)]
     pub(crate) open_file_limit: Option<OpenFileLimit>,
+    /// What an arrival-rate run did with the agent's arrivals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) arrivals: Option<crate::metrics::ArrivalCounts>,
 }
 
 /// A decoded result, ready to merge.
@@ -1246,6 +1288,7 @@ pub(crate) struct AgentResult {
     pub(crate) capture_dropped: Option<u64>,
     pub(crate) lag: LagTotals,
     pub(crate) open_file_limit: Option<OpenFileLimit>,
+    pub(crate) arrivals: Option<crate::metrics::ArrivalCounts>,
 }
 
 impl WireResult {
@@ -1273,6 +1316,7 @@ impl WireResult {
             capture_dropped: outcome_meta.capture_dropped,
             generator_lag: WireLag::new(&outcome_meta.lag),
             open_file_limit: outcome_meta.open_file_limit,
+            arrivals: outcome_meta.arrivals,
         }
     }
 
@@ -1300,6 +1344,7 @@ impl WireResult {
                 .transpose()?
                 .unwrap_or_default(),
             open_file_limit: self.open_file_limit,
+            arrivals: self.arrivals,
         })
     }
 }
@@ -1313,6 +1358,7 @@ pub(crate) struct ResultMeta {
     pub(crate) capture_dropped: Option<u64>,
     pub(crate) lag: LagTotals,
     pub(crate) open_file_limit: Option<OpenFileLimit>,
+    pub(crate) arrivals: Option<crate::metrics::ArrivalCounts>,
 }
 
 #[cfg(test)]
@@ -1356,6 +1402,42 @@ mod tests {
         assert_eq!(requests, [Some(34), Some(34), Some(33)]);
         assert!(shares.iter().all(|s| s.rate_per_conn == 20));
         assert!(shares.iter().all(|s| s.stage_share.is_none()));
+    }
+
+    #[test]
+    fn arrival_runs_split_the_rate_and_the_cap() {
+        let base = LoadTestConfig::builder("ws://127.0.0.1:9/").arrivals(
+            crate::config::Arrivals::new(30.0, Duration::from_secs(2)).with_max_connections(10),
+        );
+        let shares = plan(&config(base), 3).unwrap();
+        for share in &shares {
+            let arrivals = share.arrivals.expect("every agent gets the model");
+            assert!((arrivals.rate - 10.0).abs() < 1e-9, "{arrivals:?}");
+            assert_eq!(arrivals.session_duration, Duration::from_secs(2));
+        }
+        let caps: Vec<Option<usize>> = shares
+            .iter()
+            .map(|s| s.arrivals.and_then(|a| a.max_connections))
+            .collect();
+        assert_eq!(caps, [Some(4), Some(3), Some(3)]);
+        // The agent rebuilds its share, expecting 10/s x 2 s = 20 open, at
+        // most its cap.
+        let wire: WireConfig =
+            serde_json::from_str(&serde_json::to_string(&shares[0]).unwrap()).unwrap();
+        let rebuilt = wire.into_config().unwrap();
+        assert_eq!(rebuilt.arrivals.and_then(|a| a.max_connections), Some(4));
+        assert_eq!(rebuilt.connections, 4);
+
+        // One expected connection is enough for many agents, but the cap
+        // must leave each of them room for a session.
+        let slow = LoadTestConfig::builder("ws://127.0.0.1:9/")
+            .arrivals(crate::config::Arrivals::new(0.5, Duration::from_secs(1)));
+        assert_eq!(plan(&config(slow), 3).unwrap().len(), 3);
+        let tight = LoadTestConfig::builder("ws://127.0.0.1:9/").arrivals(
+            crate::config::Arrivals::new(30.0, Duration::from_secs(2)).with_max_connections(2),
+        );
+        let err = plan(&config(tight), 3).unwrap_err().to_string();
+        assert!(err.contains("--max-connections 2"), "{err}");
     }
 
     #[test]
@@ -1938,6 +2020,7 @@ phases:
                 capture_dropped: None,
                 lag: lag.clone(),
                 open_file_limit: Some(limit.clone()),
+                arrivals: None,
             },
             TimeSeries::default(),
             &BTreeMap::new(),

@@ -13,6 +13,9 @@ subcommand.
 | `-d, --duration` | `10s` | Total run time, including the ramp |
 | `--ramp-rate` | `0` | Connections opened per second (`0` opens all at once) |
 | `--stages` | | Load profile instead of `-c`, `-d` and `--ramp-rate`: `DURATION:CONNECTIONS` stages such as `30s:100,2m:100,30s:0` |
+| `--arrival-rate` | | New sessions per second instead of `-c`: sessions keep arriving whether or not the server keeps up. Needs `--session-duration`; `-d` sets the length of the run. Cannot be used with `-c`, `--stages` or `--ramp-rate` ([METHODOLOGY.md, section 2.1.2](../METHODOLOGY.md#212-arrival-rate)) |
+| `--session-duration` | | How long each `--arrival-rate` session stays connected, handshake included |
+| `--max-connections` | | With `--arrival-rate`, the most sessions open at once; arrivals while this many are open are skipped and counted |
 | `-r, --rate` | `0` | Messages per second per connection (`0` is unthrottled) |
 | `-n, --requests` | | Stop after this many messages in total |
 

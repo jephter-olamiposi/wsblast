@@ -70,6 +70,7 @@ pub(crate) fn phase_config(mut config: LoadTestConfig, phase: &ScenarioPhase) ->
     // A staged phase runs exactly like `--stages`; any other phase holds
     // its connection count, whatever stages the base configuration had.
     config.stages = phase.stages.clone();
+    config.arrivals = phase.arrivals;
     config.rate_per_conn = phase.rate_per_conn;
     if let Some(payload) = phase.payload.clone() {
         config.payload = payload;
@@ -301,16 +302,17 @@ impl Runner {
     pub async fn run(&self) -> crate::error::Result<AggregatedMetrics> {
         let outcome = self.run_and_collect().await?;
 
-        Ok(
-            AggregatedMetrics::merge(outcome.worker_metrics, outcome.elapsed, outcome.connections)?
-                .with_not_started(outcome.not_started)
-                .with_time_series(outcome.time_series)
-                .with_capture(outcome.capture)
-                .with_generator(
-                    outcome.lag.summary(),
-                    open_file_limit(self.config.connections),
-                ),
-        )
+        Ok(outcome
+            .totals
+            .finish(outcome.elapsed, outcome.connections)
+            .with_not_started(outcome.not_started)
+            .with_time_series(outcome.time_series)
+            .with_capture(outcome.capture)
+            .with_arrivals(self.config.arrivals.as_ref(), outcome.arrivals)
+            .with_generator(
+                outcome.lag.summary(),
+                open_file_limit(self.config.connections),
+            ))
     }
 
     /// Waits until the run is cancelled, by its timer, a limit or a signal,
@@ -405,6 +407,99 @@ impl Runner {
         closed
     }
 
+    /// Starts sessions at the arrival rate until the run is cancelled, ends
+    /// each one after its session duration, and adds every session's
+    /// metrics to `totals` as it finishes, so memory follows the sessions
+    /// open at once rather than every session of the run.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_arrivals(
+        &self,
+        arrivals: crate::config::Arrivals,
+        target: &Arc<ConnectTarget>,
+        interval_store: &Arc<IntervalStore>,
+        latency: &Arc<LatencyRecorder>,
+        start_time: Instant,
+        capture: &SessionCapture,
+        totals: &mut crate::metrics::MetricsTotals,
+    ) -> crate::metrics::ArrivalCounts {
+        let mut open = tokio::task::JoinSet::new();
+        let mut counts = crate::metrics::ArrivalCounts::default();
+        let max_open = arrivals.max_connections.unwrap_or(usize::MAX);
+        let start = tokio::time::Instant::from_std(start_time);
+        // No session arrives once the run is over, even when its timer
+        // fires a moment after an arrival due at that instant.
+        let end = start + self.config.duration;
+        let mut arrived = 0u64;
+        let mut next = start;
+        loop {
+            let wake = next.min(end);
+            tokio::select! {
+                biased;
+                _ = self.cancel_token.cancelled() => break,
+                () = tokio::time::sleep_until(wake) => {}
+            }
+            while let Some(done) = open.try_join_next() {
+                add_session(totals, done);
+            }
+            // Every arrival that is due, so a late wake-up catches up instead
+            // of lowering the rate.
+            let now = tokio::time::Instant::now();
+            if next >= end {
+                // Wait for the run to end, still collecting the sessions
+                // that finish meanwhile.
+                tokio::select! {
+                    biased;
+                    _ = self.cancel_token.cancelled() => break,
+                    Some(done) = open.join_next() => {
+                        add_session(totals, done);
+                        continue;
+                    }
+                }
+            }
+            while next <= now && next < end {
+                if open.len() >= max_open {
+                    counts.skipped += 1;
+                } else {
+                    let metrics = WorkerMetrics::with_latency(
+                        Arc::clone(&self.live_metrics),
+                        Arc::clone(latency),
+                    )
+                    .with_interval(IntervalRecorder::new(Arc::clone(interval_store)));
+                    let token = self.cancel_token.child_token();
+                    let session = self.create_session(
+                        counts.started as usize,
+                        target,
+                        token.clone(),
+                        metrics,
+                        capture,
+                    );
+                    let lifetime = arrivals.session_duration;
+                    open.spawn(async move {
+                        let run = Box::new(session).run();
+                        tokio::pin!(run);
+                        tokio::select! {
+                            metrics = &mut run => metrics,
+                            () = tokio::time::sleep(lifetime) => {
+                                token.cancel();
+                                run.await
+                            }
+                        }
+                    });
+                    counts.started += 1;
+                    counts.peak_open = counts.peak_open.max(open.len() as u64);
+                }
+                arrived += 1;
+                next = start + Duration::from_secs_f64(arrived as f64 / arrivals.rate);
+            }
+        }
+        while let Some(done) = open.join_next().await {
+            add_session(totals, done);
+        }
+        // Every session has stopped, so the shared recorder is complete.
+        totals.add_recorder(latency);
+        counts
+    }
+
     /// Runs the worker pool and returns the unmerged outcome.
     ///
     /// # Errors
@@ -446,7 +541,8 @@ impl Runner {
                 let total_connections = self.config.connections as u64;
                 let started_at = Instant::now();
                 return Ok(RunOutcome {
-                    worker_metrics: Vec::new(),
+                    totals: crate::metrics::MetricsTotals::new()?,
+                    arrivals: None,
                     elapsed: Duration::ZERO,
                     connections: total_connections,
                     not_started: total_connections,
@@ -471,16 +567,26 @@ impl Runner {
             self.config.ramp_rate,
             self.config.duration,
         );
+        // An arrival run gives each session the next row, so it needs a
+        // row per session of the run rather than per open connection.
+        let (rows_needed, about, what) = match &self.config.arrivals {
+            Some(arrivals) => {
+                warn_if_arrivals_exceed_cap(arrivals);
+                let sessions = (arrivals.rate * self.config.duration.as_secs_f64()).ceil();
+                (sessions.min(usize::MAX as f64) as usize, "about", "session")
+            }
+            None => (self.config.connections, "", "connection"),
+        };
         if let Some(data) = &self.config.data
-            && data.len() < self.config.connections
+            && data.len() < rows_needed
         {
             eprintln!(
-                "{} {} has {} rows for {} connections, so rows are reused: connection {} uses the first row again.",
+                "{} {} has {} rows for {about}{}{rows_needed} {what}s, so rows are reused: the {} {what} uses the first row again.",
                 colored::Colorize::bold("Warning:").yellow(),
                 data.path(),
                 data.len(),
-                self.config.connections,
-                data.len() + 1
+                if about.is_empty() { "" } else { " " },
+                ordinal(data.len() + 1),
             );
         }
     }
@@ -604,7 +710,26 @@ impl Runner {
             });
         }
 
-        let (handles, connections, not_started) = if self.config.stages.is_empty() {
+        let mut totals = crate::metrics::MetricsTotals::new()?;
+        let mut arrival_counts = None;
+        let (handles, connections, not_started) = if let Some(arrivals) = self.config.arrivals {
+            // Every session an arrival run starts is one it tried; skipped
+            // arrivals are counted apart.
+            let (counts, ()) = tokio::join!(
+                self.run_arrivals(
+                    arrivals,
+                    &target,
+                    &interval_store,
+                    &latency,
+                    start_time,
+                    &capture,
+                    &mut totals,
+                ),
+                self.wait_until_done(start_time)
+            );
+            arrival_counts = Some(counts);
+            (Vec::new(), counts.started, 0)
+        } else if self.config.stages.is_empty() {
             let mut handles = Vec::with_capacity(total_connections);
             for worker_id in 0..total_connections {
                 if self.cancel_token.is_cancelled() {
@@ -648,11 +773,10 @@ impl Runner {
 
         let elapsed = start_time.elapsed();
 
-        let mut worker_metrics = Vec::with_capacity(handles.len());
         for handle in handles {
             if let Ok(mut metrics) = handle.await {
                 metrics.flush_interval();
-                worker_metrics.push(metrics);
+                totals.add_worker(metrics);
             }
         }
         if let Some(intervals) = &self.live_intervals {
@@ -677,7 +801,8 @@ impl Runner {
         let capture = None;
 
         Ok(RunOutcome {
-            worker_metrics,
+            totals,
+            arrivals: arrival_counts,
             elapsed,
             connections,
             not_started,
@@ -691,10 +816,26 @@ impl Runner {
     }
 }
 
+/// Adds a finished session's counters while other sessions still record
+/// into the shared latency recorder. A session task that panicked has none
+/// to add.
+fn add_session(
+    totals: &mut crate::metrics::MetricsTotals,
+    done: std::result::Result<WorkerMetrics, tokio::task::JoinError>,
+) {
+    if let Ok(mut metrics) = done {
+        metrics.flush_interval();
+        totals.add_worker_counts(metrics);
+    }
+}
+
 /// Raw result of one runner pass, before the worker metrics are merged.
 #[derive(Debug)]
 pub(crate) struct RunOutcome {
-    pub(crate) worker_metrics: Vec<WorkerMetrics>,
+    /// The metrics of every worker, added up.
+    pub(crate) totals: crate::metrics::MetricsTotals,
+    /// Sessions an arrival-rate run started and skipped.
+    pub(crate) arrivals: Option<crate::metrics::ArrivalCounts>,
     pub(crate) elapsed: Duration,
     /// Connection slots the run was configured to open.
     pub(crate) connections: u64,
@@ -780,6 +921,36 @@ async fn recv_or_pending(signal: Option<&mut tokio::signal::unix::Signal>) {
             signal.recv().await;
         }
         None => std::future::pending().await,
+    }
+}
+
+/// "1st", "2nd", "3rd", "11th" and so on.
+fn ordinal(n: usize) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
+/// Warns when `--max-connections` is below the sessions an arrival run
+/// keeps open, so that some arrivals will be skipped.
+fn warn_if_arrivals_exceed_cap(arrivals: &crate::config::Arrivals) {
+    let Some(max) = arrivals.max_connections else {
+        return;
+    };
+    let open = arrivals.rate * arrivals.session_duration.as_secs_f64();
+    if open > max as f64 {
+        eprintln!(
+            "{} At --arrival-rate {} with --session-duration {:?}, about {} sessions are open at once, more than --max-connections {max}; arrivals while {max} are open will be skipped.",
+            "Warning:".bold().yellow(),
+            arrivals.rate,
+            arrivals.session_duration,
+            open.ceil()
+        );
     }
 }
 
@@ -1054,6 +1225,7 @@ impl ScenarioExecutor {
         let mut time_series = TimeSeries::default();
         let mut lag = LagTotals::default();
         let mut largest_phase = 0usize;
+        let mut scenario_arrivals: Option<crate::metrics::ArrivalSummary> = None;
         let scenario_start = Instant::now();
         let mut phase_targets = Vec::with_capacity(self.phases.len());
 
@@ -1077,11 +1249,7 @@ impl ScenarioExecutor {
             if self.cancel_token.is_cancelled() {
                 break;
             }
-            let load = if phase.stages.is_empty() {
-                format!("{} connections for {:?}", phase.connections, phase.duration)
-            } else {
-                format!("stages {}", crate::report::stage_list_label(&phase.stages))
-            };
+            let load = crate::report::phase_start_label(phase);
             // The TUI shows the phase itself; a line on stderr would be
             // drawn over it.
             if !self.base_config.tui {
@@ -1131,10 +1299,7 @@ impl ScenarioExecutor {
             // Each phase is summarised from its own workers, and its totals
             // are added to the scenario's, so the merged metrics are those
             // of every worker together.
-            let mut phase_totals = crate::metrics::MetricsTotals::new()?;
-            for worker in outcome.worker_metrics {
-                phase_totals.add_worker(worker);
-            }
+            let phase_totals = outcome.totals;
             totals.add(&phase_totals)?;
             lag.add(&outcome.lag);
             largest_phase = largest_phase.max(phase.connections);
@@ -1142,7 +1307,14 @@ impl ScenarioExecutor {
                 .finish(outcome.elapsed, outcome.connections)
                 .with_not_started(outcome.not_started)
                 .with_time_series(outcome.time_series.clone())
+                .with_arrivals(phase.arrivals.as_ref(), outcome.arrivals)
                 .with_generator(outcome.lag.summary(), open_file_limit(phase.connections));
+            if let Some(phase_arrivals) = &phase_metrics.arrivals {
+                match scenario_arrivals.as_mut() {
+                    Some(all) => all.add_phase(phase_arrivals),
+                    None => scenario_arrivals = Some(*phase_arrivals),
+                }
+            }
             let phase_slo = crate::report::evaluate_slos(&phase.slo, &phase_metrics);
             if let Some(progress) = &self.progress {
                 progress.end_phase(&phase.name, &phase_slo);
@@ -1176,12 +1348,13 @@ impl ScenarioExecutor {
         #[cfg(not(feature = "capture"))]
         let capture = None;
 
-        let metrics = totals
+        let mut metrics = totals
             .finish(total_elapsed, total_connections)
             .with_not_started(total_not_started)
             .with_time_series(time_series)
             .with_capture(capture)
             .with_generator(lag.summary(), open_file_limit(largest_phase));
+        metrics.arrivals = scenario_arrivals;
         let overall = crate::report::evaluate_slos(
             &self.base_config.slo.or_from(&self.scenario_slo),
             &metrics,

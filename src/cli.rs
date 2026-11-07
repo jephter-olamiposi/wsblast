@@ -68,6 +68,36 @@ pub(crate) struct Cli {
     )]
     pub stages: Option<String>,
 
+    /// Start new sessions at this rate, per second, instead of holding -c
+    /// connections: arrivals keep their schedule whether or not the server
+    /// keeps up. Each session closes after --session-duration; -d sets the
+    /// length of the run
+    #[arg(
+        long = "arrival-rate",
+        value_name = "PER_SEC",
+        requires = "session_duration",
+        conflicts_with_all = ["connections", "stages", "ramp_rate"]
+    )]
+    pub arrival_rate: Option<f64>,
+
+    /// How long each --arrival-rate session stays connected, handshake
+    /// included (e.g. '30s')
+    #[arg(
+        long = "session-duration",
+        value_name = "DURATION",
+        requires = "arrival_rate"
+    )]
+    pub session_duration: Option<String>,
+
+    /// With --arrival-rate, the most sessions open at once; arrivals while
+    /// this many are open are skipped and counted
+    #[arg(
+        long = "max-connections",
+        value_name = "NUM",
+        requires = "arrival_rate"
+    )]
+    pub max_connections: Option<usize>,
+
     /// Maximum total messages to send across all workers (optional limit)
     #[arg(short = 'n', long = "requests", value_name = "NUM")]
     pub requests: Option<u64>,
@@ -448,7 +478,7 @@ pub(crate) struct Cli {
     pub otel_service_name: Option<String>,
 
     /// Path to scenario YAML file defining multi-phase test (conflicts with individual flags)
-    #[arg(long = "scenario", value_name = "FILE", conflicts_with_all = ["connections", "duration", "rate", "payload", "payload_file"])]
+    #[arg(long = "scenario", value_name = "FILE", conflicts_with_all = ["connections", "duration", "rate", "payload", "payload_file", "arrival_rate"])]
     pub scenario: Option<PathBuf>,
 
     /// Run only a specific phase from the scenario by name

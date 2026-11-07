@@ -41,6 +41,8 @@ pub struct LoadTestConfig {
     pub(crate) duration: Duration,
     /// A staged load profile; empty for a constant connection count.
     pub(crate) stages: Vec<Stage>,
+    /// An arrival-rate load model, in place of a connection count.
+    pub(crate) arrivals: Option<Arrivals>,
     pub(crate) max_requests: Option<u64>,
     pub(crate) rate_per_conn: u64,
     pub(crate) payload: PayloadConfig,
@@ -163,6 +165,13 @@ impl LoadTestConfig {
         &self.stages
     }
 
+    /// The arrival-rate load model, if the run uses one. With arrivals,
+    /// [`connections`](Self::connections) is the number of sessions
+    /// expected to be open at once ([`Arrivals::expected_connections`]).
+    pub fn arrivals(&self) -> Option<&Arrivals> {
+        self.arrivals.as_ref()
+    }
+
     /// Cap on messages sent across all workers, if any.
     pub fn max_requests(&self) -> Option<u64> {
         self.max_requests
@@ -261,6 +270,7 @@ pub struct LoadTestConfigBuilder {
     ramp_rate: u64,
     duration: Duration,
     stages: Vec<Stage>,
+    arrivals: Option<Arrivals>,
     max_requests: Option<u64>,
     rate_per_conn: u64,
     payload: PayloadConfig,
@@ -315,6 +325,7 @@ impl LoadTestConfigBuilder {
             ramp_rate: 0,
             duration: Duration::from_secs(10),
             stages: Vec::new(),
+            arrivals: None,
             max_requests: None,
             rate_per_conn: 0,
             payload: PayloadConfig::from_text(DEFAULT_TEXT_PAYLOAD.to_string()),
@@ -389,6 +400,30 @@ impl LoadTestConfigBuilder {
     /// ```
     pub fn stages(mut self, stages: Vec<Stage>) -> Self {
         self.stages = stages;
+        self
+    }
+
+    /// Starts new sessions at a fixed rate instead of holding a connection
+    /// count: an open load model, in which arrivals do not wait for the
+    /// server. Each session connects, runs the configured mode for
+    /// [`Arrivals::session_duration`] and closes; the run lasts
+    /// [`duration`](Self::duration). This replaces
+    /// [`connections`](Self::connections), and cannot be combined with
+    /// [`stages`](Self::stages) or [`ramp_rate`](Self::ramp_rate).
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use wsblast::{Arrivals, LoadTestConfig};
+    ///
+    /// let config = LoadTestConfig::builder("ws://127.0.0.1:9001")
+    ///     .arrivals(Arrivals::new(20.0, Duration::from_secs(30)).with_max_connections(1_000))
+    ///     .duration(Duration::from_secs(120))
+    ///     .build()?;
+    /// assert_eq!(config.connections(), 600);
+    /// # Ok::<(), wsblast::WsBlastError>(())
+    /// ```
+    pub fn arrivals(mut self, arrivals: Arrivals) -> Self {
+        self.arrivals = Some(arrivals);
         self
     }
 
@@ -660,6 +695,10 @@ impl LoadTestConfigBuilder {
     ///   GraphQL mode, which send no data frames to act on.
     pub fn build(mut self) -> Result<LoadTestConfig> {
         let target_url = parse_target_url(&self.target)?;
+        if let Some(arrivals) = &self.arrivals {
+            arrivals.validate(&self.stages, self.ramp_rate)?;
+            self.connections = arrivals.expected_connections();
+        }
         if !self.stages.is_empty() {
             validate_stages(&self.stages, self.ramp_rate)?;
             self.connections = self.stages.iter().map(|s| s.target).max().unwrap_or(0);
@@ -726,6 +765,7 @@ impl LoadTestConfigBuilder {
             ramp_rate: self.ramp_rate,
             duration: self.duration,
             stages: self.stages,
+            arrivals: self.arrivals,
             max_requests: self.max_requests,
             rate_per_conn: self.rate_per_conn,
             payload: self.payload,
@@ -804,6 +844,99 @@ fn validate_stages(stages: &[Stage], ramp_rate: u64) -> Result<()> {
         .into());
     }
     Ok(())
+}
+
+/// The highest arrival rate wsblast accepts, in sessions per second.
+const MAX_ARRIVAL_RATE: f64 = 1_000_000.0;
+
+/// An arrival-rate load model: new sessions start at a fixed rate whether or
+/// not the server keeps up, and each one lasts `session_duration`.
+///
+/// Arrivals are spread evenly: session `k` starts `k / rate` seconds after
+/// the run starts. When `max_connections` sessions are open, an arrival is
+/// skipped and counted, as an arrival-rate test should not wait for a slot.
+///
+/// See [`LoadTestConfigBuilder::arrivals`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct Arrivals {
+    /// New sessions per second.
+    pub rate: f64,
+    /// How long each session lasts, from its arrival, handshake included.
+    pub session_duration: Duration,
+    /// The most sessions open at once; `None` for no cap.
+    pub max_connections: Option<usize>,
+}
+
+impl Arrivals {
+    /// `rate` new sessions per second, each lasting `session_duration`.
+    pub fn new(rate: f64, session_duration: Duration) -> Self {
+        Self {
+            rate,
+            session_duration,
+            max_connections: None,
+        }
+    }
+
+    /// Skips arrivals while `max_connections` sessions are open.
+    #[must_use]
+    pub fn with_max_connections(mut self, max_connections: usize) -> Self {
+        self.max_connections = Some(max_connections);
+        self
+    }
+
+    /// The number of sessions open at once once the run is steady: the
+    /// rate times the session duration, rounded up, at most
+    /// `max_connections`, and at least 1.
+    pub fn expected_connections(&self) -> usize {
+        let open = (self.rate * self.session_duration.as_secs_f64()).ceil();
+        let open = if open.is_finite() && open >= 1.0 {
+            open.min(usize::MAX as f64) as usize
+        } else {
+            1
+        };
+        self.max_connections
+            .map_or(open, |max| open.min(max))
+            .max(1)
+    }
+
+    /// Checks the values, naming them as `names` spells them: the flags or
+    /// the scenario keys.
+    fn check_values(&self, names: [&str; 3]) -> std::result::Result<(), String> {
+        let [rate, session, max] = names;
+        if !(self.rate.is_finite() && self.rate > 0.0 && self.rate <= MAX_ARRIVAL_RATE) {
+            return Err(format!(
+                "{rate} must be greater than zero and at most {MAX_ARRIVAL_RATE} sessions per second, received {}",
+                self.rate
+            ));
+        }
+        if self.session_duration.is_zero() {
+            return Err(format!("{session} must be greater than zero"));
+        }
+        if self.max_connections == Some(0) {
+            return Err(format!("{max} must be greater than zero"));
+        }
+        Ok(())
+    }
+
+    fn validate(&self, stages: &[Stage], ramp_rate: u64) -> Result<()> {
+        self.check_values(["--arrival-rate", "--session-duration", "--max-connections"])
+            .map_err(ConfigError::InvalidOption)?;
+        let conflict = if !stages.is_empty() {
+            Some("--stages")
+        } else if ramp_rate > 0 {
+            Some("--ramp-rate")
+        } else {
+            None
+        };
+        if let Some(flag) = conflict {
+            return Err(ConfigError::UnsupportedOption(format!(
+                "--arrival-rate starts sessions at its own rate and cannot be combined with {flag}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
 }
 
 /// One stage of a staged load profile: over `duration`, the number of open
@@ -1490,6 +1623,16 @@ pub(crate) struct PhaseConfig {
     /// `ramp_rate`.
     #[serde(default)]
     pub(crate) stages: Option<StagesConfig>,
+    /// New sessions per second, in place of `connections`, `ramp_rate` and
+    /// `stages`; needs `session_duration` and `duration`.
+    #[serde(default)]
+    pub(crate) arrival_rate: Option<f64>,
+    /// How long each `arrival_rate` session lasts.
+    #[serde(default)]
+    pub(crate) session_duration: Option<String>,
+    /// The most `arrival_rate` sessions open at once.
+    #[serde(default)]
+    pub(crate) max_connections: Option<usize>,
     #[serde(default)]
     pub(crate) rate_per_conn: u64,
     #[serde(default)]
@@ -1851,6 +1994,9 @@ pub(crate) struct ScenarioPhase {
     /// count. With stages, `connections` is the highest target, `duration`
     /// the sum of the stage durations and `ramp_rate` 0.
     pub(crate) stages: Vec<Stage>,
+    /// The phase's arrival-rate load model. With arrivals, `connections` is
+    /// the number of sessions expected to be open at once.
+    pub(crate) arrivals: Option<Arrivals>,
     /// Faults this phase injects in place of the command line's; a mapping
     /// whose knobs are all off turns them off for the phase.
     #[cfg(feature = "chaos")]
@@ -2188,7 +2334,26 @@ impl ScenarioPhase {
     /// `connections` or `duration` is missing without `stages`, and when
     /// `stages` is combined with them or with `ramp_rate`.
     pub(crate) fn compile(phase: &PhaseConfig) -> Result<Self> {
+        let arrivals = Self::compile_arrivals(phase)?;
         let (connections, duration, ramp_rate, stages) = match &phase.stages {
+            _ if arrivals.is_some() => {
+                let duration = phase.duration.as_deref().ok_or_else(|| {
+                    invalid_phase(
+                        &phase.name,
+                        "missing field `duration`; `arrival_rate` starts sessions for `duration`",
+                    )
+                })?;
+                let duration = parse_human_duration(duration).map_err(|e| {
+                    ConfigError::InvalidScenario(format!("phase '{}': {e}", phase.name))
+                })?;
+                if duration.is_zero() {
+                    return Err(
+                        invalid_phase(&phase.name, "duration must be greater than zero").into(),
+                    );
+                }
+                let connections = arrivals.map_or(1, |a| a.expected_connections());
+                (connections, duration, 0, Vec::new())
+            }
             Some(stages) => {
                 let mixed: Vec<&str> = [
                     ("`connections`", phase.connections.is_some()),
@@ -2284,6 +2449,7 @@ impl ScenarioPhase {
             action_names,
             slo: compile_slo(phase.slo.as_ref(), &format!("phase '{}': slo", phase.name))?,
             stages,
+            arrivals,
             #[cfg(feature = "chaos")]
             chaos: phase
                 .chaos
@@ -2291,6 +2457,55 @@ impl ScenarioPhase {
                 .map(|chaos| chaos.compile(&phase.name))
                 .transpose()?,
         })
+    }
+
+    /// The phase's arrival-rate keys, checked: `arrival_rate` needs
+    /// `session_duration`, excludes `connections`, `ramp_rate` and `stages`,
+    /// and `session_duration` and `max_connections` need it.
+    fn compile_arrivals(phase: &PhaseConfig) -> Result<Option<Arrivals>> {
+        let Some(rate) = phase.arrival_rate else {
+            if phase.session_duration.is_some() || phase.max_connections.is_some() {
+                return Err(invalid_phase(
+                    &phase.name,
+                    "`session_duration` and `max_connections` need `arrival_rate`",
+                )
+                .into());
+            }
+            return Ok(None);
+        };
+        let mixed: Vec<&str> = [
+            ("`connections`", phase.connections.is_some()),
+            ("`ramp_rate`", phase.ramp_rate.is_some()),
+            ("`stages`", phase.stages.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(key, set)| set.then_some(key))
+        .collect();
+        if !mixed.is_empty() {
+            return Err(invalid_phase(
+                &phase.name,
+                &format!(
+                    "`arrival_rate` cannot be combined with {}; the arrival rate sets how many sessions are open",
+                    mixed.join(", ")
+                ),
+            )
+            .into());
+        }
+        let session = phase.session_duration.as_deref().ok_or_else(|| {
+            invalid_phase(
+                &phase.name,
+                "`arrival_rate` needs `session_duration`, how long each session stays connected",
+            )
+        })?;
+        let session = parse_human_duration(session).map_err(|e| {
+            ConfigError::InvalidScenario(format!("phase '{}': session_duration: {e}", phase.name))
+        })?;
+        let mut arrivals = Arrivals::new(rate, session);
+        arrivals.max_connections = phase.max_connections;
+        arrivals
+            .check_values(["arrival_rate", "session_duration", "max_connections"])
+            .map_err(|e| invalid_phase(&phase.name, &e))?;
+        Ok(Some(arrivals))
     }
 }
 
@@ -2669,6 +2884,16 @@ impl LoadTestConfig {
             .map(Stage::parse_list)
             .transpose()?
             .unwrap_or_default();
+        let arrivals = match (cli.arrival_rate, cli.session_duration.as_deref()) {
+            (Some(rate), Some(session)) => {
+                let arrivals = Arrivals::new(rate, parse_human_duration(session)?);
+                Some(match cli.max_connections {
+                    Some(max) => arrivals.with_max_connections(max),
+                    None => arrivals,
+                })
+            }
+            _ => None,
+        };
         let mut builder = LoadTestConfig::builder(raw_url)
             .connections(cli.connections)
             .ramp_rate(cli.ramp_rate)
@@ -2685,6 +2910,7 @@ impl LoadTestConfig {
             .progress(!cli.no_progress)
             .reconnect(!cli.no_reconnect);
         builder.max_requests = cli.requests;
+        builder.arrivals = arrivals;
         builder.expect = cli.expect.take();
         #[cfg(feature = "capture")]
         {
@@ -2756,6 +2982,7 @@ impl LoadTestConfig {
         config.connections = phase.connections;
         config.duration = phase.duration;
         config.ramp_rate = phase.ramp_rate;
+        config.arrivals = phase.arrivals;
         config.rate_per_conn = phase.rate_per_conn;
         if let Some(payload) = phase.payload {
             config.payload = payload;
@@ -3675,6 +3902,9 @@ mod tests {
             connections: Some(2),
             ramp_rate: None,
             stages: None,
+            arrival_rate: None,
+            session_duration: None,
+            max_connections: None,
             rate_per_conn: 0,
             payload: None,
             think_time: None,
@@ -4147,6 +4377,129 @@ phases:
             "version: \"1.0\"\ntarget: \"ws://127.0.0.1:9001\"\nmetadata:\n  name: \"slo\"\n\
              {top}phases:\n  - name: \"spike\"\n    duration: \"1s\"\n    connections: 2\n{phase}"
         )
+    }
+
+    #[test]
+    fn arrival_models_are_validated() {
+        let build = |arrivals: Arrivals| {
+            LoadTestConfig::builder("ws://127.0.0.1:9001")
+                .arrivals(arrivals)
+                .build()
+        };
+        let config = build(Arrivals::new(20.0, Duration::from_secs(30))).unwrap();
+        assert_eq!(config.connections(), 600);
+        assert_eq!(
+            build(Arrivals::new(0.1, Duration::from_secs(1)))
+                .unwrap()
+                .connections(),
+            1
+        );
+        assert_eq!(
+            build(Arrivals::new(20.0, Duration::from_secs(30)).with_max_connections(50))
+                .unwrap()
+                .connections(),
+            50
+        );
+        for (arrivals, expected) in [
+            (
+                Arrivals::new(0.0, Duration::from_secs(1)),
+                "--arrival-rate must be greater than zero",
+            ),
+            (
+                Arrivals::new(f64::NAN, Duration::from_secs(1)),
+                "received NaN",
+            ),
+            (
+                Arrivals::new(2e6, Duration::from_secs(1)),
+                "at most 1000000",
+            ),
+            (
+                Arrivals::new(5.0, Duration::ZERO),
+                "--session-duration must be greater than zero",
+            ),
+            (
+                Arrivals::new(5.0, Duration::from_secs(1)).with_max_connections(0),
+                "--max-connections must be greater than zero",
+            ),
+        ] {
+            let message = build(arrivals).unwrap_err().to_string();
+            assert!(message.contains(expected), "{message}");
+        }
+        let arrivals = Arrivals::new(5.0, Duration::from_secs(1));
+        let staged = LoadTestConfig::builder("ws://127.0.0.1:9001")
+            .arrivals(arrivals)
+            .stages(vec![Stage::new(Duration::from_secs(1), 2)])
+            .build()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            staged.contains("cannot be combined with --stages"),
+            "{staged}"
+        );
+        let ramped = LoadTestConfig::builder("ws://127.0.0.1:9001")
+            .arrivals(arrivals)
+            .ramp_rate(5)
+            .build()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            ramped.contains("cannot be combined with --ramp-rate"),
+            "{ramped}"
+        );
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn arrival_phases_are_parsed_and_checked() {
+        let phase = |keys: &str| {
+            format!(
+                "version: \"1.0\"\ntarget: ws://127.0.0.1:9001\nmetadata: {{ name: a }}\n\
+                 phases:\n  - name: churn\n{keys}"
+            )
+        };
+        let scenario = ScenarioConfig::from_yaml(&phase(
+            "    arrival_rate: 10\n    session_duration: 3s\n    max_connections: 20\n    duration: 1m\n",
+        ))
+        .unwrap();
+        let compiled = scenario.compile(None).unwrap();
+        let arrivals = compiled[0].arrivals.expect("arrivals");
+        assert_eq!(arrivals.session_duration, Duration::from_secs(3));
+        assert_eq!(arrivals.max_connections, Some(20));
+        assert_eq!(compiled[0].connections, 20);
+        assert_eq!(compiled[0].duration, Duration::from_secs(60));
+
+        for (keys, expected) in [
+            (
+                "    arrival_rate: 10\n    session_duration: 3s\n    connections: 5\n    duration: 1m\n",
+                "`arrival_rate` cannot be combined with `connections`",
+            ),
+            (
+                "    arrival_rate: 10\n    duration: 1m\n",
+                "`arrival_rate` needs `session_duration`",
+            ),
+            (
+                "    arrival_rate: 10\n    session_duration: 3s\n",
+                "missing field `duration`",
+            ),
+            (
+                "    session_duration: 3s\n    connections: 5\n    duration: 1m\n",
+                "need `arrival_rate`",
+            ),
+            (
+                "    arrival_rate: -1\n    session_duration: 3s\n    duration: 1m\n",
+                "phase 'churn': arrival_rate must be greater than zero",
+            ),
+            (
+                "    arrival_rate: 10\n    session_duration: soon\n    duration: 1m\n",
+                "phase 'churn': session_duration:",
+            ),
+        ] {
+            let message = ScenarioConfig::from_yaml(&phase(keys))
+                .and_then(|scenario| scenario.compile(None).map(|_| ()))
+                .unwrap_err()
+                .to_string();
+            assert!(message.contains(expected), "{keys}: {message}");
+        }
     }
 
     #[cfg(feature = "scenario")]

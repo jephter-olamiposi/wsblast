@@ -23,6 +23,9 @@ _wsblast() {
 '-d+[Total test duration including the connection ramp (e.g., '\''10s'\'', '\''30s'\'', '\''2m'\'', '\''500ms'\'')]:DURATION:_default' \
 '--duration=[Total test duration including the connection ramp (e.g., '\''10s'\'', '\''30s'\'', '\''2m'\'', '\''500ms'\'')]:DURATION:_default' \
 '(-c --connections -d --duration --ramp-rate)--stages=[Staged load profile instead of -c, -d and --ramp-rate\: comma-separated DURATION\:CONNECTIONS stages, each moving the connection count linearly from the previous target (starting at 0), e.g. '\''30s\:100,2m\:100,30s\:0'\'']:STAGES:_default' \
+'(-c --connections --stages --ramp-rate)--arrival-rate=[Start new sessions at this rate, per second, instead of holding -c connections\: arrivals keep their schedule whether or not the server keeps up. Each session closes after --session-duration; -d sets the length of the run]:PER_SEC:_default' \
+'--session-duration=[How long each --arrival-rate session stays connected, handshake included (e.g. '\''30s'\'')]:DURATION:_default' \
+'--max-connections=[With --arrival-rate, the most sessions open at once; arrivals while this many are open are skipped and counted]:NUM:_default' \
 '-n+[Maximum total messages to send across all workers (optional limit)]:NUM:_default' \
 '--requests=[Maximum total messages to send across all workers (optional limit)]:NUM:_default' \
 '-r+[Message rate per connection per second (0 = unthrottled / maximum possible)]:MSG_PER_SEC:_default' \
@@ -103,7 +106,7 @@ graceful\:"Sends a Close frame with code 1001 (going away), then closes the TCP 
 '--otel-endpoint=[Export live metrics over OTLP/HTTP with protobuf bodies to this base URL, e.g. '\''http\://localhost\:4318'\'' (needs the otel feature)]:URL:_default' \
 '--otel-interval=[How often metrics are exported over OTLP; the final values are also exported when the run ends]:DURATION:_default' \
 '--otel-service-name=[OpenTelemetry service.name resource attribute \[default\: \$OTEL_SERVICE_NAME, else wsblast\]]:NAME:_default' \
-'(-c --connections -d --duration -r --rate -p --payload --payload-file)--scenario=[Path to scenario YAML file defining multi-phase test (conflicts with individual flags)]:FILE:_files' \
+'(-c --connections -d --duration -r --rate -p --payload --payload-file --arrival-rate)--scenario=[Path to scenario YAML file defining multi-phase test (conflicts with individual flags)]:FILE:_files' \
 '--phase=[Run only a specific phase from the scenario by name]:NAME:_default' \
 '*--agents=[Generate the load on these agents (started with \`wsblast agent\`) instead of locally; comma-separated HOST\:PORT, ws\://HOST\:PORT or wss\://HOST\:PORT]:HOST:PORT:_default' \
 '--agent-token=[Token the agents were started with \[default\: \$WSBLAST_AGENT_TOKEN\]]:TOKEN:_default' \

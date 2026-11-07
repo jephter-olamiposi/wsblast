@@ -134,3 +134,58 @@ fn the_command_does_not_need_a_large_main_thread_stack() {
         assert_eq!(output.status.code(), Some(expected), "{args:?}: {stderr}");
     }
 }
+
+#[test]
+fn arrival_flags_are_checked() {
+    for (args, expected) in [
+        (
+            &[
+                "ws://127.0.0.1:1",
+                "--arrival-rate",
+                "5",
+                "--session-duration",
+                "1s",
+                "-c",
+                "3",
+            ][..],
+            "cannot be used with",
+        ),
+        (
+            &["ws://127.0.0.1:1", "--arrival-rate", "5"],
+            "--session-duration",
+        ),
+        (
+            &["ws://127.0.0.1:1", "--session-duration", "1s"],
+            "--arrival-rate",
+        ),
+        (
+            &["ws://127.0.0.1:1", "--max-connections", "3"],
+            "--arrival-rate",
+        ),
+        (
+            &[
+                "ws://127.0.0.1:1",
+                "--arrival-rate",
+                "0",
+                "--session-duration",
+                "1s",
+            ],
+            "--arrival-rate must be greater than zero",
+        ),
+        (
+            &[
+                "ws://127.0.0.1:1",
+                "--arrival-rate",
+                "5",
+                "--session-duration",
+                "0s",
+            ],
+            "--session-duration must be greater than zero",
+        ),
+    ] {
+        let output = wsblast(args);
+        let stderr = stderr(&output);
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+    }
+}

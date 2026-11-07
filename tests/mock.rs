@@ -1102,3 +1102,68 @@ fn action_names_and_slos_are_validated() {
         assert!(error.contains(expected), "{actions}: {error}");
     }
 }
+
+#[tokio::test]
+async fn arrivals_open_and_close_sessions_at_the_rate() {
+    let mock = Mock::start(MockConfig::builder()).await;
+    let config = load(&mock.url)
+        .arrivals(wsblast::Arrivals::new(40.0, Duration::from_millis(250)))
+        .rate_per_connection(20)
+        .duration(Duration::from_millis(1500));
+    let metrics = run(config).await;
+    let stats = mock.stop().await;
+
+    let arrivals = metrics
+        .arrivals
+        .expect("an arrival run reports its arrivals");
+    // Arrivals at k / 40 s for every k before 1.5 s.
+    assert!((57..=60).contains(&arrivals.started), "{arrivals:?}");
+    assert_eq!(arrivals.skipped, 0);
+    assert_eq!(metrics.total_connections_attempted, arrivals.started);
+    assert!(
+        metrics.total_connections_established + 2 >= arrivals.started,
+        "{metrics:?}"
+    );
+    // Every handshake is counted, not only those of the sessions that
+    // ended first.
+    assert_eq!(
+        metrics.handshake_latency.count,
+        metrics.total_connections_established + metrics.total_reconnects
+    );
+    // A session lasts 250 ms, so about 10 are open at once.
+    assert!((8..=13).contains(&arrivals.peak_open), "{arrivals:?}");
+    assert!(metrics.error_breakdown.is_empty(), "{metrics:?}");
+    assert!(metrics.response_time.count > 0);
+    assert_eq!(
+        stats.connections_accepted,
+        metrics.total_connections_established
+    );
+    assert_eq!(stats.connections_active, 0);
+}
+
+#[tokio::test]
+async fn arrivals_beyond_the_cap_are_skipped() {
+    let mock = Mock::start(MockConfig::builder()).await;
+    let config = load(&mock.url)
+        .arrivals(wsblast::Arrivals::new(100.0, Duration::from_secs(2)).with_max_connections(5))
+        .duration(Duration::from_secs(1));
+    let metrics = run(config).await;
+    mock.stop().await;
+
+    let arrivals = metrics.arrivals.expect("arrivals");
+    // No session ends before the run does, so the first five hold the cap.
+    assert_eq!(arrivals.started, 5, "{arrivals:?}");
+    assert_eq!(arrivals.peak_open, 5);
+    assert!(
+        (95..=101).contains(&(arrivals.started + arrivals.skipped)),
+        "{arrivals:?}"
+    );
+    assert_eq!(arrivals.max_connections, Some(5));
+    let text = wsblast::render_report(
+        &load("ws://127.0.0.1:9").build().unwrap(),
+        &metrics,
+        &wsblast::evaluate_slos(&wsblast::SloThresholds::default(), &metrics),
+    );
+    assert!(text.contains("capped at 5 open"), "{text}");
+    assert!(text.contains("raise --max-connections"), "{text}");
+}

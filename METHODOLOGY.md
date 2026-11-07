@@ -41,6 +41,14 @@ The ramp counts toward `--duration` (see [section 8](#8-run-duration-and-shutdow
 
 The run lasts the sum of the stage durations, `connections` in the report is the highest target, and `total_connections_attempted` counts every worker the run started, so a profile that ramps down and up again (`10s:100,10s:20,10s:100`) attempts more connections than its peak (180 here). No slot is reported as not started. The time series' `active_connections` shows the profile the run achieved; with `--rate`, its throughput follows the profile too. `--stages` cannot be used with `--scenario`, whose phases set their own connections and ramp. A scenario phase can set `stages` instead: it then runs exactly as described here, over the phase's own clock, with the phase's rate, payload, think time and actions on every connection it opens; its configured connection count is the highest target, its duration the sum of its stages, and its `total_connections_attempted` every worker it started.
 
+### 2.1.2 Arrival rate
+
+`--arrival-rate R --session-duration S` replaces the connection count with an open load model: session `k` starts `k / R` seconds after the run starts, whether or not earlier sessions or the server keep up, and closes with a normal WebSocket close `S` after it started, handshake included. A session runs the configured mode, rate and payload, or the phase's actions in a scenario, as a connection of a constant run would. It reconnects within its `S` after a lost connection unless `--no-reconnect` is set, and `{{worker_id}}` and its data file row are its arrival number. No session starts at or after `-d`; the sessions still open when the run ends are closed then, and one still in its first handshake counts as interrupted.
+
+When the generator wakes up late, every arrival that is due starts at once, so a slow client does not lower the rate. With `--max-connections M`, an arrival while `M` sessions are open is skipped instead of queued, as an open model should not wait for a slot. The report's `metrics.arrivals` records the rate, the session duration, the cap, the sessions `started` (equal to `total_connections_attempted`), the arrivals `skipped` and `peak_open`, the most sessions open at once; when `skipped` is not 0, the reports add a note, because the run applied less load than its rate. wsblast warns before the run when `R x S` is above `M`, since about `R x S` sessions are open at once in the steady state. That number, at most `M` and at least 1, is the run's `connections` in the report, and the open file check and the read buffer budget are sized for it.
+
+Each session's metrics are added to the run's totals when it ends, so memory follows the sessions open at once, not every session of the run. The time series' `active_connections` shows how many were open in each interval.
+
 ### 2.2 Message pacing
 
 | Mode and rate | Model | Behaviour |

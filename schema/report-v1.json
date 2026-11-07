@@ -412,6 +412,19 @@
             "minimum": 1
           }
         },
+        "arrivals": {
+          "description": "Arrival-rate runs only (--arrival-rate, or arrival_rate on a scenario phase): the arrival model and what the run did with its arrivals. Absent from other runs and from reports written before wsblast 0.2.3. In a scenario's merged metrics, started and skipped add up over the arrival phases, peak_open is the highest phase's, and rate and session_duration_secs are the first arrival phase's; in a distributed run the agents' counts add up. See METHODOLOGY.md section 2.1.2.",
+          "type": "object",
+          "required": ["rate", "session_duration_secs", "started", "skipped", "peak_open"],
+          "properties": {
+            "rate": { "description": "New sessions per second the run aimed for.", "type": "number", "exclusiveMinimum": 0 },
+            "session_duration_secs": { "description": "How long each session lasted, from its arrival, handshake included.", "type": "number", "exclusiveMinimum": 0 },
+            "max_connections": { "description": "The cap on sessions open at once (--max-connections). Absent without a cap.", "$ref": "#/$defs/count" },
+            "started": { "description": "Sessions started; equal to total_connections_attempted.", "$ref": "#/$defs/count" },
+            "skipped": { "description": "Arrivals skipped because max_connections sessions were open. When it is not 0, the run applied less load than its rate, and the reports add a note.", "$ref": "#/$defs/count" },
+            "peak_open": { "description": "The most sessions open at once; in a distributed run, the sum of each agent's peak.", "$ref": "#/$defs/count" }
+          }
+        },
         "actions": {
           "description": "Scenario runs only: the Send actions that have a name, sorted by name, each with the messages, errors and latency of every phase and connection that sent it. A named action that never sent a message is listed with zeros. Absent when no action has a name, and from reports written before wsblast 0.2.3. The run-level fields above count every action, named or not.",
           "type": "array",

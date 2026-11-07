@@ -73,9 +73,12 @@ Error: Configuration error: Invalid scenario: load.yaml: phases[0]: unknown fiel
 | `name` | string | yes | | Unique, not empty. Used by `--phase` and in the banner. |
 | `target` | string | no | none | `ws://` or `wss://` URL for this phase. See [section 5](#5-target-url-precedence). |
 | `duration` | duration | yes, unless `stages` is set | | Total wall-clock time of the phase, including its ramp. Must be greater than zero. |
-| `connections` | integer | yes, unless `stages` is set | | Worker connections for this phase. Must be greater than zero. |
+| `connections` | integer | yes, unless `stages` or `arrival_rate` is set | | Worker connections for this phase. Must be greater than zero. |
 | `ramp_rate` | integer | no | `0` | Workers started per second. `0` starts all of them at once. |
 | `stages` | list of stages, or a string | no | none | A staged load profile in place of `connections`, `duration` and `ramp_rate`, which cannot be set with it. See [section 4.4](#44-staged-phases). |
+| `arrival_rate` | number | no | none | New sessions per second in place of `connections`, `ramp_rate` and `stages`, which cannot be set with it. Needs `session_duration` and `duration`. See [section 4.6](#46-arrival-rate-phases). |
+| `session_duration` | duration | with `arrival_rate` | | How long each session stays connected, handshake included. |
+| `max_connections` | integer | no | none | With `arrival_rate`, the most sessions open at once; arrivals while this many are open are skipped. |
 | `rate_per_conn` | integer | no | `0` | Messages per second per connection. `0` is unthrottled. In an action script it paces every individual send; in echo mode those sends follow a fixed schedule and record response time ([section 4.3](#43-phases-with-actions)). |
 | `payload` | string | no | see below | Text payload for this phase. Supports `{{timestamp}}`, `{{worker_id}}` and `{{seq}}`. |
 | `think_time` | duration | no | `0` | Pause after each `Send` action, or after each message when the phase has no actions. See [section 4](#4-how-a-phase-runs). |
@@ -227,6 +230,30 @@ phases:
 - Injected events are never errors and add no latency sample by themselves; [METHODOLOGY.md section 13](../METHODOLOGY.md#13-chaos-injection) defines their effect on every metric. The phase's own metrics in the JSON report carry its `chaos` counts, and the merged `metrics.chaos` adds up the counts of every phase, with the seed of the first phase that injected faults.
 - Chaos acts on data sends: in `listen` and `graphql-ws` mode a phase may use it only with an action script.
 
+### 4.6 Arrival-rate phases
+
+A phase with `arrival_rate` runs like `--arrival-rate`: a new session starts every `1 / arrival_rate` seconds for `duration`, and each one closes after `session_duration`. Its `rate_per_conn`, `payload`, `think_time` and `actions` apply to every session, so a session can log in, subscribe, wait and leave on its own schedule while new users keep arriving:
+
+```yaml
+phases:
+  - name: "steady"
+    connections: 200
+    duration: "1m"
+  - name: "churn"
+    arrival_rate: 50          # new sessions per second
+    session_duration: "20s"   # about 1,000 open at once
+    max_connections: 2000
+    duration: "2m"
+    actions:
+      - type: Send
+        name: login
+        payload: '{"op":"login"}'
+      - type: Wait
+        duration: "15s"
+```
+
+Each phase reports its arrivals under `metrics.arrivals` in its entry of `phases`, and the phase table shows its rate and session length as its load. The scenario's merged `metrics.arrivals` adds up the sessions started and skipped by every arrival phase. See METHODOLOGY.md, section 2.1.2.
+
 ## 5. Target URL precedence
 
 For each phase, the target is the first of:
@@ -353,12 +380,12 @@ phases:
 
 All phases are merged into one report: the main tables show the metrics of every executed phase together. The JSON report also lists every phase with its own metrics and SLO result under `phases`, and the HTML report shows a Phases section with one row per phase and the SLO checks of every phase that has its own.
 
-The text and Markdown reports add a phase table when at least one phase sets its own `slo` or `stages`, so the reports of scenarios with neither look as they always did:
+The text and Markdown reports add a phase table when at least one phase sets its own `slo`, `stages` or `arrival_rate`, so the reports of scenarios with none of them look as they always did:
 
 | Column | Value |
 | :--- | :--- |
 | Phase, Target | The phase name and the endpoint it connected to. |
-| Load | The phase's connection count, or its stages as `DURATION:TARGET` pairs for a staged phase. |
+| Load | The phase's connection count, its stages as `DURATION:TARGET` pairs for a staged phase, or its arrival rate and session length (`50/s, sessions of 20s`). |
 | Throughput (msg/s), Error Rate | The phase's own values. |
 | Gating p99 | The p99 the phase's latency SLOs gate on, with its basis (`RTT` or `response time`); `-` without samples. |
 | SLO | `PASSED`, `FAILED`, or `-` for a phase without its own `slo`. |
@@ -411,6 +438,10 @@ The whole file is validated before any connection is opened, including phases th
 | `min_throughput` or `max_generator_lag` in an action `slo` | `phase 'session': action 'login': slo: an action SLO takes max_p50, max_p95, max_p99, max_p999 and max_error_rate; min_throughput and max_generator_lag apply to a phase or the scenario` |
 | A second `slo` for one name | `phase 'session': action 'login': slo: action 'login' already has an slo; give it one, on any of its actions` |
 | An empty, long or control-character action name | `phase 'session': action name '' must be 1 to 64 characters, without control characters` |
+| `arrival_rate` with `connections`, `ramp_rate` or `stages` | ``phase 'churn': `arrival_rate` cannot be combined with `connections`; the arrival rate sets how many sessions are open`` |
+| `arrival_rate` without `session_duration` | ``phase 'churn': `arrival_rate` needs `session_duration`, how long each session stays connected`` |
+| `session_duration` or `max_connections` without `arrival_rate` | ``phase 'churn': `session_duration` and `max_connections` need `arrival_rate` `` |
+| `arrival_rate` not above 0, zero `session_duration` or `max_connections` | `phase 'churn': arrival_rate must be greater than zero and at most 1000000 sessions per second, received 0` |
 | Unknown `slo` key | ``load.yaml: phases[0].slo: unknown field `max_p99_ms`, expected one of `max_p50`, `max_p95`, `max_p99`, `max_p999`, `max_error_rate`, `min_throughput`, `max_generator_lag` at line 9 column 7`` |
 | Unparsable SLO duration | `phase 'spike': slo: max_p99: Configuration error: Invalid duration 'fast': ...` (`slo: max_p99: ...` at the top level) |
 | `max_error_rate` outside 0 to 1 | `phase 'spike': slo: Configuration error: Invalid threshold specification: max_error_rate must be between 0.0 and 1.0, received 1.5` |

@@ -196,10 +196,12 @@ pub use chaos::{ChaosCloseMode, ChaosConfig};
 pub use cli::{OutputFormat, TestMode};
 #[cfg(feature = "scenario")]
 pub use config::ScenarioConfig;
-pub use config::{LoadTestConfig, LoadTestConfigBuilder, ReplyMatch, SloThresholds, Stage};
+pub use config::{
+    Arrivals, LoadTestConfig, LoadTestConfigBuilder, ReplyMatch, SloThresholds, Stage,
+};
 pub use error::{ConfigError, ErrorCategory, Result, WorkerError, WsBlastError};
 pub use metrics::{
-    ActionMetrics, AgentGenerator, AggregatedMetrics, CaptureSummary, ChaosSummary,
+    ActionMetrics, AgentGenerator, AggregatedMetrics, ArrivalSummary, CaptureSummary, ChaosSummary,
     DistributedSummary, GeneratorLag, LatencyStats, LiveSnapshot, OpenFileLimit, SlowReplies,
 };
 #[cfg(feature = "scenario")]
