@@ -243,12 +243,13 @@ How to read them:
 
 ### 6.1 What counts as an error
 
-`error_breakdown` counts errors per category: `dns_resolution`, `tcp_connect`, `tls_handshake`, `http_upgrade_rejected`, `protocol_error`, `write_error`, `read_error`, `timeout`, `unexpected_close`, `other`.
+`error_breakdown` counts errors per category: `dns_resolution`, `tcp_connect`, `tls_handshake`, `http_upgrade_rejected`, `protocol_error`, `write_error`, `read_error`, `timeout`, `unexpected_close`, `check_failed`, `other`.
 
 - Every failed handshake attempt is one error, including each failed reconnect attempt. A target that stays down for the whole run therefore produces many errors per connection.
 - In echo mode, each request that gets no reply within `--message-timeout` is one `timeout` error.
 - A read or write failure on an established session is one error.
 - In graphql-ws mode, `error` and `connection_error` messages are `protocol_error`.
+- A reply that fails `--expect` or a scenario action's `expect`, or has nothing where one of the action's `capture` pointers looks, is one `check_failed` error, however many of its checks failed. Its RTT, and its response time in a paced run, are still recorded: the reply arrived, and its latency is real. Like a timeout, the error belongs to a message that is already counted, so it adds no attempt (section 6.2). Replies to requests chaos corrupted (`--chaos-corrupt`) are not checked.
 - A server Close frame is not an error in any mode. In stream and listen mode a stream that ends without a Close frame is not recorded either; in echo mode it is `unexpected_close`.
 
 ### 6.2 Reading the error rate

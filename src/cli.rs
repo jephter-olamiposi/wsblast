@@ -142,6 +142,10 @@ pub(crate) struct Cli {
     #[arg(long = "match", value_name = "MODE", default_value = "first")]
     pub reply_match: String,
 
+    /// Check every echo reply: json:/pointer (a value is there), json:/pointer=VALUE (it equals VALUE) or contains:TEXT. A reply that fails counts as a check_failed error
+    #[arg(long = "expect", value_name = "CHECK")]
+    pub expect: Option<String>,
+
     /// Periodic ping heartbeat interval (e.g., '10s', '0s' to disable)
     #[arg(long = "ping-interval", default_value = "0s", value_name = "DURATION")]
     pub ping_interval: String,

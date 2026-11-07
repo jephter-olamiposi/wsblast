@@ -41,6 +41,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --connect-timeout 'Connection handshake timeout (e.g., ''5s'', ''2000ms'')'
             cand --message-timeout 'Per-message response timeout in echo mode (e.g., ''5s'', ''1000ms'')'
             cand --match 'Echo reply matching: first (default: the first data frame after a send is the reply), exact, or json:POINTER (an RFC 6901 pointer such as json:/seq)'
+            cand --expect 'Check every echo reply: json:/pointer (a value is there), json:/pointer=VALUE (it equals VALUE) or contains:TEXT. A reply that fails counts as a check_failed error'
             cand --ping-interval 'Periodic ping heartbeat interval (e.g., ''10s'', ''0s'' to disable)'
             cand --max-p50 'SLO threshold: Maximum acceptable p50 round-trip latency (e.g., ''10ms'', ''500us'')'
             cand --max-p95 'SLO threshold: Maximum acceptable p95 round-trip latency (e.g., ''50ms'', ''20ms'')'

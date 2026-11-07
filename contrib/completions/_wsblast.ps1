@@ -44,6 +44,7 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--connect-timeout', '--connect-timeout', [CompletionResultType]::ParameterName, 'Connection handshake timeout (e.g., ''5s'', ''2000ms'')')
             [CompletionResult]::new('--message-timeout', '--message-timeout', [CompletionResultType]::ParameterName, 'Per-message response timeout in echo mode (e.g., ''5s'', ''1000ms'')')
             [CompletionResult]::new('--match', '--match', [CompletionResultType]::ParameterName, 'Echo reply matching: first (default: the first data frame after a send is the reply), exact, or json:POINTER (an RFC 6901 pointer such as json:/seq)')
+            [CompletionResult]::new('--expect', '--expect', [CompletionResultType]::ParameterName, 'Check every echo reply: json:/pointer (a value is there), json:/pointer=VALUE (it equals VALUE) or contains:TEXT. A reply that fails counts as a check_failed error')
             [CompletionResult]::new('--ping-interval', '--ping-interval', [CompletionResultType]::ParameterName, 'Periodic ping heartbeat interval (e.g., ''10s'', ''0s'' to disable)')
             [CompletionResult]::new('--max-p50', '--max-p50', [CompletionResultType]::ParameterName, 'SLO threshold: Maximum acceptable p50 round-trip latency (e.g., ''10ms'', ''500us'')')
             [CompletionResult]::new('--max-p95', '--max-p95', [CompletionResultType]::ParameterName, 'SLO threshold: Maximum acceptable p95 round-trip latency (e.g., ''50ms'', ''20ms'')')

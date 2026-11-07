@@ -41,6 +41,7 @@ graphql-ws\:"Apollo GraphQL WS protocol (subscriptions)"))' \
 '--connect-timeout=[Connection handshake timeout (e.g., '\''5s'\'', '\''2000ms'\'')]:DURATION:_default' \
 '--message-timeout=[Per-message response timeout in echo mode (e.g., '\''5s'\'', '\''1000ms'\'')]:DURATION:_default' \
 '--match=[Echo reply matching\: first (default\: the first data frame after a send is the reply), exact, or json\:POINTER (an RFC 6901 pointer such as json\:/seq)]:MODE:_default' \
+'--expect=[Check every echo reply\: json\:/pointer (a value is there), json\:/pointer=VALUE (it equals VALUE) or contains\:TEXT. A reply that fails counts as a check_failed error]:CHECK:_default' \
 '--ping-interval=[Periodic ping heartbeat interval (e.g., '\''10s'\'', '\''0s'\'' to disable)]:DURATION:_default' \
 '--max-p50=[SLO threshold\: Maximum acceptable p50 round-trip latency (e.g., '\''10ms'\'', '\''500us'\'')]:DURATION:_default' \
 '--max-p95=[SLO threshold\: Maximum acceptable p95 round-trip latency (e.g., '\''50ms'\'', '\''20ms'\'')]:DURATION:_default' \

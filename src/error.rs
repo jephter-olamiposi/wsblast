@@ -195,6 +195,9 @@ pub enum ErrorCategory {
     Timeout,
     /// The connection closed while a reply or subscription was pending.
     UnexpectedClose,
+    /// A reply arrived but failed its check (`--expect`, or `expect` in a
+    /// scenario), or had nothing where a scenario `capture` looked.
+    CheckFailed,
     /// Anything else.
     Other,
 }
@@ -211,6 +214,7 @@ impl fmt::Display for ErrorCategory {
             Self::ReadError => write!(f, "Frame Read Error"),
             Self::Timeout => write!(f, "Operation Timeout"),
             Self::UnexpectedClose => write!(f, "Unexpected Close"),
+            Self::CheckFailed => write!(f, "Reply Check Failed"),
             Self::Other => write!(f, "Other Error"),
         }
     }

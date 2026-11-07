@@ -4,10 +4,12 @@
 //! a frame copies the literal parts and formats the values instead of
 //! searching the text for every placeholder on every send.
 //!
-//! The placeholders are `{{seq}}`, `{{timestamp}}`, `{{worker_id}}` and
-//! `{{data.COLUMN}}`, a column of the run's data file ([`crate::data`]).
-//! Any other `{{...}}` is kept as text, as it always was, so payloads that
-//! carry their own template syntax are sent unchanged.
+//! The placeholders are `{{seq}}`, `{{timestamp}}`, `{{worker_id}}`,
+//! `{{data.COLUMN}}`, a column of the run's data file ([`crate::data`]),
+//! and in a scenario phase `{{NAME}}`, a variable the phase captures from a
+//! reply ([`crate::check::Capture`]). Any other `{{...}}` is kept as text,
+//! as it always was, so payloads that carry their own template syntax are
+//! sent unchanged.
 
 use crate::data::DataSet;
 use std::fmt::Write as _;
@@ -29,6 +31,8 @@ enum Part {
     /// A data file column, by name; checked against the file with
     /// [`Template::check_data`].
     Data(String),
+    /// A captured variable, by its position in the phase's variables.
+    Var(usize),
 }
 
 /// The values a template is filled with for one frame.
@@ -38,11 +42,20 @@ pub(crate) struct Values<'a> {
     pub(crate) worker_id: usize,
     /// The data file and the connection's row in it.
     pub(crate) data: Option<(&'a DataSet, usize)>,
+    /// The connection's captured variables, by position; empty until a
+    /// reply sets them.
+    pub(crate) vars: &'a [String],
 }
 
 impl Template {
     /// Parses `source`.
     pub(crate) fn parse(source: impl Into<String>) -> Self {
+        Self::parse_with_vars(source, &[])
+    }
+
+    /// Parses `source`, reading `{{NAME}}` as the variable `vars[i]` when
+    /// `NAME` is `vars[i]`.
+    pub(crate) fn parse_with_vars(source: impl Into<String>, vars: &[String]) -> Self {
         let source = source.into();
         let mut parts = Vec::new();
         let mut text = String::new();
@@ -56,10 +69,13 @@ impl Template {
                 "seq" => Some(Part::Seq),
                 "timestamp" => Some(Part::Timestamp),
                 "worker_id" => Some(Part::WorkerId),
-                _ => name
-                    .strip_prefix("data.")
-                    .filter(|column| !column.is_empty())
-                    .map(|column| Part::Data(column.to_string())),
+                _ => match vars.iter().position(|var| var == name) {
+                    Some(index) => Some(Part::Var(index)),
+                    None => name
+                        .strip_prefix("data.")
+                        .filter(|column| !column.is_empty())
+                        .map(|column| Part::Data(column.to_string())),
+                },
             };
             let end = start + 2 + len + 2;
             match part {
@@ -156,6 +172,11 @@ impl Template {
                         out.push_str(value);
                     }
                 }
+                Part::Var(index) => {
+                    if let Some(value) = values.vars.get(*index) {
+                        out.push_str(value);
+                    }
+                }
             }
         }
         out
@@ -171,6 +192,7 @@ mod tests {
             seq,
             worker_id,
             data: None,
+            vars: &[],
         }
     }
 
@@ -215,12 +237,34 @@ mod tests {
                 seq: 9,
                 worker_id,
                 data: Some((&data, data.row_for(worker_id))),
+                vars: &[],
             })
         };
         assert_eq!(render(0), "ada:t1:9");
         assert_eq!(render(1), "bob:t2:9");
         // More connections than rows: the rows repeat.
         assert_eq!(render(2), "ada:t1:9");
+    }
+
+    #[test]
+    fn captured_variables_are_placeholders_only_where_declared() {
+        let vars = ["session".to_string()];
+        let template = Template::parse_with_vars(r#"{"s":"{{session}}","x":"{{other}}"}"#, &vars);
+        let values = |vars| Values {
+            seq: 0,
+            worker_id: 0,
+            data: None,
+            vars,
+        };
+        let set = ["s-1".to_string()];
+        assert_eq!(
+            template.render(values(&set)),
+            r#"{"s":"s-1","x":"{{other}}"}"#
+        );
+        // Not captured yet: empty.
+        assert_eq!(template.render(values(&[])), r#"{"s":"","x":"{{other}}"}"#);
+        // Without the declaration it is text, as before.
+        assert!(!Template::parse("{{session}}").is_dynamic());
     }
 
     #[test]

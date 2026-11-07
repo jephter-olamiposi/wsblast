@@ -41,6 +41,9 @@ pub(crate) struct WorkerSession {
     /// This worker's fault injection, when the run injects faults.
     #[cfg(feature = "chaos")]
     chaos: Option<crate::chaos::ChaosState>,
+    /// Values the connection's scenario captured from replies, by the
+    /// phase's variable positions; cleared on every new connection.
+    vars: Vec<String>,
 }
 
 impl WorkerSession {
@@ -77,6 +80,7 @@ impl WorkerSession {
             capture: None,
             #[cfg(feature = "chaos")]
             chaos,
+            vars: Vec::new(),
         }
     }
 
@@ -438,10 +442,14 @@ impl WorkerSession {
             };
 
             match response {
-                Ok(Ok(Some(bytes_recv))) => {
+                Ok(Ok(Some(reply))) => {
                     let received_at = Instant::now();
                     let rtt = received_at - start_time;
-                    self.metrics.record_message_recv(bytes_recv, Some(rtt));
+                    self.metrics
+                        .record_message_recv(message_byte_len(&reply), Some(rtt));
+                    if !corrupted {
+                        self.check_reply(&reply, None, &[]);
+                    }
                     if let Some(due) = due
                         && record_response_time
                     {
@@ -693,6 +701,9 @@ impl WorkerSession {
             + Unpin,
     {
         let (mut sink, mut stream) = ws_stream.split();
+        // Captured values belong to one connection: a reconnect starts
+        // without them, as a new session would.
+        self.vars = vec![String::new(); phase.vars.len()];
 
         let mut seq = 0u64;
         let echo = self.config.mode == TestMode::Echo;
@@ -728,7 +739,12 @@ impl WorkerSession {
                 }
 
                 match action {
-                    ScenarioAction::Send { payload, count } => {
+                    ScenarioAction::Send {
+                        payload,
+                        count,
+                        expect,
+                        captures,
+                    } => {
                         for _ in 0..*count {
                             if self.cancel_token.is_cancelled() {
                                 let _ = sink.send(Message::Close(None)).await;
@@ -824,9 +840,18 @@ impl WorkerSession {
                                 };
 
                                 match response {
-                                    Ok(Ok(Some(bytes_recv))) => {
+                                    Ok(Ok(Some(reply))) => {
                                         let rtt = start_time.elapsed();
-                                        self.metrics.record_message_recv(bytes_recv, Some(rtt));
+                                        self.metrics.record_message_recv(
+                                            message_byte_len(&reply),
+                                            Some(rtt),
+                                        );
+                                        // A corrupted request may well get
+                                        // a reply that fails its checks;
+                                        // that is the fault, not the server.
+                                        if !corrupted {
+                                            self.check_reply(&reply, expect.as_ref(), captures);
+                                        }
                                         if let Some(due) = due {
                                             self.metrics.record_response_time(
                                                 SendSchedule::response_time(due, start_time, rtt),
@@ -981,7 +1006,7 @@ impl WorkerSession {
         seq: u64,
         corrupted: bool,
         unsolicited: &mut u64,
-    ) -> Result<Option<usize>, ErrorCategory>
+    ) -> Result<Option<Message>, ErrorCategory>
     where
         St: futures_util::Stream<Item = std::result::Result<Message, TungsteniteError>> + Unpin,
         Si: futures_util::Sink<Message, Error = TungsteniteError> + Unpin,
@@ -1002,7 +1027,7 @@ impl WorkerSession {
                 rule => rule,
             };
             if reply_matches(rule, &frame, sent, seq) {
-                return Ok(Some(message_byte_len(&frame)));
+                return Ok(Some(frame));
             }
             *unsolicited += 1;
         }
@@ -1112,6 +1137,37 @@ impl WorkerSession {
         self.render_message(&self.config.payload, seq)
     }
 
+    /// Applies `--expect`, the action's `expect` and its captures to a
+    /// reply, and counts one `check_failed` error when any of them fails.
+    /// A capture that finds nothing leaves its variable as it was.
+    fn check_reply(
+        &mut self,
+        reply: &Message,
+        expect: Option<&crate::check::Check>,
+        captures: &[crate::check::Capture],
+    ) {
+        if self.config.expect.is_none() && expect.is_none() && captures.is_empty() {
+            return;
+        }
+        let reply = crate::check::Reply::new(reply);
+        let mut passed = self
+            .config
+            .expect
+            .as_ref()
+            .is_none_or(|check| check.passes(&reply))
+            && expect.is_none_or(|check| check.passes(&reply));
+        for capture in captures {
+            match (capture.value(&reply), self.vars.get_mut(capture.var)) {
+                (Some(value), Some(var)) => *var = value,
+                _ => passed = false,
+            }
+        }
+        if !passed {
+            self.metrics
+                .record_error(ErrorCategory::CheckFailed, ErrorScope::SentMessage);
+        }
+    }
+
     /// The values this connection fills templates with for frame `seq`.
     fn template_values(&self, seq: u64) -> crate::template::Values<'_> {
         crate::template::Values {
@@ -1122,6 +1178,7 @@ impl WorkerSession {
                 .data
                 .as_deref()
                 .map(|data| (data, data.row_for(self.worker_id))),
+            vars: &self.vars,
         }
     }
 

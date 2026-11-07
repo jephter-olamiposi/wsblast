@@ -125,6 +125,7 @@
         "read_error",
         "timeout",
         "unexpected_close",
+        "check_failed",
         "other"
       ]
     },

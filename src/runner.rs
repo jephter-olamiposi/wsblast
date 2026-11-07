@@ -960,11 +960,22 @@ impl ScenarioExecutor {
     ) -> crate::error::Result<Self> {
         scenario.validate()?;
         scenario.validate_slo_mode(base_config.mode, phase)?;
+        let mut base_config = base_config;
+        // The scenario's data file, unless the configuration has one.
+        if base_config.data.is_none()
+            && let Some(path) = &scenario.data
+        {
+            base_config.data = Some(Arc::new(
+                crate::data::DataSet::load(path).map_err(crate::ConfigError::DataFile)?,
+            ));
+        }
+        let phases = scenario.compile(phase)?;
+        crate::config::validate_phases(&phases, &base_config)?;
         Ok(Self {
             scenario_name: scenario.metadata.name.clone(),
             scenario_slo: scenario.slo()?,
             targets: scenario.resolve_phase_targets(target_override, phase)?,
-            phases: scenario.compile(phase)?,
+            phases,
             base_config,
             live_metrics: LiveMetrics::new(),
             cancel_token: CancellationToken::new(),

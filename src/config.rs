@@ -72,6 +72,8 @@ pub struct LoadTestConfig {
     pub(crate) no_reconnect: bool,
     /// Decides which inbound data frame answers an echo request.
     pub(crate) reply_match: ReplyMatch,
+    /// What every echo reply must hold (`--expect`).
+    pub(crate) expect: Option<crate::check::Check>,
     /// Where `--capture` records frames, if anywhere.
     #[cfg(feature = "capture")]
     pub(crate) capture: Option<crate::capture::CaptureConfig>,
@@ -277,6 +279,7 @@ pub struct LoadTestConfigBuilder {
     progress: bool,
     reconnect: bool,
     reply_match: ReplyMatch,
+    expect: Option<String>,
     #[cfg(feature = "capture")]
     capture: Option<PathBuf>,
     #[cfg(feature = "capture")]
@@ -330,6 +333,7 @@ impl LoadTestConfigBuilder {
             progress: false,
             reconnect: true,
             reply_match: ReplyMatch::First,
+            expect: None,
             #[cfg(feature = "capture")]
             capture: None,
             #[cfg(feature = "capture")]
@@ -456,6 +460,20 @@ impl LoadTestConfigBuilder {
                     .get_or_insert_with(|| format!("Invalid header value '{value}'"));
             }
         }
+        self
+    }
+
+    /// Checks every echo reply, in the `--expect` spelling:
+    /// `json:/pointer` (the reply is JSON with a value there),
+    /// `json:/pointer=VALUE` (equal to `VALUE`, read as JSON when it is
+    /// valid JSON and as a string otherwise) or `contains:TEXT`. A reply
+    /// that fails counts as a `check_failed` error; its RTT is still
+    /// recorded.
+    ///
+    /// The spelling, and that the mode is echo, are checked by
+    /// [`build`](Self::build).
+    pub fn expect(mut self, check: impl Into<String>) -> Self {
+        self.expect = Some(check.into());
         self
     }
 
@@ -675,6 +693,19 @@ impl LoadTestConfigBuilder {
                 .map_err(|e| ConfigError::InvalidOption(format!("payload: {e}")))?;
         }
         let (headers, header_templates) = split_header_templates(self.headers, data.as_ref())?;
+        let expect = self
+            .expect
+            .as_deref()
+            .map(crate::check::Check::parse_flag)
+            .transpose()
+            .map_err(ConfigError::InvalidOption)?;
+        if expect.is_some() && self.mode != TestMode::Echo {
+            return Err(ConfigError::UnsupportedOption(format!(
+                "--expect requires --mode echo; {:?} mode does not wait for replies",
+                self.mode
+            ))
+            .into());
+        }
         #[cfg(feature = "chaos")]
         let chaos = match self.chaos {
             Some(chaos) => {
@@ -719,6 +750,7 @@ impl LoadTestConfigBuilder {
             no_progress: !self.progress,
             no_reconnect: !self.reconnect,
             reply_match: self.reply_match,
+            expect,
             #[cfg(feature = "capture")]
             capture: self.capture.map(|path| crate::capture::CaptureConfig {
                 path,
@@ -1065,6 +1097,7 @@ fn split_header_templates(
                 seq: 0,
                 worker_id: row,
                 data: data.map(|data| (data, row)),
+                vars: &[],
             });
             if HeaderValue::from_str(&rendered).is_err() {
                 let source = data.map_or_else(String::new, |data| {
@@ -1130,7 +1163,12 @@ pub(crate) enum PayloadConfig {
 impl PayloadConfig {
     /// Classifies text payload into either a pre-allocated static frame or a dynamic template.
     pub(crate) fn from_text(text: String) -> Self {
-        let template = crate::template::Template::parse(text);
+        Self::from_text_with_vars(text, &[])
+    }
+
+    /// Like [`Self::from_text`], reading `{{NAME}}` as one of `vars`.
+    pub(crate) fn from_text_with_vars(text: String, vars: &[String]) -> Self {
+        let template = crate::template::Template::parse_with_vars(text, vars);
         if template.is_dynamic() {
             Self::DynamicText(template)
         } else {
@@ -1720,6 +1758,12 @@ pub(crate) enum ActionConfig {
         payload: Option<String>,
         #[serde(default)]
         count: Option<u64>,
+        /// What the reply must hold.
+        #[serde(default)]
+        expect: Option<ExpectConfig>,
+        /// Variables set from the reply: name to JSON pointer.
+        #[serde(default)]
+        capture: Option<std::collections::BTreeMap<String, String>>,
     },
     Wait {
         duration: String,
@@ -1731,6 +1775,48 @@ pub(crate) enum ActionConfig {
     Ping {
         interval: String,
     },
+}
+
+/// The `expect:` mapping of a Send action: `json` with an optional
+/// `equals`, or `contains`.
+#[cfg(feature = "scenario")]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExpectConfig {
+    json: Option<String>,
+    equals: Option<serde_json::Value>,
+    contains: Option<String>,
+}
+
+#[cfg(feature = "scenario")]
+impl ExpectConfig {
+    fn compile(&self, phase_name: &str) -> Result<crate::check::Check> {
+        let check = match (&self.json, &self.equals, &self.contains) {
+            (Some(pointer), equals, None) => crate::check::Check::Json {
+                pointer: pointer.clone(),
+                equals: equals.clone(),
+            },
+            (None, None, Some(text)) => crate::check::Check::Contains(text.clone()),
+            (None, Some(_), _) => {
+                return Err(invalid_phase(
+                    phase_name,
+                    "expect: equals needs json: a pointer to compare",
+                )
+                .into());
+            }
+            _ => {
+                return Err(invalid_phase(
+                    phase_name,
+                    "expect needs either json (with an optional equals) or contains",
+                )
+                .into());
+            }
+        };
+        check
+            .validate()
+            .map_err(|e| invalid_phase(phase_name, &format!("expect: {e}")))?;
+        Ok(check)
+    }
 }
 
 /// Validated, execution-ready phase compiled from YAML.
@@ -1747,6 +1833,9 @@ pub(crate) struct ScenarioPhase {
     pub(crate) payload: Option<PayloadConfig>,
     pub(crate) think_time: Duration,
     pub(crate) actions: Vec<ScenarioAction>,
+    /// The variables the phase's actions capture from replies, in order;
+    /// templates read them as `{{NAME}}`.
+    pub(crate) vars: Vec<String>,
     /// Thresholds checked on this phase's own metrics.
     pub(crate) slo: SloThresholds,
     /// The phase's staged load profile; empty for a constant connection
@@ -1766,6 +1855,10 @@ pub(crate) enum ScenarioAction {
     Send {
         payload: Option<PayloadConfig>,
         count: u64,
+        /// What every reply must hold.
+        expect: Option<crate::check::Check>,
+        /// Variables every reply sets.
+        captures: Vec<crate::check::Capture>,
     },
     Wait(Duration),
     Ping(Duration),
@@ -2095,10 +2188,11 @@ impl ScenarioPhase {
             None => Duration::ZERO,
         };
 
+        let vars = phase_vars(&phase.name, &phase.actions)?;
         let actions = phase
             .actions
             .iter()
-            .map(|action| ScenarioAction::compile(&phase.name, action))
+            .map(|action| ScenarioAction::compile(&phase.name, action, &vars))
             .collect::<Result<Vec<_>>>()?;
 
         Ok(Self {
@@ -2111,9 +2205,10 @@ impl ScenarioPhase {
             payload: phase
                 .payload
                 .as_ref()
-                .map(|payload| PayloadConfig::from_text(payload.clone())),
+                .map(|payload| PayloadConfig::from_text_with_vars(payload.clone(), &vars)),
             think_time,
             actions,
+            vars,
             slo: compile_slo(phase.slo.as_ref(), &format!("phase '{}': slo", phase.name))?,
             stages,
             #[cfg(feature = "chaos")]
@@ -2126,6 +2221,29 @@ impl ScenarioPhase {
     }
 }
 
+/// The variables a phase's actions capture, in the order they appear,
+/// each once.
+#[cfg(feature = "scenario")]
+fn phase_vars(phase_name: &str, actions: &[ActionConfig]) -> Result<Vec<String>> {
+    let mut vars: Vec<String> = Vec::new();
+    for action in actions {
+        if let ActionConfig::Send {
+            capture: Some(capture),
+            ..
+        } = action
+        {
+            for name in capture.keys() {
+                crate::check::check_var_name(name)
+                    .map_err(|e| invalid_phase(phase_name, &format!("capture: {e}")))?;
+                if !vars.contains(name) {
+                    vars.push(name.clone());
+                }
+            }
+        }
+    }
+    Ok(vars)
+}
+
 #[cfg(feature = "scenario")]
 impl ScenarioAction {
     /// Parses and validates one raw action.
@@ -2134,9 +2252,18 @@ impl ScenarioAction {
     ///
     /// Returns [`ConfigError::InvalidScenario`] for unparsable durations, zero
     /// send counts, or close codes that RFC 6455 forbids endpoints to send.
-    pub(crate) fn compile(phase_name: &str, action: &ActionConfig) -> Result<Self> {
+    pub(crate) fn compile(
+        phase_name: &str,
+        action: &ActionConfig,
+        vars: &[String],
+    ) -> Result<Self> {
         match action {
-            ActionConfig::Send { payload, count } => {
+            ActionConfig::Send {
+                payload,
+                count,
+                expect,
+                capture,
+            } => {
                 let count = count.unwrap_or(1);
                 if count == 0 {
                     return Err(invalid_phase(
@@ -2145,11 +2272,29 @@ impl ScenarioAction {
                     )
                     .into());
                 }
+                let captures = capture
+                    .iter()
+                    .flatten()
+                    .map(|(name, pointer)| {
+                        crate::check::check_pointer(pointer).map_err(|e| {
+                            invalid_phase(phase_name, &format!("capture {name}: {e}"))
+                        })?;
+                        Ok(crate::check::Capture {
+                            var: vars.iter().position(|var| var == name).unwrap_or_default(),
+                            pointer: pointer.clone(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 Ok(Self::Send {
                     payload: payload
                         .as_ref()
-                        .map(|payload| PayloadConfig::from_text(payload.clone())),
+                        .map(|payload| PayloadConfig::from_text_with_vars(payload.clone(), vars)),
                     count,
+                    expect: expect
+                        .as_ref()
+                        .map(|expect| expect.compile(phase_name))
+                        .transpose()?,
+                    captures,
                 })
             }
             ActionConfig::Wait { duration } => {
@@ -2418,6 +2563,7 @@ impl LoadTestConfig {
             .progress(!cli.no_progress)
             .reconnect(!cli.no_reconnect);
         builder.max_requests = cli.requests;
+        builder.expect = cli.expect.take();
         #[cfg(feature = "capture")]
         {
             builder.capture = cli.capture.take();
@@ -2493,27 +2639,49 @@ impl LoadTestConfig {
             config.payload = payload;
         }
 
-        for phase in scenario.compile(cli.phase.as_deref())? {
-            let phase_payload = phase.payload.as_ref().unwrap_or(&config.payload);
-            let action_payloads = phase.actions.iter().filter_map(|action| match action {
-                ScenarioAction::Send { payload, .. } => {
-                    Some(payload.as_ref().unwrap_or(phase_payload))
-                }
-                _ => None,
-            });
-            let payloads: Vec<&PayloadConfig> = std::iter::once(phase_payload)
-                .chain(action_payloads)
-                .collect();
-            for template in payloads.iter().filter_map(|payload| payload.template()) {
-                template
-                    .check_data(config.data.as_deref())
-                    .map_err(|e| invalid_phase(&phase.name, &format!("payload: {e}")))?;
-            }
-            validate_reply_match(&config.reply_match, config.mode, payloads.into_iter())?;
-        }
+        validate_phases(&scenario.compile(cli.phase.as_deref())?, &config)?;
 
         Ok(config)
     }
+}
+
+/// Checks a scenario's phases against the configuration they run with:
+/// `expect` and `capture` need echo mode, every `{{data.COLUMN}}` a column
+/// of the data file, and reply matching payloads it can match. The command
+/// line and [`ScenarioExecutor`](crate::ScenarioExecutor) both check this.
+#[cfg(feature = "scenario")]
+pub(crate) fn validate_phases(phases: &[ScenarioPhase], config: &LoadTestConfig) -> Result<()> {
+    for phase in phases {
+        let checks_replies = phase.actions.iter().any(|action| {
+            matches!(action, ScenarioAction::Send { expect, captures, .. }
+                if expect.is_some() || !captures.is_empty())
+        });
+        if checks_replies && config.mode != TestMode::Echo {
+            return Err(invalid_phase(
+                &phase.name,
+                &format!(
+                    "expect and capture need --mode echo; {:?} mode does not wait for replies",
+                    config.mode
+                ),
+            )
+            .into());
+        }
+        let phase_payload = phase.payload.as_ref().unwrap_or(&config.payload);
+        let action_payloads = phase.actions.iter().filter_map(|action| match action {
+            ScenarioAction::Send { payload, .. } => Some(payload.as_ref().unwrap_or(phase_payload)),
+            _ => None,
+        });
+        let payloads: Vec<&PayloadConfig> = std::iter::once(phase_payload)
+            .chain(action_payloads)
+            .collect();
+        for template in payloads.iter().filter_map(|payload| payload.template()) {
+            template
+                .check_data(config.data.as_deref())
+                .map_err(|e| invalid_phase(&phase.name, &format!("payload: {e}")))?;
+        }
+        validate_reply_match(&config.reply_match, config.mode, payloads.into_iter())?;
+    }
+    Ok(())
 }
 
 /// The faults the `--chaos-*` flags ask for, checked by the builder.
@@ -3421,6 +3589,8 @@ mod tests {
             ActionConfig::Send {
                 payload: None,
                 count: Some(3),
+                expect: None,
+                capture: None,
             },
             ActionConfig::Wait {
                 duration: "10ms".to_string(),
@@ -3491,6 +3661,8 @@ mod tests {
         warmup.actions = vec![ActionConfig::Send {
             payload: None,
             count: Some(0),
+            expect: None,
+            capture: None,
         }];
         let error = scenario(vec![warmup]).validate().unwrap_err();
         assert!(
@@ -3824,6 +3996,8 @@ phases:
         later_phase.actions = vec![ActionConfig::Send {
             payload: Some("ping".to_string()),
             count: None,
+            expect: None,
+            capture: None,
         }];
         assert_unsupported_option(
             LoadTestConfig::from_scenario_config(

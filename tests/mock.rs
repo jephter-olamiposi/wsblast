@@ -743,3 +743,212 @@ async fn rules_and_replay_cannot_be_combined_and_bad_files_name_the_rule() {
         .to_string();
     assert!(err.contains("rule 2") && err.contains("1005"), "{err}");
 }
+
+/// A mock that logs a user in, returning their session, and answers a
+/// subscription with the session it carried.
+fn session_rules() -> std::path::PathBuf {
+    rules_file(
+        "session",
+        r#"
+version: "1.0"
+rules:
+  - match: { json: /op, equals: login }
+    reply: ['{"status":"ok","session":{{json:/user}}}']
+  - match: { json: /op, equals: sub }
+    reply: ['{"status":"ok","session":{{json:/session}}}']
+"#,
+    )
+}
+
+#[cfg(feature = "scenario")]
+async fn run_scenario(yaml: &str, url: &str) -> AggregatedMetrics {
+    let scenario = wsblast::ScenarioConfig::from_yaml(yaml).unwrap();
+    let base = load(url).reconnect(false).build().unwrap();
+    wsblast::ScenarioExecutor::new(&scenario, base, None, Some(url))
+        .unwrap()
+        .with_signal_handling(false)
+        .run()
+        .await
+        .unwrap()
+        .metrics
+}
+
+/// Each connection logs in, keeps the session its reply carries, and sends
+/// it with every subscription: the mock echoes it back, and the check that
+/// it is the connection's own passes for every reply.
+#[cfg(feature = "scenario")]
+#[tokio::test]
+async fn captured_values_are_sent_back_and_checks_pass() {
+    let mock = Mock::start(MockConfig::builder().rules(session_rules())).await;
+    let metrics = run_scenario(
+        r#"
+version: "1.0"
+metadata: { name: session }
+phases:
+  - name: session
+    connections: 3
+    duration: 3s
+    actions:
+      - type: Send
+        payload: '{"op":"login","user":"u{{worker_id}}"}'
+        expect: { json: /status, equals: ok }
+        capture: { session: /session }
+      - type: Send
+        count: 4
+        payload: '{"op":"sub","session":"{{session}}"}'
+        expect: { json: /session }
+      - type: Close
+"#,
+        &mock.url,
+    )
+    .await;
+    mock.stop().await;
+    assert_eq!(metrics.total_messages_recv, 15, "{metrics:?}");
+    assert_eq!(metrics.error_rate, 0.0, "{:?}", metrics.error_breakdown);
+}
+
+/// A reply that fails its check still records its RTT, and counts one
+/// check_failed error against its message; a capture that finds nothing
+/// does too.
+#[cfg(feature = "scenario")]
+#[tokio::test]
+async fn failed_checks_and_captures_count_once_per_reply() {
+    let mock = Mock::start(MockConfig::builder().rules(session_rules())).await;
+    let metrics = run_scenario(
+        r#"
+version: "1.0"
+metadata: { name: failing }
+phases:
+  - name: failing
+    connections: 2
+    duration: 3s
+    actions:
+      - type: Send
+        payload: '{"op":"login","user":"u"}'
+        expect: { json: /status, equals: denied }
+      - type: Send
+        payload: '{"op":"login","user":"u"}'
+        capture: { token: /token }
+      - type: Send
+        payload: '{"op":"login","user":"u"}'
+        expect: { contains: '"ok"' }
+      - type: Close
+"#,
+        &mock.url,
+    )
+    .await;
+    mock.stop().await;
+    assert_eq!(metrics.message_rtt.count, 6, "{metrics:?}");
+    assert_eq!(
+        metrics.error_breakdown.get(&ErrorCategory::CheckFailed),
+        Some(&4),
+        "{:?}",
+        metrics.error_breakdown
+    );
+    // Four of six messages failed; the errors add no attempts.
+    assert!((metrics.error_rate - 4.0 / 6.0).abs() < 1e-9, "{metrics:?}");
+}
+
+#[tokio::test]
+async fn expect_checks_every_reply_of_a_plain_run() {
+    let mock = Mock::start(MockConfig::builder().rules(session_rules())).await;
+    let login = r#"{"op":"login","user":"u"}"#;
+    let passing = run(load(&mock.url)
+        .max_requests(20)
+        .payload_text(login)
+        .expect("json:/status=ok"))
+    .await;
+    let failing = run(load(&mock.url)
+        .max_requests(20)
+        .payload_text(login)
+        .expect("json:/status=denied"))
+    .await;
+    mock.stop().await;
+    assert_eq!(passing.error_rate, 0.0, "{passing:?}");
+    // Every reply failed, and every reply still has its RTT. (The run ends
+    // with the 20th send, so its reply may not be counted.)
+    assert!(failing.message_rtt.count >= 19, "{failing:?}");
+    assert_eq!(
+        failing.error_breakdown.get(&ErrorCategory::CheckFailed),
+        Some(&failing.message_rtt.count),
+        "{failing:?}"
+    );
+}
+
+#[test]
+fn reply_checks_are_validated() {
+    let message = |builder: LoadTestConfigBuilder| builder.build().unwrap_err().to_string();
+    let base = || LoadTestConfig::builder("ws://127.0.0.1:9001");
+    assert!(message(base().expect("status=ok")).contains("invalid --expect 'status=ok'"));
+    assert!(message(base().expect("json:status")).contains("is not a JSON pointer"));
+    assert!(
+        message(base().expect("contains:x").mode(wsblast::TestMode::Stream))
+            .contains("--expect requires --mode echo")
+    );
+}
+
+#[cfg(feature = "scenario")]
+#[test]
+fn scenario_checks_are_validated() {
+    let phase = |action: &str| {
+        format!(
+            "version: \"1.0\"\nmetadata: {{ name: v }}\nphases:\n  - name: p\n    connections: 1\n    duration: 1s\n    actions:\n      - {action}\n"
+        )
+    };
+    let error = |action: &str| {
+        wsblast::ScenarioConfig::from_yaml(&phase(action))
+            .and_then(|scenario| {
+                wsblast::ScenarioExecutor::new(
+                    &scenario,
+                    LoadTestConfig::builder("ws://127.0.0.1:9001")
+                        .build()
+                        .unwrap(),
+                    None,
+                    None,
+                )
+                .map(|_| ())
+            })
+            .unwrap_err()
+            .to_string()
+    };
+    let cases = [
+        ("{type: Send, expect: {equals: ok}}", "equals needs json"),
+        ("{type: Send, expect: {}}", "either json"),
+        (
+            "{type: Send, expect: {json: status}}",
+            "is not a JSON pointer",
+        ),
+        (
+            "{type: Send, expect: {json: /a, regex: x}}",
+            "unknown field `regex`",
+        ),
+        ("{type: Send, capture: {seq: /a}}", "built-in placeholder"),
+        ("{type: Send, capture: {a-b: /a}}", "cannot name a variable"),
+        (
+            "{type: Send, capture: {s: a}}",
+            "capture s: 'a' is not a JSON pointer",
+        ),
+    ];
+    for (action, expected) in cases {
+        let error = error(action);
+        assert!(error.contains(expected), "{action}: {error}");
+    }
+    let stream =
+        wsblast::ScenarioConfig::from_yaml(&phase("{type: Send, capture: {s: /a}}")).unwrap();
+    let stream_error = wsblast::ScenarioExecutor::new(
+        &stream,
+        LoadTestConfig::builder("ws://127.0.0.1:9001")
+            .mode(wsblast::TestMode::Stream)
+            .build()
+            .unwrap(),
+        None,
+        None,
+    )
+    .map(|_| ())
+    .unwrap_err()
+    .to_string();
+    assert!(
+        stream_error.contains("expect and capture need --mode echo"),
+        "{stream_error}"
+    );
+}

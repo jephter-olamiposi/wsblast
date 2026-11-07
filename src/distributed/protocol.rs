@@ -236,6 +236,10 @@ pub(crate) enum WireAction {
     Send {
         payload: Option<WirePayload>,
         count: u64,
+        #[serde(default)]
+        expect: Option<crate::check::Check>,
+        #[serde(default)]
+        captures: Vec<crate::check::Capture>,
     },
     Wait {
         duration: Duration,
@@ -257,6 +261,9 @@ pub(crate) struct WirePhase {
     pub(crate) name: String,
     pub(crate) think_time: Duration,
     pub(crate) actions: Vec<WireAction>,
+    /// The variables the phase captures, which its templates read.
+    #[serde(default)]
+    pub(crate) vars: Vec<String>,
 }
 
 /// Capture settings of an agent's share.
@@ -385,6 +392,9 @@ pub(crate) struct WireConfig {
     pub(crate) ping_interval: Duration,
     /// The `--match` value, as spelled on the command line.
     pub(crate) reply_match: String,
+    /// The `--expect` check, if any.
+    #[serde(default)]
+    pub(crate) expect: Option<crate::check::Check>,
     pub(crate) reconnect: bool,
     pub(crate) graphql: Option<WireGraphql>,
     /// The scenario phase this share runs, if any.
@@ -575,6 +585,7 @@ impl WireConfig {
             message_timeout: config.message_timeout,
             ping_interval: config.ping_interval,
             reply_match: config.reply_match.flag_value(),
+            expect: config.expect.clone(),
             reconnect: !config.no_reconnect,
             graphql,
             phase: None,
@@ -628,6 +639,9 @@ impl WireConfig {
             .progress(false);
         if let Some(requests) = self.max_requests {
             builder = builder.max_requests(requests);
+        }
+        if let Some(check) = &self.expect {
+            builder = builder.expect(check.flag_value());
         }
         builder = match self.payload {
             WirePayload::Text { text } => builder.payload_text(text),
@@ -792,9 +806,9 @@ fn wire_payload(payload: &PayloadConfig) -> WirePayload {
 }
 
 #[cfg(feature = "scenario")]
-fn payload_from_wire(payload: WirePayload) -> Result<PayloadConfig> {
+fn payload_from_wire(payload: WirePayload, vars: &[String]) -> Result<PayloadConfig> {
     match payload {
-        WirePayload::Text { text } => Ok(PayloadConfig::from_text(text)),
+        WirePayload::Text { text } => Ok(PayloadConfig::from_text_with_vars(text, vars)),
         WirePayload::Binary { base64 } => crate::base64::decode(&base64)
             .map(|bytes| PayloadConfig::Binary(bytes.into()))
             .ok_or_else(|| {
@@ -816,9 +830,16 @@ impl WirePhase {
                 .actions
                 .iter()
                 .map(|action| match action {
-                    ScenarioAction::Send { payload, count } => WireAction::Send {
+                    ScenarioAction::Send {
+                        payload,
+                        count,
+                        expect,
+                        captures,
+                    } => WireAction::Send {
                         payload: payload.as_ref().map(wire_payload),
                         count: *count,
+                        expect: expect.clone(),
+                        captures: captures.clone(),
                     },
                     ScenarioAction::Wait(duration) => WireAction::Wait {
                         duration: *duration,
@@ -832,6 +853,7 @@ impl WirePhase {
                     },
                 })
                 .collect(),
+            vars: phase.vars.clone(),
         }
     }
 
@@ -851,18 +873,43 @@ impl WirePhase {
         let invalid = |reason: &str| -> WsBlastError {
             ConfigError::InvalidScenario(format!("phase '{}': {reason}", self.name)).into()
         };
+        let vars = self.vars.clone();
+        for name in &vars {
+            crate::check::check_var_name(name).map_err(|e| invalid(&format!("capture: {e}")))?;
+        }
         let actions = self
             .actions
             .into_iter()
             .map(|action| {
                 Ok(match action {
-                    WireAction::Send { payload, count } => {
+                    WireAction::Send {
+                        payload,
+                        count,
+                        expect,
+                        captures,
+                    } => {
                         if count == 0 {
                             return Err(invalid("send action count must be greater than zero"));
                         }
+                        if let Some(check) = &expect {
+                            check
+                                .validate()
+                                .map_err(|e| invalid(&format!("expect: {e}")))?;
+                        }
+                        if let Some(capture) = captures.iter().find(|c| c.var >= vars.len()) {
+                            return Err(invalid(&format!(
+                                "capture into variable {} of {}",
+                                capture.var,
+                                vars.len()
+                            )));
+                        }
                         ScenarioAction::Send {
-                            payload: payload.map(payload_from_wire).transpose()?,
+                            payload: payload
+                                .map(|payload| payload_from_wire(payload, &vars))
+                                .transpose()?,
                             count,
+                            expect,
+                            captures,
                         }
                     }
                     WireAction::Wait { duration } if duration.is_zero() => {
@@ -887,9 +934,20 @@ impl WirePhase {
             connections: config.connections,
             ramp_rate: config.ramp_rate,
             rate_per_conn: config.rate_per_conn,
-            payload: Some(config.payload.clone()),
+            // The share's payload was parsed without the phase's variables;
+            // parsed again with them, `{{NAME}}` reads the captures.
+            payload: Some(match &config.payload {
+                PayloadConfig::StaticText(text) if !vars.is_empty() => {
+                    PayloadConfig::from_text_with_vars(text.as_str().to_string(), &vars)
+                }
+                PayloadConfig::DynamicText(template) if !vars.is_empty() => {
+                    PayloadConfig::from_text_with_vars(template.source().to_string(), &vars)
+                }
+                payload => payload.clone(),
+            }),
             think_time: self.think_time,
             actions,
+            vars,
             slo: crate::config::SloThresholds::default(),
             stages: config.stages.clone(),
             // The coordinator resolved the phase's chaos (its own mapping
@@ -1546,7 +1604,7 @@ phases:
         assert_eq!(rebuilt.actions.len(), 4);
         assert!(matches!(
             &rebuilt.actions[0],
-            crate::config::ScenarioAction::Send { payload: Some(PayloadConfig::DynamicText(t)), count: 3 } if t.source() == "{{seq}}"
+            crate::config::ScenarioAction::Send { payload: Some(PayloadConfig::DynamicText(t)), count: 3, .. } if t.source() == "{{seq}}"
         ));
         assert!(matches!(
             rebuilt.actions[1],
@@ -1567,6 +1625,81 @@ phases:
             reason: String::new(),
         }];
         assert!(bad.into_phase(&agent).is_err());
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn captures_checks_and_variables_reach_the_agent() {
+        let scenario = crate::ScenarioConfig::from_yaml(
+            r#"
+version: "1.0"
+target: "ws://127.0.0.1:9/"
+metadata:
+  name: "wire"
+phases:
+  - name: "session"
+    connections: 2
+    duration: "1s"
+    payload: '{"op":"sub","s":"{{session}}"}'
+    actions:
+      - type: Send
+        payload: '{"op":"login"}'
+        expect: { json: /status, equals: ok }
+        capture: { session: /session }
+      - type: Send
+"#,
+        )
+        .unwrap();
+        let phase = scenario.compile(None).unwrap().remove(0);
+        let base = config(LoadTestConfig::builder("ws://127.0.0.1:9/").expect("contains:ok"));
+        let whole = crate::runner::phase_config(base, &phase);
+        let mut share = plan(&whole, 2).unwrap().remove(0);
+        share.phase = Some(WirePhase::from_phase(&phase));
+        let Message::Prepare { config: wire, .. } = Message::decode(
+            &Message::Prepare {
+                config: Box::new(share),
+                start_timeout: Duration::from_secs(30),
+            }
+            .encode(),
+        )
+        .unwrap() else {
+            panic!("not a prepare message");
+        };
+        let mut wire = *wire;
+        let wire_phase = wire.phase.take().unwrap();
+        let agent = wire.into_config().unwrap();
+        assert_eq!(
+            agent.expect,
+            Some(crate::check::Check::Contains("ok".into()))
+        );
+        let rebuilt = wire_phase.into_phase(&agent).unwrap();
+        assert_eq!(rebuilt.vars, ["session"]);
+        let crate::config::ScenarioAction::Send {
+            expect, captures, ..
+        } = &rebuilt.actions[0]
+        else {
+            panic!("not a send");
+        };
+        assert_eq!(
+            expect,
+            &Some(crate::check::Check::parse_flag("json:/status=ok").unwrap())
+        );
+        assert_eq!(captures[0].pointer, "/session");
+        // The phase payload reads the variable on the agent too.
+        let vars = ["s-1".to_string()];
+        let rendered = rebuilt
+            .payload
+            .as_ref()
+            .unwrap()
+            .template()
+            .unwrap()
+            .render(crate::template::Values {
+                seq: 0,
+                worker_id: 0,
+                data: None,
+                vars: &vars,
+            });
+        assert_eq!(rendered, r#"{"op":"sub","s":"s-1"}"#);
     }
 
     #[cfg(feature = "chaos")]

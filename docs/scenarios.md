@@ -105,7 +105,7 @@ Each action is a map with a `type` key. Type names are case-sensitive: `Send`, `
 
 | Type | Fields | Default | Behaviour |
 | :--- | :--- | :--- | :--- |
-| `Send` | `payload` (string, optional), `count` (integer, optional) | `count: 1` | Sends `count` messages back to back, each one paced by `rate_per_conn` when it is set. In echo mode each message waits for its reply and records an RTT sample, and a response time sample when `rate_per_conn` is set. After the whole burst the worker sleeps `think_time`. `count` must be greater than zero. |
+| `Send` | `payload` (string, optional), `count` (integer, optional), `expect` (mapping, optional), `capture` (mapping, optional) | `count: 1` | Sends `count` messages back to back, each one paced by `rate_per_conn` when it is set. In echo mode each message waits for its reply and records an RTT sample, and a response time sample when `rate_per_conn` is set. After the whole burst the worker sleeps `think_time`. `count` must be greater than zero. In echo mode, `expect` checks every reply and `capture` sets variables from it; see [templates, section 3](templates.md#3-values-from-replies-and-reply-checks). |
 | `Wait` | `duration` (duration, required) | | Sleeps for `duration`. Must be greater than zero. |
 | `Ping` | `interval` (duration, required) | | Sends one WebSocket Ping frame (payload `hb`), then sleeps for `interval`. It is a single ping followed by a pause, not a repeating keepalive. Must be greater than zero. Pings are not counted as messages. |
 | `Close` | `code` (integer, optional), `reason` (string, optional) | `code: 1000`, `reason: ""` | Sends a Close frame with this code and reason, then ends the connection for the rest of the phase. The worker does not reconnect. |

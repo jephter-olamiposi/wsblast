@@ -160,6 +160,7 @@ mod base64;
 mod capture;
 #[cfg(feature = "chaos")]
 mod chaos;
+mod check;
 mod cli;
 mod clock;
 mod config;

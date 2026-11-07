@@ -26,6 +26,7 @@ subcommand.
 | `-H, --header` | | Handshake header, repeatable; the value may hold `{{worker_id}}` and `{{data.COLUMN}}` |
 | `--mode` | `echo` | `echo`, `stream` or `listen` |
 | `--match` | `first` | Reply matching in echo mode: `first`, `exact` or `json:/path` |
+| `--expect` | | Check every echo reply: `json:/pointer`, `json:/pointer=VALUE` or `contains:TEXT`; a reply that fails is a `check_failed` error ([templates](templates.md#3-values-from-replies-and-reply-checks)) |
 
 ## SLO gates
 
