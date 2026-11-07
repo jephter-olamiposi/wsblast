@@ -37,6 +37,7 @@ _wsblast() {
 '*-H+[Custom HTTP header to include in the WebSocket handshake (can be specified multiple times; the value may hold {{worker_id}} and {{data.COLUMN}})]:HEADER:VALUE:_default' \
 '*--header=[Custom HTTP header to include in the WebSocket handshake (can be specified multiple times; the value may hold {{worker_id}} and {{data.COLUMN}})]:HEADER:VALUE:_default' \
 '--subprotocol=[Optional WebSocket subprotocol to request during handshake]:NAME:_default' \
+'*--source-ip=[Local addresses connections bind in turn, comma-separated or repeated, so one machine can open more connections to one target than one address'\''s ephemeral ports allow (e.g. '\''10.0.0.5,10.0.0.6'\'')]:IP:_default' \
 '--mode=[Load testing execution mode]:MODE:((echo\:"Send request frame, await response, and record round-trip latency (RTT)"
 stream\:"Continuously stream frames without awaiting per-frame acknowledgments"
 listen\:"Connect workers and passively record incoming server-pushed broadcast messages"

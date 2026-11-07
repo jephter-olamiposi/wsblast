@@ -18,6 +18,7 @@ subcommand.
 | `--max-connections` | | With `--arrival-rate`, the most sessions open at once; arrivals while this many are open are skipped and counted |
 | `-r, --rate` | `0` | Messages per second per connection (`0` is unthrottled) |
 | `-n, --requests` | | Stop after this many messages in total |
+| `--source-ip` | | Local addresses connections bind in turn, comma-separated or repeated, so one machine can open more connections to one target than one address's ephemeral ports allow ([METHODOLOGY.md, section 7.2](../METHODOLOGY.md#72-source-addresses)) |
 
 ## Messages
 

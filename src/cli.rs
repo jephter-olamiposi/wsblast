@@ -135,6 +135,12 @@ pub(crate) struct Cli {
     #[arg(long = "subprotocol", value_name = "NAME")]
     pub subprotocol: Option<String>,
 
+    /// Local addresses connections bind in turn, comma-separated or
+    /// repeated, so one machine can open more connections to one target
+    /// than one address's ephemeral ports allow (e.g. '10.0.0.5,10.0.0.6')
+    #[arg(long = "source-ip", value_name = "IP", value_delimiter = ',')]
+    pub source_ip: Vec<std::net::IpAddr>,
+
     /// Load testing execution mode
     #[arg(long = "mode", value_enum, default_value_t = TestMode::Echo)]
     pub mode: TestMode,

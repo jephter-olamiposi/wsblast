@@ -40,6 +40,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand -H 'Custom HTTP header to include in the WebSocket handshake (can be specified multiple times; the value may hold {{worker_id}} and {{data.COLUMN}})'
             cand --header 'Custom HTTP header to include in the WebSocket handshake (can be specified multiple times; the value may hold {{worker_id}} and {{data.COLUMN}})'
             cand --subprotocol 'Optional WebSocket subprotocol to request during handshake'
+            cand --source-ip 'Local addresses connections bind in turn, comma-separated or repeated, so one machine can open more connections to one target than one address''s ephemeral ports allow (e.g. ''10.0.0.5,10.0.0.6'')'
             cand --mode 'Load testing execution mode'
             cand --connect-timeout 'Connection handshake timeout (e.g., ''5s'', ''2000ms'')'
             cand --message-timeout 'Per-message response timeout in echo mode (e.g., ''5s'', ''1000ms'')'

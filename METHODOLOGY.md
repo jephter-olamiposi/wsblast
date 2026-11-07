@@ -313,6 +313,10 @@ If the handshake request cannot be built from the configuration at all, the slot
 
 With `--auth-token-refresh` (and with `--auth-type jwt` or `oauth2`, whose token is replaced before it expires), every handshake attempt, including the first connections of a ramp, workers a stage starts and reconnects, sends the token from the most recent successful run of `--auth-token-cmd`. Connections that are already open keep the token they connected with. A failed refresh keeps the previous token, so a server that rejects an expired token reports its failed reconnects as `http_upgrade_rejected`.
 
+### 7.2 Source addresses
+
+Every TCP connection from one local address to one target address and port needs its own local port, so one machine can hold only as many connections to a target as its ephemeral port range has ports: about 28,000 with Linux's default `net.ipv4.ip_local_port_range` of 32768 to 60999, and 16,384 on macOS and Windows. `--source-ip A,B,...` binds connection attempt `k` of the run to source `k mod n` of the target address's family (port 0, so the system picks a free port of that address), which gives each source a range of its own. Reconnects take the next source in turn. A target address of a family that has no source is not tried; when no address of the target is left, every connection fails as `tcp_connect` and wsblast warns before the run. Each source must be an address of this machine and not `0.0.0.0` or `::`; the configuration binds each one once to check, and duplicates are dropped. A distributed run cannot use `--source-ip`, since the addresses belong to one machine; give each agent machine more connections instead. Raising the port range (`sysctl net.ipv4.ip_local_port_range`) helps too; `--source-ip` is for when the range is not enough.
+
 ## 8. Run duration and shutdown
 
 ### 8.1 Duration

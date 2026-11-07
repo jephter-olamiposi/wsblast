@@ -534,6 +534,7 @@ impl Runner {
                 &self.config.target_url,
                 self.config.connect_timeout,
                 self.config.connections,
+                &self.config.source_ips,
             ) => {
                 Arc::new(target)
             }
@@ -602,6 +603,7 @@ impl Runner {
                 &self.config.target_url,
                 self.config.connect_timeout,
                 self.config.connections,
+                &self.config.source_ips,
             )
             .await,
         )

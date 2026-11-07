@@ -467,6 +467,12 @@ pub(crate) fn plan(config: &LoadTestConfig, agents: usize) -> Result<Vec<WireCon
     if agents == 0 {
         return Err(ConfigError::InvalidOption("--agents lists no agent".to_string()).into());
     }
+    if !config.source_ips.is_empty() {
+        return Err(ConfigError::UnsupportedOption(
+            "--source-ip binds addresses of this machine and cannot be used with --agents; every agent connects from its own addresses".to_string(),
+        )
+        .into());
+    }
     if let Some(max) = config
         .arrivals
         .and_then(|arrivals| arrivals.max_connections)
@@ -1438,6 +1444,18 @@ mod tests {
         );
         let err = plan(&config(tight), 3).unwrap_err().to_string();
         assert!(err.contains("--max-connections 2"), "{err}");
+    }
+
+    #[test]
+    fn source_addresses_stay_on_one_machine() {
+        let local = LoadTestConfig::builder("ws://127.0.0.1:9/")
+            .connections(4)
+            .source_ips(vec!["127.0.0.1".parse().unwrap()]);
+        let err = plan(&config(local), 2).unwrap_err().to_string();
+        assert!(
+            err.contains("--source-ip binds addresses of this machine"),
+            "{err}"
+        );
     }
 
     #[test]

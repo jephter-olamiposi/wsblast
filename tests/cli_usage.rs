@@ -189,3 +189,27 @@ fn arrival_flags_are_checked() {
         assert!(stderr.contains(expected), "{args:?}: {stderr}");
     }
 }
+
+#[test]
+fn source_addresses_are_checked_before_the_run() {
+    for (args, expected) in [
+        (
+            &["ws://127.0.0.1:1", "--source-ip", "10.0.0"][..],
+            "invalid IP address syntax",
+        ),
+        (
+            // 192.0.2.0/24 is reserved for documentation, so no machine has it.
+            &["ws://127.0.0.1:1", "--source-ip", "127.0.0.1,192.0.2.77"],
+            "--source-ip 192.0.2.77 is not usable on this machine",
+        ),
+        (
+            &["ws://127.0.0.1:1", "--source-ip", "0.0.0.0"],
+            "--source-ip 0.0.0.0 is unspecified",
+        ),
+    ] {
+        let output = wsblast(args);
+        let stderr = stderr(&output);
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+    }
+}

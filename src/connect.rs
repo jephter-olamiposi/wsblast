@@ -8,6 +8,11 @@
 //! does not stall every connection. The address that answered is tried first
 //! by later connections, so only the first few pay for the race.
 //!
+//! With source addresses (`--source-ip`), each connection binds the next
+//! source of the target address's family in turn, so every source has its
+//! own range of ephemeral ports and a run can open more connections to one
+//! target than one address allows.
+//!
 //! Each connection's read buffer is sized from the run's connection count
 //! ([`read_buffer_size`]). The WebSocket library fills a read buffer's whole
 //! capacity with zeros before every read, so a buffer is resident in full,
@@ -20,11 +25,11 @@ use crate::error::ErrorCategory;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use tokio::net::TcpStream;
+use tokio::net::{TcpSocket, TcpStream};
 use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
@@ -69,6 +74,48 @@ pub(crate) struct ConnectTarget {
     /// WebSocket settings of every connection: the library defaults with a
     /// read buffer sized for the run.
     ws_config: WebSocketConfig,
+    /// The local addresses connections bind, if any.
+    sources: SourceIps,
+}
+
+/// The local addresses connections bind, by family, taken in turn.
+#[derive(Default)]
+struct SourceIps {
+    v4: Box<[IpAddr]>,
+    v6: Box<[IpAddr]>,
+    /// Connections that took a source so far.
+    next: AtomicUsize,
+}
+
+impl SourceIps {
+    fn new(ips: &[IpAddr]) -> Self {
+        let (v4, v6): (Vec<IpAddr>, Vec<IpAddr>) = ips.iter().partition(|ip| ip.is_ipv4());
+        Self {
+            v4: v4.into(),
+            v6: v6.into(),
+            next: AtomicUsize::new(0),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.v4.is_empty() && self.v6.is_empty()
+    }
+
+    /// Whether a connection to `addr` can bind one of the sources.
+    fn serves(&self, addr: &SocketAddr) -> bool {
+        self.is_empty() || !self.of_family(addr).is_empty()
+    }
+
+    fn of_family(&self, addr: &SocketAddr) -> &[IpAddr] {
+        if addr.is_ipv4() { &self.v4 } else { &self.v6 }
+    }
+
+    /// The source connection `turn` binds for `addr`; `None` without
+    /// sources.
+    fn for_turn(&self, addr: &SocketAddr, turn: usize) -> Option<IpAddr> {
+        let family = self.of_family(addr);
+        (!family.is_empty()).then(|| family[turn % family.len()])
+    }
 }
 
 impl ConnectTarget {
@@ -79,20 +126,45 @@ impl ConnectTarget {
     /// A resolution failure is not returned as an error: it is kept and
     /// reported by every worker as a connection failure, the same way a
     /// per-connection failure would be.
-    pub(crate) async fn prepare(url: &Url, timeout: Duration, connections: usize) -> Self {
+    ///
+    /// With `source_ips`, only the target's addresses of a family that has
+    /// a source are used; when none has, every connection fails with
+    /// `tcp_connect`, and a warning says why.
+    pub(crate) async fn prepare(
+        url: &Url,
+        timeout: Duration,
+        connections: usize,
+        source_ips: &[IpAddr],
+    ) -> Self {
         let connector = if url.scheme() == "wss" {
             rustls_connector()
         } else {
             Connector::Plain
         };
+        let sources = SourceIps::new(source_ips);
         let addrs = tokio::time::timeout(timeout, resolve(url))
             .await
-            .unwrap_or(Err(ErrorCategory::Timeout));
+            .unwrap_or(Err(ErrorCategory::Timeout))
+            .and_then(|addrs| {
+                let usable: Vec<SocketAddr> =
+                    addrs.iter().copied().filter(|a| sources.serves(a)).collect();
+                if usable.is_empty() {
+                    let family = if addrs.iter().all(SocketAddr::is_ipv6) { "IPv6" } else { "IPv4" };
+                    eprintln!(
+                        "{} {} has only {family} addresses and no --source-ip is {family}, so every connection fails.",
+                        colored::Colorize::yellow(colored::Colorize::bold("Warning:")),
+                        url.host_str().unwrap_or_default()
+                    );
+                    return Err(ErrorCategory::TcpConnect);
+                }
+                Ok(usable.into())
+            });
         Self {
             addrs,
             preferred: AtomicUsize::new(0),
             connector,
             ws_config: WebSocketConfig::default().read_buffer_size(read_buffer_size(connections)),
+            sources,
         }
     }
 
@@ -104,7 +176,12 @@ impl ConnectTarget {
             .as_ref()
             .map_err(|cat| ConnectError::Static(*cat))?;
         let preferred = self.preferred.load(Ordering::Relaxed).min(addrs.len() - 1);
-        let order: Vec<SocketAddr> = std::iter::once(addrs[preferred])
+        let turn = if self.sources.is_empty() {
+            0
+        } else {
+            self.sources.next.fetch_add(1, Ordering::Relaxed)
+        };
+        let order: Vec<(SocketAddr, Option<IpAddr>)> = std::iter::once(addrs[preferred])
             .chain(
                 addrs
                     .iter()
@@ -112,6 +189,7 @@ impl ConnectTarget {
                     .filter(|&(i, _)| i != preferred)
                     .map(|(_, addr)| *addr),
             )
+            .map(|addr| (addr, self.sources.for_turn(&addr, turn)))
             .collect();
         let tcp = connect_tcp(&order)
             .await
@@ -180,17 +258,17 @@ fn rustls_connector() -> Connector {
 }
 
 /// Connects to the first address that accepts, trying them in the given
-/// order. Each attempt gets
+/// order, each from its source address when it has one. Each attempt gets
 /// [`ATTEMPT_DELAY`] before the next one starts alongside it; a failed attempt
 /// starts the next one at once. Returns the last error when every address
 /// fails.
-pub(crate) async fn connect_tcp(addrs: &[SocketAddr]) -> io::Result<TcpStream> {
+pub(crate) async fn connect_tcp(addrs: &[(SocketAddr, Option<IpAddr>)]) -> io::Result<TcpStream> {
     let mut queue = addrs.iter().copied();
     let mut pending = FuturesUnordered::new();
     let mut last_err = io::Error::new(io::ErrorKind::NotFound, "no address to connect to");
 
     match queue.next() {
-        Some(addr) => pending.push(TcpStream::connect(addr)),
+        Some(addr) => pending.push(open_tcp(addr)),
         None => return Err(last_err),
     }
 
@@ -201,7 +279,7 @@ pub(crate) async fn connect_tcp(addrs: &[SocketAddr]) -> io::Result<TcpStream> {
                 Err(err) => {
                     last_err = err;
                     match queue.next() {
-                        Some(addr) => pending.push(TcpStream::connect(addr)),
+                        Some(addr) => pending.push(open_tcp(addr)),
                         None if pending.is_empty() => return Err(last_err),
                         None => {}
                     }
@@ -209,11 +287,40 @@ pub(crate) async fn connect_tcp(addrs: &[SocketAddr]) -> io::Result<TcpStream> {
             },
             () = tokio::time::sleep(ATTEMPT_DELAY), if queue.len() > 0 => {
                 if let Some(addr) = queue.next() {
-                    pending.push(TcpStream::connect(addr));
+                    pending.push(open_tcp(addr));
                 }
             }
         }
     }
+}
+
+/// Opens a TCP connection to `target.0`, bound to the source address
+/// `target.1` when there is one. Binding port 0 lets the system pick a free
+/// port of that address.
+async fn open_tcp((addr, source): (SocketAddr, Option<IpAddr>)) -> io::Result<TcpStream> {
+    let Some(ip) = source else {
+        return TcpStream::connect(addr).await;
+    };
+    let socket = if addr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+    socket.bind(SocketAddr::new(ip, 0))?;
+    socket.connect(addr).await
+}
+
+/// Checks that `ip` can be a source address: an address of this machine
+/// that is not unspecified (`0.0.0.0` or `::`).
+pub(crate) fn check_source_ip(ip: IpAddr) -> Result<(), String> {
+    if ip.is_unspecified() {
+        return Err(format!(
+            "--source-ip {ip} is unspecified; give an address of this machine, such as 10.0.0.5"
+        ));
+    }
+    std::net::UdpSocket::bind(SocketAddr::new(ip, 0))
+        .map(drop)
+        .map_err(|e| format!("--source-ip {ip} is not usable on this machine: {e}"))
 }
 
 /// Reorders `addrs` so address families alternate, starting with the family
@@ -288,7 +395,7 @@ mod tests {
             let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
             probe.local_addr().unwrap()
         };
-        let stream = connect_tcp(&[closed, open]).await.unwrap();
+        let stream = connect_tcp(&[(closed, None), (open, None)]).await.unwrap();
         assert_eq!(stream.peer_addr().unwrap(), open);
     }
 
@@ -300,7 +407,7 @@ mod tests {
         let open = listener.local_addr().unwrap();
         let stream = tokio::time::timeout(
             Duration::from_secs(5),
-            connect_tcp(&[addr("192.0.2.1:9"), open]),
+            connect_tcp(&[(addr("192.0.2.1:9"), None), (open, None)]),
         )
         .await
         .expect("the reachable address was not tried")
@@ -317,6 +424,7 @@ mod tests {
             preferred: AtomicUsize::new(0),
             connector: Connector::Plain,
             ws_config: WebSocketConfig::default(),
+            sources: SourceIps::default(),
         };
         let request = "ws://127.0.0.1/".into_client_request().unwrap();
         // The server never upgrades, so only the TCP step can be observed.
@@ -330,8 +438,86 @@ mod tests {
             let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
             probe.local_addr().unwrap()
         };
-        let err = connect_tcp(&[closed]).await.unwrap_err();
+        let err = connect_tcp(&[(closed, None)]).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused);
+    }
+
+    #[tokio::test]
+    async fn connections_bind_their_source_address() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let open = listener.local_addr().unwrap();
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let stream = connect_tcp(&[(open, Some(local))]).await.unwrap();
+        assert_eq!(stream.local_addr().unwrap().ip(), local);
+        let (accepted, peer) = listener.accept().await.unwrap();
+        drop(accepted);
+        assert_eq!(peer.ip(), local);
+    }
+
+    /// Linux routes all of 127.0.0.0/8 to the loopback interface, so
+    /// 127.0.0.2 is an address of every Linux machine.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn connections_alternate_between_source_addresses() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("ws://{}/", listener.local_addr().unwrap())).unwrap();
+        let sources: Vec<IpAddr> = vec!["127.0.0.1".parse().unwrap(), "127.0.0.2".parse().unwrap()];
+        let target =
+            Arc::new(ConnectTarget::prepare(&url, Duration::from_secs(1), 4, &sources).await);
+        let mut peers = Vec::new();
+        for _ in 0..4 {
+            let target = Arc::clone(&target);
+            // The listener never upgrades, so only the TCP step completes.
+            let attempt = tokio::spawn(async move {
+                let request = "ws://127.0.0.1/".into_client_request().unwrap();
+                let _ = target.connect(request).await;
+            });
+            let (stream, peer) = listener.accept().await.unwrap();
+            peers.push(peer.ip());
+            drop(stream);
+            let _ = attempt.await;
+        }
+        assert_eq!(peers, [sources[0], sources[1], sources[0], sources[1]]);
+    }
+
+    #[test]
+    fn sources_are_taken_in_turn_within_the_target_family() {
+        let ips: Vec<IpAddr> = ["10.0.0.1", "::1", "10.0.0.2"]
+            .iter()
+            .map(|ip| ip.parse().unwrap())
+            .collect();
+        let sources = SourceIps::new(&ips);
+        let v4 = addr("192.0.2.1:80");
+        let v6 = addr("[2001:db8::1]:80");
+        let turns: Vec<Option<IpAddr>> = (0..3).map(|turn| sources.for_turn(&v4, turn)).collect();
+        assert_eq!(turns, [Some(ips[0]), Some(ips[2]), Some(ips[0])]);
+        assert_eq!(sources.for_turn(&v6, 5), Some(ips[1]));
+        let only_v4 = SourceIps::new(&ips[..1]);
+        assert!(only_v4.serves(&v4));
+        assert!(!only_v4.serves(&v6));
+        assert!(SourceIps::default().serves(&v6));
+    }
+
+    #[tokio::test]
+    async fn a_target_without_a_source_of_its_family_fails_every_connection() {
+        let url = Url::parse("ws://127.0.0.1:9/").unwrap();
+        let target =
+            ConnectTarget::prepare(&url, Duration::from_secs(1), 1, &["::1".parse().unwrap()])
+                .await;
+        assert_eq!(target.addrs.unwrap_err(), ErrorCategory::TcpConnect);
+    }
+
+    #[test]
+    fn source_addresses_must_belong_to_this_machine() {
+        assert!(check_source_ip("127.0.0.1".parse().unwrap()).is_ok());
+        let unspecified = check_source_ip("0.0.0.0".parse().unwrap()).unwrap_err();
+        assert!(unspecified.contains("unspecified"), "{unspecified}");
+        // 192.0.2.0/24 is reserved for documentation, so no machine has it.
+        let foreign = check_source_ip("192.0.2.77".parse().unwrap()).unwrap_err();
+        assert!(
+            foreign.contains("is not usable on this machine"),
+            "{foreign}"
+        );
     }
 
     #[tokio::test]

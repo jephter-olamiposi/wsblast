@@ -82,6 +82,8 @@ With N agents, in the order of `--agents`:
 | `--rate` | Unchanged. It is a rate per connection, so the total rate is the same as on one machine. |
 | Everything else | Unchanged. |
 
+`--source-ip` cannot be used with `--agents`: the addresses belong to one machine, and each agent connects from its own.
+
 When a share would be zero, the run is rejected before anything connects: more agents than connections (or than the highest stage target), than `-n`, than a non-zero `--ramp-rate`, or than `--max-connections`.
 
 ## 4. Scenarios, capture, refreshed tokens and live export

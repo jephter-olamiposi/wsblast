@@ -43,6 +43,7 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('-H', '-H ', [CompletionResultType]::ParameterName, 'Custom HTTP header to include in the WebSocket handshake (can be specified multiple times; the value may hold {{worker_id}} and {{data.COLUMN}})')
             [CompletionResult]::new('--header', '--header', [CompletionResultType]::ParameterName, 'Custom HTTP header to include in the WebSocket handshake (can be specified multiple times; the value may hold {{worker_id}} and {{data.COLUMN}})')
             [CompletionResult]::new('--subprotocol', '--subprotocol', [CompletionResultType]::ParameterName, 'Optional WebSocket subprotocol to request during handshake')
+            [CompletionResult]::new('--source-ip', '--source-ip', [CompletionResultType]::ParameterName, 'Local addresses connections bind in turn, comma-separated or repeated, so one machine can open more connections to one target than one address''s ephemeral ports allow (e.g. ''10.0.0.5,10.0.0.6'')')
             [CompletionResult]::new('--mode', '--mode', [CompletionResultType]::ParameterName, 'Load testing execution mode')
             [CompletionResult]::new('--connect-timeout', '--connect-timeout', [CompletionResultType]::ParameterName, 'Connection handshake timeout (e.g., ''5s'', ''2000ms'')')
             [CompletionResult]::new('--message-timeout', '--message-timeout', [CompletionResultType]::ParameterName, 'Per-message response timeout in echo mode (e.g., ''5s'', ''1000ms'')')

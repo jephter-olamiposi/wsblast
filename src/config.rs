@@ -53,6 +53,8 @@ pub struct LoadTestConfig {
     /// The run's data file (`--data`), whose rows templates read.
     pub(crate) data: Option<std::sync::Arc<crate::data::DataSet>>,
     pub(crate) subprotocol: Option<String>,
+    /// Local addresses connections bind in turn (`--source-ip`).
+    pub(crate) source_ips: Vec<std::net::IpAddr>,
     pub(crate) mode: TestMode,
     pub(crate) connect_timeout: Duration,
     pub(crate) message_timeout: Duration,
@@ -194,6 +196,12 @@ impl LoadTestConfig {
         self.subprotocol.as_deref()
     }
 
+    /// The local addresses connections bind in turn; empty to let the
+    /// system choose.
+    pub fn source_ips(&self) -> &[std::net::IpAddr] {
+        &self.source_ips
+    }
+
     /// What each worker does on its connection.
     pub fn mode(&self) -> TestMode {
         self.mode
@@ -278,6 +286,7 @@ pub struct LoadTestConfigBuilder {
     invalid_header: Option<String>,
     data: Option<DataSource>,
     subprotocol: Option<String>,
+    source_ips: Vec<std::net::IpAddr>,
     mode: TestMode,
     connect_timeout: Duration,
     message_timeout: Duration,
@@ -333,6 +342,7 @@ impl LoadTestConfigBuilder {
             invalid_header: None,
             data: None,
             subprotocol: None,
+            source_ips: Vec::new(),
             mode: TestMode::Echo,
             connect_timeout: Duration::from_secs(5),
             message_timeout: Duration::from_secs(5),
@@ -515,6 +525,19 @@ impl LoadTestConfigBuilder {
     /// Requests a WebSocket subprotocol during the handshake.
     pub fn subprotocol(mut self, subprotocol: impl Into<String>) -> Self {
         self.subprotocol = Some(subprotocol.into());
+        self
+    }
+
+    /// Binds each connection to the next of these local addresses in turn,
+    /// using one of the target address's family. Every source address has
+    /// its own range of ephemeral ports, so several of them let one machine
+    /// open more connections to one target address than one source allows,
+    /// about 28,000 with Linux's default port range. Each address must
+    /// belong to this machine; [`build`](Self::build) checks that by binding
+    /// it once. A distributed run cannot use source addresses, which belong
+    /// to one machine.
+    pub fn source_ips(mut self, ips: Vec<std::net::IpAddr>) -> Self {
+        self.source_ips = ips;
         self
     }
 
@@ -732,6 +755,13 @@ impl LoadTestConfigBuilder {
                 .map_err(|e| ConfigError::InvalidOption(format!("payload: {e}")))?;
         }
         let (headers, header_templates) = split_header_templates(self.headers, data.as_ref())?;
+        let mut source_ips = Vec::with_capacity(self.source_ips.len());
+        for ip in self.source_ips {
+            if !source_ips.contains(&ip) {
+                crate::connect::check_source_ip(ip).map_err(ConfigError::InvalidOption)?;
+                source_ips.push(ip);
+            }
+        }
         let expect = self
             .expect
             .as_deref()
@@ -773,6 +803,7 @@ impl LoadTestConfigBuilder {
             header_templates,
             data: data.map(std::sync::Arc::new),
             subprotocol: self.subprotocol,
+            source_ips,
             mode: self.mode,
             connect_timeout: self.connect_timeout,
             message_timeout: self.message_timeout,
@@ -2925,6 +2956,7 @@ impl LoadTestConfig {
         builder.headers = headers;
         builder.data = cli.data.take().map(DataSource::File);
         builder.subprotocol = cli.subprotocol.take();
+        builder.source_ips = std::mem::take(&mut cli.source_ip);
         #[cfg(feature = "graphql-ws")]
         if let Some(graphql) = graphql {
             builder.graphql = GraphQLOptions {
