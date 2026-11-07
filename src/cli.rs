@@ -376,6 +376,11 @@ pub(crate) struct Cli {
     #[arg(long = "sio-auth", value_name = "JSON")]
     pub sio_auth: Option<String>,
 
+    /// Socket.IO server version (--mode socketio): 2 for Socket.IO 2 servers (Engine.IO 3), 3 or 4 for later ones [default: 4]
+    #[cfg(feature = "socketio")]
+    #[arg(long = "sio-version", value_name = "VERSION", value_parser = clap::value_parser!(u8).range(2..=4))]
+    pub sio_version: Option<u8>,
+
     /// Output report format
     #[arg(long = "format", value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
@@ -659,7 +664,7 @@ pub(crate) struct MockArgs {
     #[arg(long = "rules", value_name = "FILE", conflicts_with = "replay")]
     pub rules: Option<PathBuf>,
 
-    /// Speak Socket.IO (Engine.IO 4): accept any namespace, acknowledge every event that asks for an ack with its arguments, echo the others, and ping every 25s
+    /// Speak Socket.IO: accept any namespace, acknowledge every event that asks for an ack with its arguments, echo the others, and ping every 25s (Engine.IO 3 clients ping instead)
     #[cfg(feature = "socketio")]
     #[arg(long = "socketio", conflicts_with_all = ["replay", "rules"])]
     pub socketio: bool,

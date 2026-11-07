@@ -37,7 +37,7 @@ Instead of echoing, send each connection the frames a \-\-capture file recorded 
 Answer frames as a YAML rules file says: match by text or JSON field, reply from templates, delay or close
 .TP
 \fB\-\-socketio\fR
-Speak Socket.IO (Engine.IO 4): accept any namespace, acknowledge every event that asks for an ack with its arguments, echo the others, and ping every 25s
+Speak Socket.IO: accept any namespace, acknowledge every event that asks for an ack with its arguments, echo the others, and ping every 25s (Engine.IO 3 clients ping instead)
 .TP
 \fB\-\-compression\fR
 Accept permessage\-deflate when a client offers it: inflate its messages and compress the replies

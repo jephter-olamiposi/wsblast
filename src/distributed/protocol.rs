@@ -205,6 +205,8 @@ pub(crate) struct WireSocketIo {
     pub(crate) namespace: String,
     pub(crate) event: String,
     pub(crate) auth: Option<String>,
+    /// The `--sio-version`: 2, or 4 for Engine.IO 4.
+    pub(crate) version: u8,
 }
 
 /// An arrival-rate model on the wire.
@@ -615,6 +617,10 @@ impl WireConfig {
             namespace: sio.namespace.clone(),
             event: sio.event.clone(),
             auth: sio.auth.clone(),
+            version: match sio.engine {
+                crate::socketio::EngineIo::V3 => 2,
+                crate::socketio::EngineIo::V4 => 4,
+            },
         });
         #[cfg(not(feature = "socketio"))]
         let socketio = None;
@@ -764,7 +770,8 @@ impl WireConfig {
         if let Some(sio) = self.socketio {
             builder = builder
                 .socketio_namespace(sio.namespace)
-                .socketio_event(sio.event);
+                .socketio_event(sio.event)
+                .socketio_version(sio.version);
             if let Some(auth) = sio.auth {
                 builder = builder.socketio_auth(auth);
             }

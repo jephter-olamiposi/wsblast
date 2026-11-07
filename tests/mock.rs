@@ -1235,6 +1235,45 @@ async fn socketio_binary_events_are_acked_with_their_attachments() {
     assert_eq!(stats.frames_received, metrics.total_messages_sent);
 }
 
+/// A Socket.IO 2 session (Engine.IO 3) pings the server itself: the mock
+/// speaks Engine.IO 3 to a client that asks for it and drops a client that
+/// stops pinging, so a run longer than the ping timeout without reconnects
+/// shows the pings arrive. Binary events work as in Engine.IO 4.
+#[cfg(feature = "socketio")]
+#[tokio::test]
+async fn socketio_2_sessions_ping_the_server() {
+    let mock = Mock::start(
+        MockConfig::builder().socketio_ping(Duration::from_millis(40), Duration::from_millis(60)),
+    )
+    .await;
+    let config = socketio_load(&mock.url)
+        .socketio_version(2)
+        .build()
+        .unwrap();
+    assert!(config.target_url().as_str().contains("EIO=3"));
+    let text = run(socketio_load(&mock.url)
+        .socketio_version(2)
+        .socketio_namespace("/chat")
+        .rate_per_connection(5)
+        .duration(Duration::from_millis(1200))
+        .expect("json:/0/seq"))
+    .await;
+    let binary = run(socketio_load(&mock.url)
+        .socketio_version(2)
+        .payload_binary(vec![7u8; 500])
+        .rate_per_connection(20)
+        .duration(Duration::from_millis(800)))
+    .await;
+    mock.stop().await;
+
+    assert_eq!(text.total_reconnects, 0, "{text:?}");
+    assert_eq!(text.error_rate, 0.0, "{:?}", text.error_breakdown);
+    assert!(text.total_messages_recv >= 8, "{text:?}");
+    assert_eq!(binary.error_rate, 0.0, "{:?}", binary.error_breakdown);
+    assert!(binary.total_messages_recv >= 20, "{binary:?}");
+    assert_eq!(binary.total_bytes_recv, binary.total_messages_recv * 500);
+}
+
 /// The server pings far more often than the client sends: the pump answers
 /// every ping while the loop waits for its next send, so the server never
 /// drops the connection.

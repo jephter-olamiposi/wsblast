@@ -105,8 +105,8 @@ impl LoadTestConfig {
     pub(crate) fn set_target(&mut self, url: &Url) {
         self.target_url = url.clone();
         #[cfg(feature = "socketio")]
-        if self.socketio.is_some() {
-            crate::socketio::socketio_url(&mut self.target_url);
+        if let Some(sio) = &self.socketio {
+            crate::socketio::socketio_url(&mut self.target_url, sio.engine);
         }
     }
 
@@ -716,6 +716,17 @@ impl LoadTestConfigBuilder {
         self
     }
 
+    /// Sets the Socket.IO server version `--mode socketio` speaks to: 2 for
+    /// Socket.IO 2 servers (Engine.IO 3), 3 or 4 (the default) for Socket.IO
+    /// 3 and later (Engine.IO 4). [`build`](Self::build) rejects other
+    /// values.
+    #[cfg(feature = "socketio")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "socketio")))]
+    pub fn socketio_version(mut self, version: u8) -> Self {
+        self.socketio.version = Some(version);
+        self
+    }
+
     /// Sets the JSON object `--mode socketio` sends with the namespace
     /// connect, as a Socket.IO client's `auth` option.
     #[cfg(feature = "socketio")]
@@ -810,10 +821,10 @@ impl LoadTestConfigBuilder {
         #[cfg(feature = "socketio")]
         let mut target_url = target_url;
         #[cfg(feature = "socketio")]
-        let socketio = self.socketio.compile(self.mode)?;
+        let socketio = self.socketio.compile(self.mode, &target_url)?;
         #[cfg(feature = "socketio")]
-        if socketio.is_some() {
-            crate::socketio::socketio_url(&mut target_url);
+        if let Some(sio) = &socketio {
+            crate::socketio::socketio_url(&mut target_url, sio.engine);
         }
         validate_reply_match(&self.reply_match, self.mode, std::iter::once(&self.payload))?;
         if let Some(message) = self.invalid_header {
@@ -1190,28 +1201,44 @@ struct SocketIoOptions {
     event: Option<String>,
     namespace: Option<String>,
     auth: Option<String>,
+    version: Option<u8>,
 }
 
 #[cfg(feature = "socketio")]
 impl SocketIoOptions {
     /// The Socket.IO settings of a run in `mode`: `None` outside socketio
     /// mode, where the options are rejected, and checked settings inside it.
-    fn compile(self, mode: TestMode) -> Result<Option<crate::socketio::SocketIoConfig>> {
-        let set = self.event.is_some() || self.namespace.is_some() || self.auth.is_some();
+    fn compile(
+        self,
+        mode: TestMode,
+        target: &Url,
+    ) -> Result<Option<crate::socketio::SocketIoConfig>> {
+        let set = self.event.is_some()
+            || self.namespace.is_some()
+            || self.auth.is_some()
+            || self.version.is_some();
         if mode != TestMode::SocketIo {
             if set {
                 return Err(ConfigError::UnsupportedOption(
-                    "--sio-event, --sio-namespace and --sio-auth require --mode socketio"
+                    "--sio-event, --sio-namespace, --sio-auth and --sio-version require --mode socketio"
                         .to_string(),
                 )
                 .into());
             }
             return Ok(None);
         }
+        let version = self.version.unwrap_or(4);
+        let engine = crate::socketio::EngineIo::from_version(version).ok_or_else(|| {
+            ConfigError::InvalidOption(format!(
+                "--sio-version must be 2, 3 or 4, received {version}"
+            ))
+        })?;
+        crate::socketio::check_url(target, engine).map_err(ConfigError::InvalidOption)?;
         let config = crate::socketio::SocketIoConfig {
             namespace: self.namespace.unwrap_or_else(|| "/".to_string()),
             event: self.event.unwrap_or_else(|| "message".to_string()),
             auth: self.auth,
+            engine,
         };
         config.validate().map_err(ConfigError::InvalidOption)?;
         Ok(Some(config))
@@ -3094,6 +3121,7 @@ impl LoadTestConfig {
                 event: cli.sio_event.take(),
                 namespace: cli.sio_namespace.take(),
                 auth: cli.sio_auth.take(),
+                version: cli.sio_version,
             };
         }
 

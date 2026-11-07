@@ -294,7 +294,7 @@ impl WorkerSession {
                 crate::socketio::open(&mut ws_stream, &config),
             ) => Some(opened.unwrap_or(Err(ErrorCategory::Timeout))),
         };
-        match opened {
+        let ping_every = match opened {
             None => {
                 let _ = ws_stream.send(Message::Close(None)).await;
                 return SessionEnd::Finished;
@@ -304,11 +304,11 @@ impl WorkerSession {
                 let _ = ws_stream.send(Message::Close(None)).await;
                 return self.session_end();
             }
-            Some(Ok(())) => {}
-        }
+            Some(Ok(every)) => every,
+        };
         let (channel, ends) = crate::socketio::channel();
         let mut unsolicited = 0u64;
-        let pump = crate::socketio::pump(ws_stream, &config, ends, &mut unsolicited);
+        let pump = crate::socketio::pump(ws_stream, &config, ping_every, ends, &mut unsolicited);
         let session = async {
             #[cfg(feature = "scenario")]
             if let Some(phase) = self.scenario.clone()
@@ -335,10 +335,21 @@ impl WorkerSession {
     }
 
     fn build_handshake_request(&self) -> Result<Request, ErrorCategory> {
-        let mut req = self
-            .config
-            .target_url
-            .as_str()
+        // A Socket.IO 2 client sends its auth as query parameters; they stay
+        // out of the target URL the reports show.
+        #[cfg(feature = "socketio")]
+        if let Some(sio) = &self.config.socketio
+            && sio.engine == crate::socketio::EngineIo::V3
+            && let Some(auth) = &sio.auth
+        {
+            let url = crate::socketio::auth_query(&self.config.target_url, auth);
+            return self.finish_handshake_request(url.as_str());
+        }
+        self.finish_handshake_request(self.config.target_url.as_str())
+    }
+
+    fn finish_handshake_request(&self, url: &str) -> Result<Request, ErrorCategory> {
+        let mut req = url
             .into_client_request()
             .map_err(|_| ErrorCategory::Other)?;
 

@@ -743,13 +743,24 @@ async fn accept_session<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    // Whether the client asked for Engine.IO 3 (`EIO=3`), which a Socket.IO
+    // session then speaks.
+    let engine_io_3 = std::sync::atomic::AtomicBool::new(false);
+    let socketio = shared.config.socketio.is_some();
     // The error type is fixed by tungstenite's handshake callback.
     #[allow(clippy::result_large_err)]
-    let answer = move |request: &Request,
-                       mut response: Response|
-          -> std::result::Result<Response, ErrorResponse> {
+    let answer = |request: &Request,
+                  mut response: Response|
+     -> std::result::Result<Response, ErrorResponse> {
         if compress {
             answer_compression(request, &mut response);
+        }
+        if socketio {
+            let eio3 = request
+                .uri()
+                .query()
+                .is_some_and(|query| query.split('&').any(|pair| pair == "EIO=3"));
+            engine_io_3.store(eio3, Ordering::Relaxed);
         }
         Ok(response)
     };
@@ -763,7 +774,7 @@ async fn accept_session<S>(
     shared.counters.accepted.fetch_add(1, Ordering::Relaxed);
     shared.counters.active.fetch_add(1, Ordering::Relaxed);
     let _active = ActiveGuard(Arc::clone(&shared.counters));
-    run_session(ws, &shared, plan, &cancel).await;
+    run_session(ws, &shared, plan, &cancel, engine_io_3.into_inner()).await;
 }
 
 type WsSink<S> = SplitSink<WebSocketStream<S>, Message>;
@@ -858,6 +869,7 @@ async fn run_session<S>(
     shared: &Shared,
     plan: ConnectionPlan,
     cancel: &CancellationToken,
+    engine_io_3: bool,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -879,15 +891,25 @@ async fn run_session<S>(
     // A Socket.IO session's id, its next ping and the deadline of the pong
     // it waits for.
     let sid = format!("wsblast-mock-{}", plan.index);
-    let mut sio = SocketIoSession::default();
+    let mut sio = socketio_session(engine_io_3);
+    // Engine.IO 4: when the next ping is due, and the deadline of the pong
+    // to the last one. Engine.IO 3: no pings, and the deadline of the
+    // client's next ping.
     let mut ping_at = None;
     let mut pong_by: Option<Instant> = None;
     if let (Some((interval, timeout)), Outgoing::Echo(queue)) =
         (shared.config.socketio, &mut outgoing)
     {
-        let open = socketio_open(&sid, interval, timeout);
+        let open = socketio_open(&sid, interval, timeout, engine_io_3);
         queue.push_back((Instant::now(), Queued::Control(Message::Text(open.into()))));
-        ping_at = Some(Instant::now() + interval);
+        if engine_io_3 {
+            // A Socket.IO 2 server joins the client to the default
+            // namespace without being asked.
+            queue.push_back((Instant::now(), Queued::Control(Message::Text("40".into()))));
+            pong_by = Some(Instant::now() + interval + timeout);
+        } else {
+            ping_at = Some(Instant::now() + interval);
+        }
     }
 
     loop {
@@ -976,6 +998,12 @@ async fn run_session<S>(
                     if matches!(&msg, Message::Text(text) if text.as_str() == "3") {
                         pong_by = None;
                         continue;
+                    }
+                    if engine_io_3
+                        && matches!(&msg, Message::Text(text) if text.as_str() == "2")
+                        && let Some((interval, timeout)) = shared.config.socketio
+                    {
+                        pong_by = Some(Instant::now() + interval + timeout);
                     }
                     let Some((frames, event)) = socketio_answer(&mut sio, &msg, &sid) else {
                         continue;
@@ -1067,13 +1095,39 @@ fn queue_replies(
 
 /// The Engine.IO open packet of a Socket.IO session.
 #[cfg(feature = "socketio")]
-fn socketio_open(sid: &str, interval: Duration, timeout: Duration) -> String {
-    crate::socketio::mock_open(sid, interval.as_millis(), timeout.as_millis())
+fn socketio_open(sid: &str, interval: Duration, timeout: Duration, engine_io_3: bool) -> String {
+    crate::socketio::mock_open(
+        sid,
+        interval.as_millis(),
+        timeout.as_millis(),
+        engine(engine_io_3),
+    )
 }
 
 #[cfg(not(feature = "socketio"))]
-fn socketio_open(_: &str, _: Duration, _: Duration) -> String {
+fn socketio_open(_: &str, _: Duration, _: Duration, _: bool) -> String {
     String::new()
+}
+
+#[cfg(feature = "socketio")]
+fn engine(engine_io_3: bool) -> crate::socketio::EngineIo {
+    if engine_io_3 {
+        crate::socketio::EngineIo::V3
+    } else {
+        crate::socketio::EngineIo::V4
+    }
+}
+
+/// A connection's Socket.IO state, speaking the Engine.IO version the
+/// client asked for.
+#[cfg(feature = "socketio")]
+fn socketio_session(engine_io_3: bool) -> SocketIoSession {
+    SocketIoSession::new(engine(engine_io_3))
+}
+
+#[cfg(not(feature = "socketio"))]
+fn socketio_session(_: bool) -> SocketIoSession {
+    SocketIoSession::default()
 }
 
 #[cfg(feature = "socketio")]

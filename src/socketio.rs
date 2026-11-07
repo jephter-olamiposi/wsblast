@@ -1,5 +1,12 @@
 //! Socket.IO over WebSocket (`--mode socketio`): Engine.IO protocol 4 with
-//! Socket.IO protocol 5, as Socket.IO 3 and later servers speak them.
+//! Socket.IO protocol 5, as Socket.IO 3 and later servers speak them, or
+//! with `--sio-version 2` Engine.IO 3 with Socket.IO protocol 4, as
+//! Socket.IO 2 servers do. The packets are the same; Engine.IO 3 differs in
+//! who pings (the client, every `pingInterval` of the open packet), in
+//! binary frames (each starts with the message type byte `4`), in the
+//! default namespace (joined by the server on its own, so the client sends
+//! no connect for it) and in authentication (query parameters of the URL
+//! instead of a connect payload).
 //!
 //! A session opens like a Socket.IO client: it reads the Engine.IO open
 //! packet, connects to the namespace and waits for the server's connect
@@ -25,6 +32,7 @@ use bytes::Bytes;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Error as TungsteniteError;
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -32,8 +40,67 @@ use tokio_util::sync::PollSender;
 
 use crate::error::ErrorCategory;
 
-/// The query parameters a Socket.IO client adds to the URL.
-pub(crate) const QUERY: [(&str, &str); 2] = [("EIO", "4"), ("transport", "websocket")];
+/// The Engine.IO protocol a session speaks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum EngineIo {
+    /// Engine.IO 3, of Socket.IO 2 servers (`--sio-version 2`).
+    V3,
+    /// Engine.IO 4, of Socket.IO 3 and later servers.
+    #[default]
+    V4,
+}
+
+impl EngineIo {
+    /// The `EIO` query value.
+    pub(crate) fn query(self) -> &'static str {
+        match self {
+            Self::V3 => "3",
+            Self::V4 => "4",
+        }
+    }
+
+    /// The protocol of a `--sio-version`: 2 for Engine.IO 3, 3 and 4 for
+    /// Engine.IO 4.
+    pub(crate) fn from_version(version: u8) -> Option<Self> {
+        match version {
+            2 => Some(Self::V3),
+            3 | 4 => Some(Self::V4),
+            _ => None,
+        }
+    }
+
+    /// The Engine.IO version an `EIO` query value asks for.
+    pub(crate) fn from_query(value: &str) -> Option<Self> {
+        match value {
+            "3" => Some(Self::V3),
+            "4" => Some(Self::V4),
+            _ => None,
+        }
+    }
+
+    /// A binary frame as Engine.IO sends it: as is in version 4, after the
+    /// message type byte in version 3.
+    pub(crate) fn wrap_binary(self, bytes: Bytes) -> Bytes {
+        match self {
+            Self::V3 => {
+                let mut framed = Vec::with_capacity(bytes.len() + 1);
+                framed.push(4);
+                framed.extend_from_slice(&bytes);
+                framed.into()
+            }
+            Self::V4 => bytes,
+        }
+    }
+
+    /// The bytes of a binary frame Engine.IO sent; in version 3 a frame
+    /// that does not start with the message type is not a message.
+    pub(crate) fn unwrap_binary(self, bytes: Bytes) -> Option<Bytes> {
+        match self {
+            Self::V3 => (bytes.first() == Some(&4)).then(|| bytes.slice(1..)),
+            Self::V4 => Some(bytes),
+        }
+    }
+}
 
 /// The path Socket.IO servers listen on unless configured otherwise.
 pub(crate) const DEFAULT_PATH: &str = "/socket.io/";
@@ -62,8 +129,10 @@ pub(crate) struct SocketIoConfig {
     pub(crate) namespace: String,
     /// The event every data frame is emitted as.
     pub(crate) event: String,
-    /// The JSON object sent with the namespace connect, if any.
+    /// The JSON object sent with the namespace connect, if any; with
+    /// Engine.IO 3, its fields are query parameters of the handshake.
     pub(crate) auth: Option<String>,
+    pub(crate) engine: EngineIo,
 }
 
 impl SocketIoConfig {
@@ -96,19 +165,67 @@ impl SocketIoConfig {
 }
 
 /// Adds the Engine.IO query to `url`, and the default Socket.IO path when
-/// the URL has none.
-pub(crate) fn socketio_url(url: &mut url::Url) {
+/// the URL has none. An `EIO` the URL already sets is replaced by the
+/// session's, which [`check_url`] rejects when they differ.
+pub(crate) fn socketio_url(url: &mut url::Url, engine: EngineIo) {
     if url.path().is_empty() || url.path() == "/" {
         url.set_path(DEFAULT_PATH);
     }
-    let missing: Vec<(&str, &str)> = QUERY
-        .iter()
-        .filter(|(key, _)| !url.query_pairs().any(|(k, _)| k == *key))
-        .copied()
+    let mut pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(k, _)| k != "EIO")
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect();
-    if !missing.is_empty() {
-        url.query_pairs_mut().extend_pairs(missing);
+    let had_eio = url
+        .query_pairs()
+        .any(|(k, v)| k == "EIO" && v == engine.query());
+    if had_eio {
+        // Keep the URL as it was written.
+        pairs = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+    } else {
+        pairs.push(("EIO".to_string(), engine.query().to_string()));
     }
+    if !pairs.iter().any(|(k, _)| k == "transport") {
+        pairs.push(("transport".to_string(), "websocket".to_string()));
+    }
+    url.query_pairs_mut().clear().extend_pairs(pairs);
+}
+
+/// Rejects a URL whose `EIO` asks for another Engine.IO version than the
+/// session speaks.
+pub(crate) fn check_url(url: &url::Url, engine: EngineIo) -> Result<(), String> {
+    match url.query_pairs().find(|(k, _)| k == "EIO") {
+        Some((_, value)) if value != engine.query() => Err(format!(
+            "the URL asks for EIO={value}, but the session speaks Engine.IO {}; {}",
+            engine.query(),
+            match EngineIo::from_query(&value) {
+                Some(EngineIo::V3) => "add --sio-version 2 for a Socket.IO 2 server",
+                Some(EngineIo::V4) => "drop --sio-version 2 for a Socket.IO 3 or later server",
+                None => "remove EIO from the URL",
+            }
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The handshake URL of an Engine.IO 3 session with `auth`: each field of
+/// the object is a query parameter, a string as it is and any other value
+/// as JSON, as a Socket.IO 2 client's `query` option sends it.
+pub(crate) fn auth_query(url: &url::Url, auth: &str) -> url::Url {
+    let mut url = url.clone();
+    if let Ok(serde_json::Value::Object(fields)) = serde_json::from_str(auth) {
+        let mut query = url.query_pairs_mut();
+        for (key, value) in fields {
+            match value {
+                serde_json::Value::String(text) => query.append_pair(&key, &text),
+                other => query.append_pair(&key, &other.to_string()),
+            };
+        }
+    }
+    url
 }
 
 /// A Socket.IO packet, carried in an Engine.IO message packet (`4`).
@@ -250,20 +367,25 @@ struct Pending {
 
 /// Opens the Socket.IO session on a WebSocket: reads the Engine.IO open
 /// packet, connects to the namespace and waits for the server's connect
-/// packet, answering pings meanwhile.
+/// packet, answering pings meanwhile. Returns how often an Engine.IO 3
+/// session must ping the server: the open packet's `pingInterval`.
 ///
 /// # Errors
 ///
 /// `protocol_error` when the server does not speak Engine.IO 4 or refuses
 /// the namespace (a connect error packet), `unexpected_close` when it
 /// closes, and `read_error` or `write_error` when the connection fails.
-pub(crate) async fn open<S>(ws: &mut S, config: &SocketIoConfig) -> Result<(), ErrorCategory>
+pub(crate) async fn open<S>(
+    ws: &mut S,
+    config: &SocketIoConfig,
+) -> Result<Option<Duration>, ErrorCategory>
 where
     S: Sink<Message, Error = TungsteniteError>
         + Stream<Item = Result<Message, TungsteniteError>>
         + Unpin,
 {
     let mut opened = false;
+    let mut ping_every = None;
     loop {
         let text = match ws.next().await {
             Some(Ok(Message::Text(text))) => text,
@@ -272,21 +394,47 @@ where
                 continue;
             }
             Some(Ok(Message::Close(_))) | None => return Err(ErrorCategory::UnexpectedClose),
-            Some(Ok(_)) => return Err(ErrorCategory::ProtocolError),
+            // Before the open packet, a binary frame is not Engine.IO.
+            Some(Ok(Message::Binary(_))) if !opened => return Err(ErrorCategory::ProtocolError),
+            // After it, the attachment of an event the server emits on
+            // another namespace, such as a Socket.IO 2 server's default one
+            // before it answers the connect.
+            Some(Ok(_)) => continue,
             Some(Err(_)) => return Err(ErrorCategory::ReadError),
         };
         if !opened {
             // The open packet: `0{"sid":...,"pingInterval":...}`.
-            if !text.starts_with("0{") {
+            let Some(open) = text.strip_prefix('0') else {
                 return Err(ErrorCategory::ProtocolError);
-            }
+            };
+            let Ok(open) = serde_json::from_str::<serde_json::Value>(open) else {
+                return Err(ErrorCategory::ProtocolError);
+            };
             opened = true;
+            if config.engine == EngineIo::V3 {
+                // An Engine.IO 3 client pings; without an interval it
+                // cannot keep the session.
+                let interval = open
+                    .get("pingInterval")
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|ms| *ms > 0)
+                    .ok_or(ErrorCategory::ProtocolError)?;
+                ping_every = Some(Duration::from_millis(interval));
+                // The server joins the default namespace on its own.
+                if config.namespace == "/" {
+                    continue;
+                }
+            }
+            let auth = match config.engine {
+                EngineIo::V3 => "",
+                EngineIo::V4 => config.auth.as_deref().unwrap_or_default(),
+            };
             let connect = Packet {
                 kind: b'0',
                 attachments: 0,
                 namespace: &config.namespace,
                 id: None,
-                data: config.auth.as_deref().unwrap_or_default(),
+                data: auth,
             };
             ws.send(Message::Text(connect.encode().into()))
                 .await
@@ -305,7 +453,7 @@ where
         }
         match Packet::parse(&text) {
             Some(packet) if packet.namespace == config.namespace => match packet.kind {
-                b'0' => return Ok(()),
+                b'0' => return Ok(ping_every),
                 b'4' | b'1' => return Err(ErrorCategory::ProtocolError),
                 _ => {}
             },
@@ -387,8 +535,13 @@ impl Stream for SocketIoChannel {
 /// latest event, answers Engine.IO pings, and adds every other data frame
 /// the server sends to `unsolicited`. When the channel's sender is dropped
 /// or sends a Close, it disconnects from the namespace and closes.
-pub(crate) async fn pump<S>(ws: S, config: &SocketIoConfig, ends: PumpEnds, unsolicited: &mut u64)
-where
+pub(crate) async fn pump<S>(
+    ws: S,
+    config: &SocketIoConfig,
+    ping_every: Option<Duration>,
+    ends: PumpEnds,
+    unsolicited: &mut u64,
+) where
     S: Sink<Message, Error = TungsteniteError>
         + Stream<Item = Result<Message, TungsteniteError>>
         + Unpin,
@@ -401,6 +554,12 @@ where
     let mut next_id = 0u64;
     let mut awaited: Option<u64> = None;
     let mut pending: Option<Pending> = None;
+    // An Engine.IO 3 client pings the server; version 4 servers ping.
+    let mut pings = ping_every.map(|every| {
+        let mut pings = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        pings.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        pings
+    });
     let disconnect = Packet {
         kind: b'1',
         attachments: 0,
@@ -411,6 +570,12 @@ where
     .encode();
     loop {
         tokio::select! {
+            () = next_ping(pings.as_mut()) => {
+                if let Err(err) = sink.send(Message::Text("2".into())).await {
+                    let _ = incoming.send(Err(err)).await;
+                    return;
+                }
+            }
             out = outgoing.recv() => {
                 let frame = match out {
                     None => {
@@ -424,7 +589,10 @@ where
                         return;
                     }
                     Some(Message::Text(text)) => Some((event_packet(config, next_id, text.as_str()), None)),
-                    Some(Message::Binary(bytes)) => Some((binary_event_packet(config, next_id), Some(bytes))),
+                    Some(Message::Binary(bytes)) => Some((
+                        binary_event_packet(config, next_id),
+                        Some(config.engine.wrap_binary(bytes)),
+                    )),
                     Some(other) => {
                         let _ = sink.send(other).await;
                         None
@@ -460,7 +628,9 @@ where
                         return;
                     }
                     Some(Ok(Message::Binary(bytes))) => {
-                        let Some(mut packet) = pending.take() else {
+                        let (Some(mut packet), Some(bytes)) =
+                            (pending.take(), config.engine.unwrap_binary(bytes))
+                        else {
                             *unsolicited += 1;
                             continue;
                         };
@@ -532,6 +702,16 @@ where
     }
 }
 
+/// The next tick of `pings`, or never without them.
+async fn next_ping(pings: Option<&mut tokio::time::Interval>) {
+    match pings {
+        Some(pings) => {
+            pings.tick().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
 /// What `wsblast mock --socketio` sends for a client's frames.
 #[cfg(feature = "mock")]
 pub(crate) struct MockAnswer {
@@ -544,15 +724,25 @@ pub(crate) struct MockAnswer {
 }
 
 /// One connection's Socket.IO state in `wsblast mock --socketio`: the
-/// binary packet whose attachments are still arriving.
+/// Engine.IO version the client asked for, and the binary packet whose
+/// attachments are still arriving.
 #[cfg(feature = "mock")]
 #[derive(Default)]
 pub(crate) struct MockSession {
-    pending: Option<(String, usize, Vec<Message>)>,
+    engine: EngineIo,
+    pending: Option<(String, usize, Vec<Bytes>)>,
 }
 
 #[cfg(feature = "mock")]
 impl MockSession {
+    /// A session speaking `engine`.
+    pub(crate) fn new(engine: EngineIo) -> Self {
+        Self {
+            engine,
+            pending: None,
+        }
+    }
+
     /// What the mock answers to a frame the client sent: the connect
     /// packet for a namespace connect, the ack for an event that asks for
     /// one (with the event's arguments, and their attachments for a binary
@@ -561,9 +751,9 @@ impl MockSession {
     pub(crate) fn receive(&mut self, frame: &Message, sid: &str) -> Option<MockAnswer> {
         let text = match frame {
             Message::Text(text) => text.as_str(),
-            Message::Binary(_) => {
+            Message::Binary(bytes) => {
                 let (header, needed, mut attachments) = self.pending.take()?;
-                attachments.push(frame.clone());
+                attachments.push(self.engine.unwrap_binary(bytes.clone())?);
                 if attachments.len() < needed {
                     self.pending = Some((header, needed, attachments));
                     return None;
@@ -581,7 +771,11 @@ impl MockSession {
                     .into(),
                     None => header.clone().into(),
                 })];
-                frames.extend(attachments);
+                frames.extend(
+                    attachments
+                        .into_iter()
+                        .map(|bytes| Message::Binary(self.engine.wrap_binary(bytes))),
+                );
                 return Some(MockAnswer {
                     frames,
                     event: true,
@@ -597,10 +791,13 @@ impl MockSession {
         match packet.kind {
             b'0' => {
                 let data = format!(r#"{{"sid":"{sid}"}}"#);
+                // A Socket.IO 2 client appends its query to the namespace
+                // it connects to: `40/chat?token=x,`.
+                let namespace = packet.namespace.split('?').next().unwrap_or("/");
                 let reply = Packet {
                     kind: b'0',
                     attachments: 0,
-                    namespace: packet.namespace,
+                    namespace,
                     id: None,
                     data: &data,
                 };
@@ -657,11 +854,21 @@ fn event_arguments(data: &str) -> String {
     }
 }
 
-/// The Engine.IO open packet the mock sends first.
+/// The Engine.IO open packet the mock sends first; version 3 has no
+/// `maxPayload`.
 #[cfg(feature = "mock")]
-pub(crate) fn mock_open(sid: &str, ping_interval_ms: u128, ping_timeout_ms: u128) -> String {
+pub(crate) fn mock_open(
+    sid: &str,
+    ping_interval_ms: u128,
+    ping_timeout_ms: u128,
+    engine: EngineIo,
+) -> String {
+    let max_payload = match engine {
+        EngineIo::V3 => "",
+        EngineIo::V4 => r#","maxPayload":1000000"#,
+    };
     format!(
-        r#"0{{"sid":"{sid}","upgrades":[],"pingInterval":{ping_interval_ms},"pingTimeout":{ping_timeout_ms},"maxPayload":1000000}}"#
+        r#"0{{"sid":"{sid}","upgrades":[],"pingInterval":{ping_interval_ms},"pingTimeout":{ping_timeout_ms}{max_payload}}}"#
     )
 }
 
@@ -674,6 +881,7 @@ mod tests {
             namespace: namespace.to_string(),
             event: "chat".to_string(),
             auth: None,
+            engine: EngineIo::V4,
         }
     }
 
@@ -721,17 +929,59 @@ mod tests {
     #[test]
     fn urls_get_the_engine_io_query_and_default_path() {
         let mut url = url::Url::parse("ws://h:3000").unwrap();
-        socketio_url(&mut url);
+        socketio_url(&mut url, EngineIo::V4);
         assert_eq!(
             url.as_str(),
             "ws://h:3000/socket.io/?EIO=4&transport=websocket"
         );
         let mut url = url::Url::parse("wss://h/io/?token=x&EIO=4").unwrap();
-        socketio_url(&mut url);
+        socketio_url(&mut url, EngineIo::V4);
         assert_eq!(
             url.as_str(),
             "wss://h/io/?token=x&EIO=4&transport=websocket"
         );
+    }
+
+    #[test]
+    fn engine_io_3_urls_frames_and_auth() {
+        let mut url = url::Url::parse("ws://h:3000").unwrap();
+        socketio_url(&mut url, EngineIo::V3);
+        assert_eq!(
+            url.as_str(),
+            "ws://h:3000/socket.io/?EIO=3&transport=websocket"
+        );
+        let mut url = url::Url::parse("ws://h/socket.io/?EIO=4&a=1").unwrap();
+        assert!(
+            check_url(&url, EngineIo::V3)
+                .unwrap_err()
+                .contains("drop --sio-version 2")
+        );
+        assert!(check_url(&url, EngineIo::V4).is_ok());
+        let v2 = url::Url::parse("ws://h/?EIO=3").unwrap();
+        assert!(
+            check_url(&v2, EngineIo::V4)
+                .unwrap_err()
+                .contains("add --sio-version 2")
+        );
+        socketio_url(&mut url, EngineIo::V3);
+        assert_eq!(url.query(), Some("a=1&EIO=3&transport=websocket"));
+        let with_auth = auth_query(&url, r#"{"token":"a b","n":5}"#);
+        assert_eq!(
+            with_auth.query(),
+            Some("a=1&EIO=3&transport=websocket&n=5&token=a+b")
+        );
+
+        let bytes = Bytes::from_static(b"abc");
+        assert_eq!(EngineIo::V3.wrap_binary(bytes.clone()).as_ref(), b"\x04abc");
+        assert_eq!(
+            EngineIo::V3.unwrap_binary(Bytes::from_static(b"\x04abc")),
+            Some(bytes.clone())
+        );
+        assert_eq!(EngineIo::V3.unwrap_binary(bytes.clone()), None);
+        assert_eq!(EngineIo::V4.wrap_binary(bytes.clone()), bytes);
+        assert_eq!(EngineIo::from_version(2), Some(EngineIo::V3));
+        assert_eq!(EngineIo::from_version(3), Some(EngineIo::V4));
+        assert_eq!(EngineIo::from_version(5), None);
     }
 
     #[test]
@@ -847,5 +1097,23 @@ mod tests {
         );
         // A stray attachment is ignored.
         assert!(s.receive(&one, "s").is_none());
+
+        // Engine.IO 3: attachments carry the message type byte, and a
+        // Socket.IO 2 client's connect carries its query.
+        let s = &mut MockSession::new(EngineIo::V3);
+        assert_eq!(
+            mock_reply(s, "40/files?token=x,").0.as_deref(),
+            Some(r#"40/files,{"sid":"s"}"#)
+        );
+        let header = Message::Text(r#"451-3["up",{"_placeholder":true,"num":0}]"#.into());
+        assert!(s.receive(&header, "s").is_none());
+        let answer = s
+            .receive(&Message::Binary(Bytes::from_static(b"\x04one")), "s")
+            .unwrap();
+        assert_eq!(
+            answer.frames[1],
+            Message::Binary(Bytes::from_static(b"\x04one"))
+        );
+        assert!(mock_open("s", 1, 2, EngineIo::V3).ends_with(r#""pingTimeout":2}"#));
     }
 }

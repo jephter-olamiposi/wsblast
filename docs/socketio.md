@@ -9,10 +9,12 @@ latency SLOs, `--expect`, scenario actions with captures and named actions,
 arrival rates and chaos.
 
 It speaks Engine.IO protocol 4 with Socket.IO protocol 5, which Socket.IO 3
-and later servers use. It is part of the default build (Cargo feature
-`socketio`). `scripts/e2e.sh` checks it, text and binary, compressed and
-not, against the socket.io 4 server, and the mock against the socket.io 4
-client.
+and later servers use, and with `--sio-version 2` Engine.IO 3 with
+Socket.IO protocol 4, for Socket.IO 2 servers ([section 4](#4-socketio-2-servers)).
+It is part of the default build (Cargo feature `socketio`).
+`scripts/e2e.sh` checks it, text and binary, compressed and not, against
+the socket.io 2 and 4 servers, and the mock against the socket.io 2 and 4
+clients.
 
 ```bash
 wsblast ws://localhost:3000 --mode socketio --sio-event chat \
@@ -37,7 +39,8 @@ io.on("connection", (socket) => {
 | `--mode socketio` | | Socket.IO mode. |
 | `--sio-event NAME` | `message` | The event every message is emitted as. The names Socket.IO reserves (`connect`, `connect_error`, `disconnect`, `disconnecting`, `newListener`, `removeListener`) are rejected. |
 | `--sio-namespace NS` | `/` | The namespace to connect to, such as `/chat`. It must start with `/` and hold no `,`. |
-| `--sio-auth JSON` | none | A JSON object sent with the namespace connect, as a Socket.IO client's `auth` option, such as `{"token":"abc"}`. Templates are not filled in; use `-H` with `{{data.COLUMN}}` for a per-connection credential in a header. |
+| `--sio-auth JSON` | none | A JSON object sent with the namespace connect, as a Socket.IO client's `auth` option, such as `{"token":"abc"}`; with `--sio-version 2`, its fields are query parameters of the handshake instead. Templates are not filled in; use `-H` with `{{data.COLUMN}}` for a per-connection credential in a header. |
+| `--sio-version V` | `4` | The server's Socket.IO version: `2` for Socket.IO 2 (Engine.IO 3), `3` or `4` for Socket.IO 3 and later (Engine.IO 4), which speak the same protocol. |
 
 Any other option works as in echo mode. `--match` keeps its default: the
 reply to an event is its ack, matched by the ack id. With `--binary` (or a
@@ -48,8 +51,10 @@ in [section 3.1](#31-binary-attachments).
 
 When the target URL has no path, wsblast connects to `/socket.io/`, the
 path Socket.IO servers listen on by default. It always adds
-`EIO=4&transport=websocket` to the query, unless the URL already sets them,
-and keeps any other query parameters:
+`EIO=4&transport=websocket` to the query (`EIO=3` with `--sio-version 2`),
+unless the URL already sets them, and keeps any other query parameters. A
+URL whose `EIO` asks for the other version is rejected before the run,
+with a message naming the `--sio-version` it needs:
 
 | Given | Connected |
 | :--- | :--- |
@@ -108,7 +113,34 @@ A binary event the server emits on its own counts as one unsolicited frame
 however many attachments it has. A packet that announces more than 1,024
 attachments is not read as a packet.
 
-## 4. Scenarios
+## 4. Socket.IO 2 servers
+
+`--sio-version 2` speaks to Socket.IO 2 servers, and to Socket.IO 3 and
+later servers started with `allowEIO3: true`. The packets are the same as
+above; four things differ, as they do for a Socket.IO 2 client:
+
+- **Pings.** The client pings: wsblast sends `2` every `pingInterval` of
+  the open packet, and the server answers `3`. A Socket.IO 2 server closes
+  a session that stops pinging; an Engine.IO 4 session (without
+  `--sio-version 2`) waits for the server's pings instead, so against a
+  Socket.IO 2 server it is closed after the server's `pingInterval` plus
+  `pingTimeout` and shows up as reconnects.
+- **The default namespace.** The server joins the client to `/` on its own
+  and sends `40`; wsblast sends a connect only for another namespace.
+- **Authentication.** Socket.IO 2 has no connect payload: the fields of
+  `--sio-auth` are added to the handshake URL's query, as a Socket.IO 2
+  client's `query` option sends them (`{"token":"abc"}` becomes
+  `token=abc`; a value that is not a string is sent as JSON). They are not
+  part of the target URL the reports show.
+- **Binary frames.** Every attachment's binary frame starts with the byte
+  `4`, Engine.IO's message type, which wsblast adds and removes.
+
+```bash
+wsblast ws://legacy.example.com --mode socketio --sio-version 2 \
+  --sio-namespace /chat --sio-auth '{"token":"abc"}' --sio-event chat -c 100 -d 1m -r 2
+```
+
+## 5. Scenarios
 
 Scenario actions run over the Socket.IO session: every `Send` is an event,
 so a script can log in, keep a value from the login's ack and send it with
@@ -141,28 +173,31 @@ wsblast --scenario chat.yaml --mode socketio --sio-event chat ws://localhost:300
 `Ping` actions send WebSocket pings, which Socket.IO servers ignore; the
 Engine.IO pings are answered on their own.
 
-## 5. Testing against the mock
+## 6. Testing against the mock
 
 `wsblast mock --socketio` speaks the server side: it accepts a connect to
 any namespace, acknowledges every event that asks for an ack with the
 event's arguments after `--delay` and `--jitter` (a binary event with its
 attachments, as a binary ack), echoes events that do not,
 and pings every 25 seconds, closing a connection that does not answer
-within 20, as a Socket.IO server does. Stalls and `--reject-ratio` apply as
-usual; it cannot be combined with `--rules` or `--replay`.
+within 20, as a Socket.IO server does. A client that asks for Engine.IO 3
+(`EIO=3`, as `--sio-version 2` and Socket.IO 2 clients do) is served as a
+Socket.IO 2 server serves it: the mock joins it to `/`, answers its pings
+and closes it when no ping arrives within 45 seconds. Stalls and
+`--reject-ratio` apply as usual; it cannot be combined with `--rules` or
+`--replay`.
 
 ```bash
 wsblast mock --socketio --delay 5ms &
 wsblast ws://127.0.0.1:9001 --mode socketio -c 50 -d 30s -r 10
 ```
 
-## 6. Limits
+## 7. Limits
 
 - A binary message is one attachment in an event of one argument; events
   that mix JSON arguments and several attachments come only from the
   server.
-- Only the WebSocket transport is used, and only Engine.IO 4: Socket.IO 2
-  servers (Engine.IO 3) are not supported.
+- Only the WebSocket transport is used.
 - Each connection has one event in flight at a time, as in echo mode.
 - A distributed run sends the `--sio-*` settings to every agent; the agents
   need the `socketio` feature, which default builds have.

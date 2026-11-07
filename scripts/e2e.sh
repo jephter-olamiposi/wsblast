@@ -8,15 +8,15 @@
 # OAuth2 token endpoint). When the Python `websockets` package and node with
 # npm are available, compression and Socket.IO are also checked against
 # independent implementations: the websockets server and client, and the
-# socket.io 4 server and client, which npm installs into the temporary
-# directory.
+# socket.io 2 and 4 servers and clients, which npm installs into the
+# temporary directory.
 #
 #   scripts/e2e.sh [path/to/wsblast]
 #
 # The binary must be built with every feature:
 #   cargo build --release --all-features && scripts/e2e.sh target/release/wsblast
 # Needs bash, python3, curl and openssl; the source-address and TUI checks
-# run on Linux only. Uses ports 19001-19034, 19443-19444, 19464, 19501-19502,
+# run on Linux only. Uses ports 19001-19034, 19443-19444, 19464, 19501-19503,
 # 14318, 14444 and 17701-17703 on 127.0.0.1. Exits 1 when any check fails.
 W=${1:-${WSBLAST:-wsblast}}
 case "$W" in */*) W=$(cd "$(dirname "$W")" && pwd)/$(basename "$W") ;; esac
@@ -334,6 +334,52 @@ timeout 30 node sio-client.js http://127.0.0.1:19033 >sioclient.log 2>&1
 check "a socket.io 4 client against mock --socketio" "grep -q '^ok' sioclient.log" "$(tail -2 sioclient.log)"
 else
 skip "Socket.IO against socket.io 4 (needs node and npm)"
+fi
+
+# Socket.IO 2 servers (Engine.IO 3)
+$W ws://127.0.0.1:19033 --mode socketio --sio-version 2 --sio-namespace /chat -c 3 -d 2s -r 10 --expect 'json:/0/seq' --no-progress --format json -o sio2mock.json >/dev/null 2>&1; rc=$?
+check "--sio-version 2 against mock --socketio" "[ $rc = 0 ] && j sio2mock.json '\"EIO=3\" in d[\"target_url\"] and d[\"metrics\"][\"error_rate\"] == 0 and d[\"metrics\"][\"total_messages_recv\"] > 30' | grep -q True" "rc=$rc"
+if command -v node >/dev/null && mkdir -p sio2 && npm install --prefix sio2 --silent --no-audit --no-fund socket.io@2 socket.io-client@2 >npm2.log 2>&1; then
+cat > sio2/server.js <<'EOF'
+const io = require("socket.io")(Number(process.argv[2]), { pingInterval: 500, pingTimeout: 500, maxHttpBufferSize: 1e8 });
+for (const ns of ["/", "/chat"]) {
+  const nsp = io.of(ns);
+  nsp.use((socket, next) => (ns === "/chat" && socket.handshake.query.token !== "t1" ? next(new Error("not authorized")) : next()));
+  nsp.on("connection", (socket) => {
+    socket.on("chat", (msg, ack) => ack(Buffer.isBuffer(msg) ? msg : { ok: true, echo: msg }));
+    socket.emit("hello", Buffer.from([1, 2, 3]));
+  });
+}
+EOF
+node sio2/server.js 19503 >sio2server.log 2>&1 &
+sleep 1.5
+$W ws://127.0.0.1:19503 --mode socketio --sio-version 2 --sio-event chat -c 3 -d 3s -r 10 -p '{"n":{{seq}}}' --expect 'json:/0/ok=true' --no-progress --format json -o sio2js.json >/dev/null 2>&1; rc=$?
+check "--sio-version 2 against a socket.io 2 server, past its ping timeout" "[ $rc = 0 ] && j sio2js.json '(m:=d[\"metrics\"])[\"error_rate\"] == 0 and m[\"total_reconnects\"] == 0 and m[\"total_messages_recv\"] > 60' | grep -q True" "rc=$rc $(tail -2 sio2server.log)"
+$W ws://127.0.0.1:19503 --mode socketio --sio-version 2 --sio-namespace /chat --sio-auth '{"token":"t1"}' --sio-event chat -c 3 -d 2s --payload-file blob.bin --binary --no-progress --format json -o sio2bin.json >/dev/null 2>&1; rc=$?
+check "--sio-version 2 binary events in a namespace with auth" "[ $rc = 0 ] && j sio2bin.json '(m:=d[\"metrics\"])[\"error_rate\"] == 0 and m[\"total_bytes_recv\"] == 3000 * m[\"total_messages_recv\"] > 0 and \"t1\" not in d[\"target_url\"]' | grep -q True" "rc=$rc"
+$W ws://127.0.0.1:19503 --mode socketio --sio-version 2 --sio-namespace /chat --sio-auth '{"token":"no"}' -c 1 -d 1s --no-reconnect --no-progress --format json -o sio2deny.json >/dev/null 2>&1
+check "a refused Socket.IO 2 namespace is a protocol_error" "j sio2deny.json 'd[\"metrics\"][\"error_breakdown\"].get(\"protocol_error\") == 1' | grep -q True" "$(j sio2deny.json "d['metrics']['error_breakdown']" 2>&1)"
+cat > sio2/client.js <<'EOF'
+const io = require("socket.io-client");
+const s = io(process.argv[2] + "/files", { transports: ["websocket"], query: { token: "x" } });
+const ack = (...args) => new Promise((res, rej) => {
+  const t = setTimeout(() => rej(new Error("no ack")), 2000);
+  s.emit(...args, (...reply) => { clearTimeout(t); res(reply); });
+});
+s.on("connect", async () => {
+  const blob = Buffer.alloc(5000, 7);
+  for (let i = 0; i < 20; i++) {
+    const r = await ack("up", blob, { n: i });
+    if (!Buffer.from(r[0]).equals(blob) || r[1].n !== i) { console.log("bad binary ack"); process.exit(1); }
+  }
+  console.log("ok"); process.exit(0);
+});
+s.on("error", (e) => { console.log("error", e); process.exit(1); });
+EOF
+timeout 30 node sio2/client.js http://127.0.0.1:19033 >sio2client.log 2>&1
+check "a socket.io 2 client against mock --socketio" "grep -q '^ok' sio2client.log" "$(tail -2 sio2client.log)"
+else
+skip "Socket.IO against socket.io 2 (needs node and npm)"
 fi
 
 # TUI under a pseudo-terminal

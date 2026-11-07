@@ -88,6 +88,7 @@ ES256\:"ECDSA with P-256 and SHA-256"))' \
 '--sio-event=[Socket.IO event each message is emitted as (--mode socketio)]:NAME:_default' \
 '--sio-namespace=[Socket.IO namespace to connect to (--mode socketio), '\''/'\'' by default]:NAMESPACE:_default' \
 '--sio-auth=[JSON object sent with the Socket.IO namespace connect, as a client'\''s \`auth\` option (--mode socketio)]:JSON:_default' \
+'--sio-version=[Socket.IO server version (--mode socketio)\: 2 for Socket.IO 2 servers (Engine.IO 3), 3 or 4 for later ones \[default\: 4\]]:VERSION:_default' \
 '--format=[Output report format]:FORMAT:((text\:"Human-readable styled terminal tables"
 json\:"Schema-versioned JSON for CI parsing and metric archiving"
 markdown\:"GitHub Flavored Markdown table for PR comments and job summaries"
@@ -151,7 +152,7 @@ _arguments "${_arguments_options[@]}" : \
 '(--replay)--rules=[Answer frames as a YAML rules file says\: match by text or JSON field, reply from templates, delay or close]:FILE:_files' \
 '--tls-cert=[PEM certificate chain to serve wss\:// instead of ws\:// (clients must trust it, e.g. with SSL_CERT_FILE)]:PEM:_files' \
 '--tls-key=[PEM private key for --tls-cert]:PEM:_files' \
-'(--replay --rules)--socketio[Speak Socket.IO (Engine.IO 4)\: accept any namespace, acknowledge every event that asks for an ack with its arguments, echo the others, and ping every 25s]' \
+'(--replay --rules)--socketio[Speak Socket.IO\: accept any namespace, acknowledge every event that asks for an ack with its arguments, echo the others, and ping every 25s (Engine.IO 3 clients ping instead)]' \
 '--compression[Accept permessage-deflate when a client offers it\: inflate its messages and compress the replies]' \
 '-h[Print help]' \
 '--help[Print help]' \
