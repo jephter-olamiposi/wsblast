@@ -213,6 +213,18 @@ jobs:
           # An impossible budget must breach the SLO with exit code 2.
           run_gate 2 --max-p99 1us
 
+  features-e2e:
+    name: End-to-end feature checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build wsblast with every feature
+        run: cargo build --release --locked --all-features
+      - name: Run scripts/e2e.sh against the binary
+        run: bash scripts/e2e.sh target/release/wsblast
+
   perf-budget:
     name: Performance budget
     runs-on: ubuntu-24.04

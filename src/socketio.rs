@@ -261,10 +261,9 @@ pub(crate) struct PumpEnds {
     incoming: mpsc::Sender<Incoming>,
 }
 
-/// What the pump passes to the loop. The error is boxed because channel
-/// slots are allocated 32 at a time, and an unboxed `tungstenite::Error`
-/// would make every slot several times larger than a frame.
-type Incoming = Result<Message, Box<TungsteniteError>>;
+/// What the pump passes to the loop: a frame, or the error that ended the
+/// connection.
+type Incoming = Result<Message, TungsteniteError>;
 
 /// A channel and the ends its pump takes.
 pub(crate) fn channel() -> (SocketIoChannel, PumpEnds) {
@@ -311,13 +310,8 @@ impl Sink<Message> for SocketIoChannel {
 impl Stream for SocketIoChannel {
     type Item = Result<Message, TungsteniteError>;
 
-    // The item type is the WebSocket stream's, which the loops expect; the
-    // error is unboxed only here, once per frame read.
-    #[allow(clippy::result_large_err)]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.incoming
-            .poll_recv(cx)
-            .map(|item| item.map(|item| item.map_err(|err| *err)))
+        self.incoming.poll_recv(cx)
     }
 }
 
@@ -373,7 +367,7 @@ where
                     awaited = Some(id);
                     let packet = event_packet(config, id, &payload);
                     if let Err(err) = sink.send(Message::Text(packet.into())).await {
-                        let _ = incoming.send(Err(Box::new(err))).await;
+                        let _ = incoming.send(Err(err)).await;
                         return;
                     }
                 }
@@ -382,7 +376,7 @@ where
                 let text = match received {
                     None => return,
                     Some(Err(err)) => {
-                        let _ = incoming.send(Err(Box::new(err))).await;
+                        let _ = incoming.send(Err(err)).await;
                         return;
                     }
                     Some(Ok(Message::Text(text))) => text,

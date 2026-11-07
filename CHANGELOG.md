@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `scripts/e2e.sh` runs 46 end-to-end checks against a built binary, as a user would: exit codes and report formats, scenarios, capture and replay, Prometheus and OpenTelemetry export, comparison, chaos, every authentication type, TLS, distributed runs, data files, reply checks, named actions, arrival rates, source addresses and Socket.IO. CI runs it on every push against a release build with every feature.
+
+### Changed
+- tokio-tungstenite and tungstenite 0.30 instead of 0.26. Throughput and memory per connection are unchanged in the performance budget.
+
 ## [0.2.3] - 2026-11-07
 
 0.2.3 adds the test shapes that other tools need a script for: per-connection test data (`--data`), values kept from replies and checks on every reply, named actions with their own latency and SLOs, connection churn at an arrival rate, more connections than one source address allows (`--source-ip`), and Socket.IO (`--mode socketio`). Small messages take about a third less CPU, each connection about 10 KB instead of 16 KB, and the mock answers four times faster. The library API is a compatible superset of 0.2.2.
