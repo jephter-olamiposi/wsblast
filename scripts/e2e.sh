@@ -5,16 +5,18 @@
 # files, reply checks, named actions, arrival rates, source addresses,
 # Socket.IO and compression. Every server it needs is started locally
 # (wsblast mock, agents, small Python stand-ins for an OTLP collector and an
-# OAuth2 token endpoint). When the Python `websockets` package is installed,
-# compression is also checked against its server and client, an independent
-# implementation.
+# OAuth2 token endpoint). When the Python `websockets` package and node with
+# npm are available, compression and Socket.IO are also checked against
+# independent implementations: the websockets server and client, and the
+# socket.io 4 server and client, which npm installs into the temporary
+# directory.
 #
 #   scripts/e2e.sh [path/to/wsblast]
 #
 # The binary must be built with every feature:
 #   cargo build --release --all-features && scripts/e2e.sh target/release/wsblast
 # Needs bash, python3, curl and openssl; the source-address and TUI checks
-# run on Linux only. Uses ports 19001-19034, 19443-19444, 19464, 19501,
+# run on Linux only. Uses ports 19001-19034, 19443-19444, 19464, 19501-19502,
 # 14318, 14444 and 17701-17703 on 127.0.0.1. Exits 1 when any check fails.
 W=${1:-${WSBLAST:-wsblast}}
 case "$W" in */*) W=$(cd "$(dirname "$W")" && pwd)/$(basename "$W") ;; esac
@@ -26,6 +28,10 @@ PASS=0; FAIL=0
 ok()  { echo "PASS  $1"; PASS=$((PASS+1)); }
 bad() { echo "FAIL  $1  ($2)"; FAIL=$((FAIL+1)); }
 check() { if eval "$2"; then ok "$1"; else bad "$1" "$3"; fi; }
+# Checks against independent implementations need third-party packages.
+# They are skipped when the packages are missing, unless
+# WSBLAST_E2E_INTEROP=require, as in CI, makes a skip a failure.
+skip() { if [ "${WSBLAST_E2E_INTEROP:-}" = require ]; then bad "$1" "skipped"; else echo "SKIP  $1"; fi; }
 j() { python3 -c "import json,sys; d=json.load(open('$1')); print($2)"; }
 cleanup() { kill $(jobs -p) 2>/dev/null; wait 2>/dev/null; cd /; rm -rf "$D"; }
 trap cleanup EXIT
@@ -53,9 +59,9 @@ check "invalid URL exits 1" "[ $rc = 1 ]" "rc=$rc"
 
 # Coordinated omission correction and exact -n
 $W $S -c 10 -d 3s -r 20 --no-progress --format json -o co.json >/dev/null 2>&1
-check "response time p95 > RTT p95 under stalls" "j co.json 'd[\"metrics\"][\"response_time\"][\"p95_us\"] > d[\"metrics\"][\"message_rtt\"][\"p95_us\"]' | grep -q True" "$(j co.json 'd[\"metrics\"][\"response_time\"][\"p95_us\"], d[\"metrics\"][\"message_rtt\"][\"p95_us\"]' 2>&1)"
+check "response time p95 > RTT p95 under stalls" "j co.json 'd[\"metrics\"][\"response_time\"][\"p95_us\"] > d[\"metrics\"][\"message_rtt\"][\"p95_us\"]' | grep -q True" "$(j co.json "d['metrics']['response_time']['p95_us'], d['metrics']['message_rtt']['p95_us']" 2>&1)"
 $W $T -c 40 -n 101 -d 10s --no-progress --format json -o n.json >/dev/null 2>&1
-check "-n 101 sends exactly 101" "[ \"\$(j n.json 'd[\"metrics\"][\"total_messages_sent\"]')\" = 101 ]" "$(j n.json 'd[\"metrics\"][\"total_messages_sent\"]')"
+check "-n 101 sends exactly 101" "[ \"\$(j n.json 'd[\"metrics\"][\"total_messages_sent\"]')\" = 101 ]" "$(j n.json "d['metrics']['total_messages_sent']")"
 
 # Stages and time series
 $W $T --stages 1s:10,1s:10,1s:0 -r 10 --no-progress --format json -o st.json >/dev/null 2>&1
@@ -166,7 +172,7 @@ $W agent --listen 127.0.0.1:17702 --token $TOK >a2.log 2>&1 &
 sleep 1
 $W $T -c 10 -d 2s -n 300 --no-progress --agents 127.0.0.1:17701,127.0.0.1:17702 --agent-token $TOK --format json -o dist.json >dist.txt 2>&1; rc=$?
 check "distributed run over 2 agents" "[ $rc = 0 ] && j dist.json 'd[\"metrics\"][\"distributed\"][\"agents\"]' | grep -q 2" "rc=$rc $(tail -2 dist.txt)"
-check "distributed -n is exact across agents" "[ \"\$(j dist.json 'd[\"metrics\"][\"total_messages_sent\"]')\" = 300 ]" "$(j dist.json 'd[\"metrics\"][\"total_messages_sent\"]')"
+check "distributed -n is exact across agents" "[ \"\$(j dist.json 'd[\"metrics\"][\"total_messages_sent\"]')\" = 300 ]" "$(j dist.json "d['metrics']['total_messages_sent']")"
 $W --scenario sc.yaml --no-progress --agents 127.0.0.1:17701,127.0.0.1:17702 --agent-token $TOK >dsc.txt 2>&1; rc=$?
 check "scenario across agents" "[ $rc = 0 ]" "rc=$rc $(tail -2 dsc.txt)"
 $W $T -c 2 -d 1s --no-progress --agents 127.0.0.1:17701 --agent-token wrongwrongwrongwrong >dbad.txt 2>&1; rc=$?
@@ -223,7 +229,7 @@ check "a foreign --source-ip is refused" "[ $rc = 1 ] && grep -q 'not usable on 
 $W ws://127.0.0.1:19033 --mode socketio --sio-event chat -c 5 -d 2s -r 10 --expect 'json:/0/seq' --no-progress --format json -o sio.json >/dev/null 2>&1; rc=$?
 check "Socket.IO events are timed to their acks" "[ $rc = 0 ] && j sio.json '\"/socket.io/\" in d[\"target_url\"] and d[\"metrics\"][\"error_rate\"] == 0 and d[\"metrics\"][\"response_time\"][\"count\"] > 50' | grep -q True" "rc=$rc"
 $W $T --mode socketio -c 1 -d 1s --message-timeout 300ms --no-reconnect --no-progress --format json -o siobad.json >/dev/null 2>&1
-check "Socket.IO against a plain server times out opening" "j siobad.json 'd[\"metrics\"][\"error_breakdown\"].get(\"timeout\") == 1' | grep -q True" "$(j siobad.json 'd[\"metrics\"][\"error_breakdown\"]' 2>&1)"
+check "Socket.IO against a plain server times out opening" "j siobad.json 'd[\"metrics\"][\"error_breakdown\"].get(\"timeout\") == 1' | grep -q True" "$(j siobad.json "d['metrics']['error_breakdown']" 2>&1)"
 
 # 0.2.4: permessage-deflate
 $W mock --listen 127.0.0.1:19034 --compression >mock5.log 2>&1 &
@@ -277,6 +283,57 @@ print("ok")
 EOF
 python3 pycl.py >pycl.log 2>&1
 check "a Python websockets client against mock --compression" "grep -q '^ok' pycl.log" "$(tail -2 pycl.log)"
+else
+skip "--compression against Python websockets (pip install websockets)"
+fi
+
+# Socket.IO binary attachments
+head -c 3000 /dev/urandom > blob.bin
+$W ws://127.0.0.1:19033 --mode socketio --sio-namespace /files -c 3 -d 2s -r 20 --payload-file blob.bin --binary --no-progress --format json -o siobin.json >/dev/null 2>&1; rc=$?
+check "Socket.IO binary events are acked with their attachment" "[ $rc = 0 ] && j siobin.json '(m:=d[\"metrics\"])[\"error_rate\"] == 0 and m[\"total_messages_recv\"] > 50 and m[\"total_bytes_recv\"] == 3000 * m[\"total_messages_recv\"]' | grep -q True" "rc=$rc"
+if command -v node >/dev/null && npm install --silent --no-audit --no-fund socket.io@4 socket.io-client@4 >npm.log 2>&1; then
+cat > sio-server.js <<'EOF'
+const { Server } = require("socket.io");
+const io = new Server(Number(process.argv[2]), { perMessageDeflate: { threshold: 0 }, maxHttpBufferSize: 1e8 });
+for (const ns of ["/", "/files"]) {
+  io.of(ns).on("connection", (socket) => {
+    socket.on("chat", (msg, ack) => ack(Buffer.isBuffer(msg) ? msg : { ok: true, echo: msg }));
+    socket.on("mixed", (msg, ack) => ack({ ok: true, size: msg.length, data: msg }));
+    socket.emit("hello", Buffer.from([1, 2, 3]));
+  });
+}
+EOF
+node sio-server.js 19502 >sioserver.log 2>&1 &
+sleep 1.5
+$W ws://127.0.0.1:19502 --mode socketio --sio-event chat -c 3 -d 2s -p '{"n":{{seq}}}' --expect 'json:/0/ok=true' --compression --no-progress --format json -o siojs.json >/dev/null 2>&1; rc=$?
+check "Socket.IO against a socket.io 4 server, compressed" "[ $rc = 0 ] && j siojs.json '(m:=d[\"metrics\"])[\"error_rate\"] == 0 and m[\"total_messages_recv\"] > 100 and m[\"total_unsolicited_frames\"] == 3 and m[\"compression\"][\"connections_negotiated\"] == 3' | grep -q True" "rc=$rc $(tail -2 sioserver.log)"
+$W ws://127.0.0.1:19502 --mode socketio --sio-event chat --sio-namespace /files -c 3 -d 2s --payload-file blob.bin --binary --no-progress --format json -o siojsbin.json >/dev/null 2>&1; rc=$?
+check "Socket.IO binary events against a socket.io 4 server" "[ $rc = 0 ] && j siojsbin.json '(m:=d[\"metrics\"])[\"error_rate\"] == 0 and m[\"total_messages_recv\"] > 100 and m[\"total_bytes_recv\"] == 3000 * m[\"total_messages_recv\"]' | grep -q True" "rc=$rc"
+$W ws://127.0.0.1:19502 --mode socketio --sio-event mixed -c 2 -d 1s --payload-file blob.bin --binary --expect 'json:/0/size=3000' --no-progress --format json -o siojsmix.json >/dev/null 2>&1; rc=$?
+check "a socket.io binary ack with JSON arguments is checked" "[ $rc = 0 ] && j siojsmix.json 'd[\"metrics\"][\"error_rate\"] == 0 and d[\"metrics\"][\"total_messages_recv\"] > 50' | grep -q True" "rc=$rc"
+cat > sio-client.js <<'EOF'
+const { io } = require("socket.io-client");
+const s = io(process.argv[2] + "/files", { transports: ["websocket"] });
+const ack = (...args) => new Promise((res, rej) => {
+  const t = setTimeout(() => rej(new Error("no ack")), 2000);
+  s.emit(...args, (...reply) => { clearTimeout(t); res(reply); });
+});
+s.on("connect", async () => {
+  const blob = Buffer.alloc(5000, 7), second = Buffer.from("second");
+  for (let i = 0; i < 20; i++) {
+    const r = await ack("up", blob, { n: i }, second);
+    if (!r[0].equals(blob) || r[1].n !== i || !Buffer.from(r[2]).equals(second)) { console.log("bad binary ack"); process.exit(1); }
+    const t = await ack("chat", { n: i });
+    if (t[0].n !== i) { console.log("bad ack"); process.exit(1); }
+  }
+  console.log("ok"); process.exit(0);
+});
+s.on("connect_error", (e) => { console.log("connect_error", e.message); process.exit(1); });
+EOF
+timeout 30 node sio-client.js http://127.0.0.1:19033 >sioclient.log 2>&1
+check "a socket.io 4 client against mock --socketio" "grep -q '^ok' sioclient.log" "$(tail -2 sioclient.log)"
+else
+skip "Socket.IO against socket.io 4 (needs node and npm)"
 fi
 
 # TUI under a pseudo-terminal

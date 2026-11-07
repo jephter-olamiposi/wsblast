@@ -225,7 +225,12 @@ jobs:
         run: cargo build --release --locked --all-features
       - name: Install Python websockets for the compression interoperability checks
         run: python3 -m pip install --user --break-system-packages websockets
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
       - name: Run scripts/e2e.sh against the binary
+        env:
+          WSBLAST_E2E_INTEROP: require
         run: bash scripts/e2e.sh target/release/wsblast
 
   perf-budget:

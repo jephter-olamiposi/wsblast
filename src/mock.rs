@@ -879,6 +879,7 @@ async fn run_session<S>(
     // A Socket.IO session's id, its next ping and the deadline of the pong
     // it waits for.
     let sid = format!("wsblast-mock-{}", plan.index);
+    let mut sio = SocketIoSession::default();
     let mut ping_at = None;
     let mut pong_by: Option<Instant> = None;
     if let (Some((interval, timeout)), Outgoing::Echo(queue)) =
@@ -969,23 +970,35 @@ async fn run_session<S>(
                 }
             }
             Event::Received(msg) => match msg {
-                Some(Ok(Message::Text(text))) if shared.config.socketio.is_some() => {
-                    if text.as_str() == "3" {
+                Some(Ok(msg @ (Message::Text(_) | Message::Binary(_))))
+                    if shared.config.socketio.is_some() =>
+                {
+                    if matches!(&msg, Message::Text(text) if text.as_str() == "3") {
                         pong_by = None;
                         continue;
                     }
-                    let (reply, event) = socketio_reply(text.as_str(), &sid);
+                    let Some((frames, event)) = socketio_answer(&mut sio, &msg, &sid) else {
+                        continue;
+                    };
                     if event {
                         shared.counters.received.fetch_add(1, Ordering::Relaxed);
                         received += 1;
                     }
-                    if let (Some(reply), Outgoing::Echo(queue)) = (reply, &mut outgoing) {
-                        let reply = Message::Text(reply.into());
-                        if event {
-                            let due = Instant::now() + shared.reply_delay(&mut rng);
-                            queue.push_back((due, Queued::Frame(reply)));
+                    if let Outgoing::Echo(queue) = &mut outgoing {
+                        let due = if event {
+                            Instant::now() + shared.reply_delay(&mut rng)
                         } else {
-                            queue.push_back((Instant::now(), Queued::Control(reply)));
+                            Instant::now()
+                        };
+                        // An event's reply is its first frame; the attachments
+                        // that follow it go out with it and are not counted.
+                        for (i, frame) in frames.into_iter().enumerate() {
+                            let item = if event && i == 0 {
+                                Queued::Frame(frame)
+                            } else {
+                                Queued::Control(frame)
+                            };
+                            queue.push_back((due, item));
                         }
                     }
                 }
@@ -1063,16 +1076,31 @@ fn socketio_open(_: &str, _: Duration, _: Duration) -> String {
     String::new()
 }
 
-/// What a Socket.IO session answers to a client's frame, and whether the
-/// frame was an event.
 #[cfg(feature = "socketio")]
-fn socketio_reply(text: &str, sid: &str) -> (Option<String>, bool) {
-    crate::socketio::mock_reply(text, sid)
+type SocketIoSession = crate::socketio::MockSession;
+/// Without the `socketio` feature a session has no Socket.IO state.
+#[cfg(not(feature = "socketio"))]
+#[derive(Default)]
+struct SocketIoSession {
+    _none: (),
+}
+
+/// What a Socket.IO session answers to a client's frame, and whether the
+/// frame completed an event.
+#[cfg(feature = "socketio")]
+fn socketio_answer(
+    session: &mut SocketIoSession,
+    frame: &Message,
+    sid: &str,
+) -> Option<(Vec<Message>, bool)> {
+    session
+        .receive(frame, sid)
+        .map(|answer| (answer.frames, answer.event))
 }
 
 #[cfg(not(feature = "socketio"))]
-fn socketio_reply(_: &str, _: &str) -> (Option<String>, bool) {
-    (None, false)
+fn socketio_answer(_: &mut SocketIoSession, _: &Message, _: &str) -> Option<(Vec<Message>, bool)> {
+    None
 }
 
 async fn sleep_until(due: Option<Instant>) {

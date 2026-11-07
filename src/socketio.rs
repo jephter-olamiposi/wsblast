@@ -12,8 +12,16 @@
 //! Engine.IO pings while the loop waits for its next send, so a slow send
 //! rate never misses the server's ping timeout. Events the server emits on
 //! its own, and acknowledgements of earlier events, are counted as
-//! unsolicited frames. Binary attachments are not supported.
+//! unsolicited frames.
+//!
+//! A binary data frame is emitted as a binary event: the packet
+//! `451-[event,{"_placeholder":true,"num":0}]` followed by the bytes as a
+//! binary frame. A binary packet the server sends (a `45` event or a `46`
+//! ack) is complete once its attachments have arrived, each in a binary
+//! frame of its own; a binary ack whose only argument is one attachment is
+//! passed back as that attachment's bytes.
 
+use bytes::Bytes;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -29,6 +37,13 @@ pub(crate) const QUERY: [(&str, &str); 2] = [("EIO", "4"), ("transport", "websoc
 
 /// The path Socket.IO servers listen on unless configured otherwise.
 pub(crate) const DEFAULT_PATH: &str = "/socket.io/";
+
+/// The argument that stands for a binary event's single attachment.
+const PLACEHOLDER: &str = r#"{"_placeholder":true,"num":0}"#;
+
+/// The most attachments a binary packet may announce, against a server that
+/// would make a session wait for unbounded frames.
+const MAX_ATTACHMENTS: usize = 1024;
 
 /// Event names the Socket.IO client reserves.
 const RESERVED_EVENTS: [&str; 6] = [
@@ -102,6 +117,8 @@ pub(crate) struct Packet<'a> {
     /// `0` connect, `1` disconnect, `2` event, `3` ack, `4` connect error,
     /// `5` binary event, `6` binary ack.
     pub(crate) kind: u8,
+    /// How many binary frames follow a binary packet (`5` or `6`).
+    pub(crate) attachments: usize,
     pub(crate) namespace: &'a str,
     pub(crate) id: Option<u64>,
     pub(crate) data: &'a str,
@@ -118,11 +135,17 @@ impl<'a> Packet<'a> {
         }
         let mut rest = &rest[1..];
         // Binary packets carry their attachment count and a '-' first.
+        let mut attachments = 0;
         if matches!(kind, b'5' | b'6') {
             let count = rest.bytes().take_while(u8::is_ascii_digit).count();
-            if count > 0 && rest[count..].starts_with('-') {
-                rest = &rest[count + 1..];
+            if count == 0 || !rest[count..].starts_with('-') {
+                return None;
             }
+            attachments = rest[..count]
+                .parse()
+                .ok()
+                .filter(|n| *n <= MAX_ATTACHMENTS)?;
+            rest = &rest[count + 1..];
         }
         let mut namespace = "/";
         if rest.starts_with('/') {
@@ -141,6 +164,7 @@ impl<'a> Packet<'a> {
         let id = (digits > 0).then(|| rest[..digits].parse().ok()).flatten();
         Some(Self {
             kind,
+            attachments,
             namespace,
             id,
             data: &rest[digits..],
@@ -152,6 +176,10 @@ impl<'a> Packet<'a> {
         let mut out = String::with_capacity(self.data.len() + self.namespace.len() + 8);
         out.push('4');
         out.push(self.kind as char);
+        if matches!(self.kind, b'5' | b'6') {
+            out.push_str(&self.attachments.to_string());
+            out.push('-');
+        }
         if self.namespace != "/" {
             out.push_str(self.namespace);
             out.push(',');
@@ -175,11 +203,49 @@ fn event_packet(config: &SocketIoConfig, id: u64, payload: &str) -> String {
     };
     Packet {
         kind: b'2',
+        attachments: 0,
         namespace: &config.namespace,
         id: Some(id),
         data: &format!("[{event},{argument}]"),
     }
     .encode()
+}
+
+/// The packet of a binary event whose one argument is the attachment sent
+/// after it.
+fn binary_event_packet(config: &SocketIoConfig, id: u64) -> String {
+    let event = serde_json::Value::String(config.event.clone()).to_string();
+    Packet {
+        kind: b'5',
+        attachments: 1,
+        namespace: &config.namespace,
+        id: Some(id),
+        data: &format!("[{event},{PLACEHOLDER}]"),
+    }
+    .encode()
+}
+
+/// The reply a binary ack gives: the attachment's bytes when its only
+/// argument is the one attachment, and otherwise its arguments as text,
+/// with the placeholders as the server sent them.
+fn binary_reply(data: &str, mut attachments: Vec<Bytes>) -> Message {
+    let only_attachment = attachments.len() == 1
+        && serde_json::from_str::<serde_json::Value>(data).ok()
+            == serde_json::from_str(&format!("[{PLACEHOLDER}]")).ok();
+    match attachments.pop() {
+        Some(bytes) if only_attachment => Message::Binary(bytes),
+        _ => Message::Text(data.to_string().into()),
+    }
+}
+
+/// A binary packet from the server whose attachments are still arriving.
+struct Pending {
+    /// Whether it is an ack on this session's namespace.
+    ack: bool,
+    id: Option<u64>,
+    data: String,
+    needed: usize,
+    attachments: Vec<Bytes>,
 }
 
 /// Opens the Socket.IO session on a WebSocket: reads the Engine.IO open
@@ -217,6 +283,7 @@ where
             opened = true;
             let connect = Packet {
                 kind: b'0',
+                attachments: 0,
                 namespace: &config.namespace,
                 id: None,
                 data: config.auth.as_deref().unwrap_or_default(),
@@ -333,8 +400,10 @@ where
     let (mut sink, mut stream) = ws.split();
     let mut next_id = 0u64;
     let mut awaited: Option<u64> = None;
+    let mut pending: Option<Pending> = None;
     let disconnect = Packet {
         kind: b'1',
+        attachments: 0,
         namespace: &config.namespace,
         id: None,
         data: "",
@@ -354,19 +423,21 @@ where
                         let _ = sink.send(Message::Close(frame)).await;
                         return;
                     }
-                    Some(Message::Text(text)) => Some(text.as_str().to_string()),
-                    Some(Message::Binary(bytes)) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+                    Some(Message::Text(text)) => Some((event_packet(config, next_id, text.as_str()), None)),
+                    Some(Message::Binary(bytes)) => Some((binary_event_packet(config, next_id), Some(bytes))),
                     Some(other) => {
                         let _ = sink.send(other).await;
                         None
                     }
                 };
-                if let Some(payload) = frame {
-                    let id = next_id;
+                if let Some((packet, attachment)) = frame {
+                    awaited = Some(next_id);
                     next_id += 1;
-                    awaited = Some(id);
-                    let packet = event_packet(config, id, &payload);
-                    if let Err(err) = sink.send(Message::Text(packet.into())).await {
+                    let mut sent = sink.feed(Message::Text(packet.into())).await;
+                    if let (Ok(()), Some(bytes)) = (&sent, attachment) {
+                        sent = sink.feed(Message::Binary(bytes)).await;
+                    }
+                    if let Err(err) = sent.and(sink.flush().await) {
                         let _ = incoming.send(Err(err)).await;
                         return;
                     }
@@ -388,12 +459,34 @@ where
                         let _ = incoming.send(Ok(frame)).await;
                         return;
                     }
-                    Some(Ok(Message::Binary(_))) => {
-                        *unsolicited += 1;
+                    Some(Ok(Message::Binary(bytes))) => {
+                        let Some(mut packet) = pending.take() else {
+                            *unsolicited += 1;
+                            continue;
+                        };
+                        packet.attachments.push(bytes);
+                        if packet.attachments.len() < packet.needed {
+                            pending = Some(packet);
+                            continue;
+                        }
+                        if packet.ack && packet.id.is_some() && packet.id == awaited {
+                            awaited = None;
+                            let reply = binary_reply(&packet.data, packet.attachments);
+                            if incoming.send(Ok(reply)).await.is_err() {
+                                return;
+                            }
+                        } else {
+                            *unsolicited += 1;
+                        }
                         continue;
                     }
                     Some(Ok(_)) => continue,
                 };
+                // A text frame ends a binary packet still waiting for its
+                // attachments; it is counted as it came, incomplete.
+                if pending.take().is_some() {
+                    *unsolicited += 1;
+                }
                 match text.as_str() {
                     "2" => {
                         let _ = sink.send(Message::Text("3".into())).await;
@@ -408,8 +501,17 @@ where
                     _ => {}
                 }
                 match Packet::parse(&text) {
+                    Some(packet) if packet.attachments > 0 => {
+                        pending = Some(Pending {
+                            ack: packet.kind == b'6' && packet.namespace == config.namespace,
+                            id: packet.id,
+                            data: packet.data.to_string(),
+                            needed: packet.attachments,
+                            attachments: Vec::with_capacity(packet.attachments.min(8)),
+                        });
+                    }
                     Some(packet) if packet.namespace == config.namespace => match packet.kind {
-                        b'3' if packet.id.is_some() && packet.id == awaited => {
+                        b'3' | b'6' if packet.id.is_some() && packet.id == awaited => {
                             awaited = None;
                             let reply = Message::Text(packet.data.to_string().into());
                             if incoming.send(Ok(reply)).await.is_err() {
@@ -430,44 +532,115 @@ where
     }
 }
 
-/// What `wsblast mock --socketio` answers to a frame a client sent: the
-/// connect packet for a namespace connect, the ack for an event that asks
-/// for one (with the event's arguments), the event itself for one that does
-/// not, and a pong for a ping. The flag says whether the frame was an event,
-/// which the mock counts as a received data frame.
+/// What `wsblast mock --socketio` sends for a client's frames.
 #[cfg(feature = "mock")]
-pub(crate) fn mock_reply(text: &str, sid: &str) -> (Option<String>, bool) {
-    if text == "2" {
-        return (Some("3".to_string()), false);
-    }
-    let Some(packet) = Packet::parse(text) else {
-        return (None, false);
-    };
-    match packet.kind {
-        b'0' => {
-            let data = format!(r#"{{"sid":"{sid}"}}"#);
-            let reply = Packet {
-                kind: b'0',
-                namespace: packet.namespace,
-                id: None,
-                data: &data,
-            };
-            (Some(reply.encode()), false)
-        }
-        b'2' => match packet.id {
-            Some(id) => {
-                let arguments = event_arguments(packet.data);
-                let reply = Packet {
-                    kind: b'3',
-                    namespace: packet.namespace,
-                    id: Some(id),
-                    data: &arguments,
-                };
-                (Some(reply.encode()), true)
+pub(crate) struct MockAnswer {
+    /// The frames, in order: a packet and its attachments.
+    pub(crate) frames: Vec<Message>,
+    /// Whether they answer an event, which the mock counts as a received
+    /// data frame and delays like a reply; otherwise they are protocol
+    /// frames sent at once.
+    pub(crate) event: bool,
+}
+
+/// One connection's Socket.IO state in `wsblast mock --socketio`: the
+/// binary packet whose attachments are still arriving.
+#[cfg(feature = "mock")]
+#[derive(Default)]
+pub(crate) struct MockSession {
+    pending: Option<(String, usize, Vec<Message>)>,
+}
+
+#[cfg(feature = "mock")]
+impl MockSession {
+    /// What the mock answers to a frame the client sent: the connect
+    /// packet for a namespace connect, the ack for an event that asks for
+    /// one (with the event's arguments, and their attachments for a binary
+    /// event), the event itself for one that does not, and a pong for a
+    /// ping. A binary event is answered once its attachments have arrived.
+    pub(crate) fn receive(&mut self, frame: &Message, sid: &str) -> Option<MockAnswer> {
+        let text = match frame {
+            Message::Text(text) => text.as_str(),
+            Message::Binary(_) => {
+                let (header, needed, mut attachments) = self.pending.take()?;
+                attachments.push(frame.clone());
+                if attachments.len() < needed {
+                    self.pending = Some((header, needed, attachments));
+                    return None;
+                }
+                let packet = Packet::parse(&header)?;
+                let mut frames = vec![Message::Text(match packet.id {
+                    Some(id) => Packet {
+                        kind: b'6',
+                        attachments: packet.attachments,
+                        namespace: packet.namespace,
+                        id: Some(id),
+                        data: &event_arguments(packet.data),
+                    }
+                    .encode()
+                    .into(),
+                    None => header.clone().into(),
+                })];
+                frames.extend(attachments);
+                return Some(MockAnswer {
+                    frames,
+                    event: true,
+                });
             }
-            None => (Some(text.to_string()), true),
-        },
-        _ => (None, false),
+            _ => return None,
+        };
+        self.pending = None;
+        if text == "2" {
+            return Some(control("3".to_string()));
+        }
+        let packet = Packet::parse(text)?;
+        match packet.kind {
+            b'0' => {
+                let data = format!(r#"{{"sid":"{sid}"}}"#);
+                let reply = Packet {
+                    kind: b'0',
+                    attachments: 0,
+                    namespace: packet.namespace,
+                    id: None,
+                    data: &data,
+                };
+                Some(control(reply.encode()))
+            }
+            b'5' if packet.attachments > 0 => {
+                self.pending = Some((
+                    text.to_string(),
+                    packet.attachments,
+                    Vec::with_capacity(packet.attachments.min(8)),
+                ));
+                None
+            }
+            b'2' | b'5' => {
+                let reply = match packet.id {
+                    Some(id) => Packet {
+                        kind: packet.kind + 1,
+                        attachments: 0,
+                        namespace: packet.namespace,
+                        id: Some(id),
+                        data: &event_arguments(packet.data),
+                    }
+                    .encode(),
+                    None => text.to_string(),
+                };
+                Some(MockAnswer {
+                    frames: vec![Message::Text(reply.into())],
+                    event: true,
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "mock")]
+fn control(text: String) -> MockAnswer {
+    MockAnswer {
+        frames: vec![Message::Text(text.into())],
+        event: false,
     }
 }
 
@@ -581,24 +754,98 @@ mod tests {
         assert!(auth.validate().is_ok());
     }
 
+    #[test]
+    fn binary_packets_carry_their_attachment_count() {
+        let binary =
+            Packet::parse("451-/admin,3[\"a\",{\"_placeholder\":true,\"num\":0}]").unwrap();
+        assert_eq!(
+            (binary.kind, binary.attachments, binary.namespace, binary.id),
+            (b'5', 1, "/admin", Some(3))
+        );
+        assert_eq!(
+            binary.encode(),
+            "451-/admin,3[\"a\",{\"_placeholder\":true,\"num\":0}]"
+        );
+        assert_eq!(Packet::parse("4612-7[]").unwrap().attachments, 12);
+        for bad in ["45[\"a\"]", "45x-[]", "4599999-[]"] {
+            assert!(Packet::parse(bad).is_none(), "{bad}");
+        }
+        assert_eq!(
+            binary_event_packet(&config("/"), 4),
+            r#"451-4["chat",{"_placeholder":true,"num":0}]"#
+        );
+        let bytes = Bytes::from_static(b"\x00\x01");
+        assert_eq!(
+            binary_reply(r#"[{"num":0,"_placeholder":true}]"#, vec![bytes.clone()]),
+            Message::Binary(bytes.clone())
+        );
+        assert_eq!(
+            binary_reply(r#"["ok",{"_placeholder":true,"num":0}]"#, vec![bytes]),
+            Message::Text(r#"["ok",{"_placeholder":true,"num":0}]"#.into())
+        );
+    }
+
+    #[cfg(feature = "mock")]
+    fn mock_reply(session: &mut MockSession, frame: &str) -> (Option<String>, bool) {
+        match session.receive(&Message::Text(frame.to_string().into()), "s") {
+            Some(answer) => {
+                assert_eq!(answer.frames.len(), 1);
+                let Message::Text(text) = &answer.frames[0] else {
+                    panic!("not text");
+                };
+                (Some(text.as_str().to_string()), answer.event)
+            }
+            None => (None, false),
+        }
+    }
+
     #[cfg(feature = "mock")]
     #[test]
     fn the_mock_acks_events_with_their_arguments() {
-        assert_eq!(mock_reply("40", "s").0.as_deref(), Some(r#"40{"sid":"s"}"#));
+        let s = &mut MockSession::default();
+        assert_eq!(mock_reply(s, "40").0.as_deref(), Some(r#"40{"sid":"s"}"#));
         assert_eq!(
-            mock_reply("40/admin,{\"t\":1}", "s").0.as_deref(),
+            mock_reply(s, "40/admin,{\"t\":1}").0.as_deref(),
             Some(r#"40/admin,{"sid":"s"}"#)
         );
         assert_eq!(
-            mock_reply(r#"427["chat",{"a":1},2]"#, "s"),
+            mock_reply(s, r#"427["chat",{"a":1},2]"#),
             (Some(r#"437[{"a":1},2]"#.to_string()), true)
         );
         assert_eq!(
-            mock_reply(r#"42["chat",1]"#, "s"),
+            mock_reply(s, r#"42["chat",1]"#),
             (Some(r#"42["chat",1]"#.to_string()), true)
         );
-        assert_eq!(mock_reply("2", "s"), (Some("3".to_string()), false));
-        assert_eq!(mock_reply("3", "s"), (None, false));
-        assert_eq!(mock_reply("41", "s"), (None, false));
+        assert_eq!(mock_reply(s, "2"), (Some("3".to_string()), false));
+        assert_eq!(mock_reply(s, "3"), (None, false));
+        assert_eq!(mock_reply(s, "41"), (None, false));
+    }
+
+    #[cfg(feature = "mock")]
+    #[test]
+    fn the_mock_acks_binary_events_with_their_attachments() {
+        let s = &mut MockSession::default();
+        let header = Message::Text(
+            r#"452-/a,9["up",{"_placeholder":true,"num":0},{"_placeholder":true,"num":1}]"#.into(),
+        );
+        let one = Message::Binary(Bytes::from_static(b"one"));
+        let two = Message::Binary(Bytes::from_static(b"two"));
+        assert!(s.receive(&header, "s").is_none());
+        assert!(s.receive(&one, "s").is_none());
+        let answer = s.receive(&two, "s").unwrap();
+        assert!(answer.event);
+        assert_eq!(
+            answer.frames,
+            vec![
+                Message::Text(
+                    r#"462-/a,9[{"_placeholder":true,"num":0},{"_placeholder":true,"num":1}]"#
+                        .into()
+                ),
+                one.clone(),
+                two,
+            ]
+        );
+        // A stray attachment is ignored.
+        assert!(s.receive(&one, "s").is_none());
     }
 }

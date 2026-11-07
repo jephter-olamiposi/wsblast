@@ -810,7 +810,7 @@ impl LoadTestConfigBuilder {
         #[cfg(feature = "socketio")]
         let mut target_url = target_url;
         #[cfg(feature = "socketio")]
-        let socketio = self.socketio.compile(self.mode, &self.payload)?;
+        let socketio = self.socketio.compile(self.mode)?;
         #[cfg(feature = "socketio")]
         if socketio.is_some() {
             crate::socketio::socketio_url(&mut target_url);
@@ -1195,13 +1195,8 @@ struct SocketIoOptions {
 #[cfg(feature = "socketio")]
 impl SocketIoOptions {
     /// The Socket.IO settings of a run in `mode`: `None` outside socketio
-    /// mode, where the options are rejected, and checked settings inside it,
-    /// which needs a text payload.
-    fn compile(
-        self,
-        mode: TestMode,
-        payload: &PayloadConfig,
-    ) -> Result<Option<crate::socketio::SocketIoConfig>> {
+    /// mode, where the options are rejected, and checked settings inside it.
+    fn compile(self, mode: TestMode) -> Result<Option<crate::socketio::SocketIoConfig>> {
         let set = self.event.is_some() || self.namespace.is_some() || self.auth.is_some();
         if mode != TestMode::SocketIo {
             if set {
@@ -1212,13 +1207,6 @@ impl SocketIoOptions {
                 .into());
             }
             return Ok(None);
-        }
-        if matches!(payload, PayloadConfig::Binary(_)) {
-            return Err(ConfigError::UnsupportedOption(
-                "--mode socketio sends text events; binary payloads (--binary) are not supported"
-                    .to_string(),
-            )
-            .into());
         }
         let config = crate::socketio::SocketIoConfig {
             namespace: self.namespace.unwrap_or_else(|| "/".to_string()),

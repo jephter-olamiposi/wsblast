@@ -1209,6 +1209,32 @@ async fn socketio_events_are_timed_to_their_acks() {
     assert_eq!(metrics.total_unsolicited_frames, 0);
 }
 
+/// A binary payload is a binary event, its bytes an attachment; the mock
+/// acknowledges it with the same attachment, which comes back as the reply.
+#[cfg(feature = "socketio")]
+#[tokio::test]
+async fn socketio_binary_events_are_acked_with_their_attachments() {
+    let mock = Mock::start(MockConfig::builder().socketio()).await;
+    let payload: Vec<u8> = (0..=255u8).cycle().take(3000).collect();
+    let metrics = run(socketio_load(&mock.url)
+        .payload_binary(payload.clone())
+        .socketio_namespace("/files")
+        .rate_per_connection(50)
+        .duration(Duration::from_secs(1)))
+    .await;
+    let stats = mock.stop().await;
+
+    assert_eq!(metrics.error_rate, 0.0, "{:?}", metrics.error_breakdown);
+    assert!(metrics.total_messages_recv >= 50, "{metrics:?}");
+    assert_eq!(
+        metrics.total_bytes_recv,
+        metrics.total_messages_recv * payload.len() as u64
+    );
+    assert_eq!(metrics.total_unsolicited_frames, 0);
+    // One event per message, however many frames it took.
+    assert_eq!(stats.frames_received, metrics.total_messages_sent);
+}
+
 /// The server pings far more often than the client sends: the pump answers
 /// every ping while the loop waits for its next send, so the server never
 /// drops the connection.
@@ -1313,7 +1339,8 @@ fn socketio_settings_are_validated() {
     assert!(message(sio().socketio_namespace("chat")).contains("must start with '/'"));
     assert!(message(sio().socketio_event("disconnect")).contains("reserved"));
     assert!(message(sio().socketio_auth("token")).contains("JSON object"));
-    assert!(message(sio().payload_binary(b"x".to_vec())).contains("binary payloads"));
+    // Binary payloads are binary events.
+    assert!(sio().payload_binary(b"x".to_vec()).build().is_ok());
     let config = sio().build().unwrap();
     assert_eq!(
         config.target_url().as_str(),
