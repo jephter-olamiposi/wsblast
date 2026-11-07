@@ -1417,6 +1417,12 @@ fn render_text_report(view: &ReportView<'_>) -> String {
     if let Some(arrivals) = &metrics.arrivals {
         meta_table.add_row(vec!["Arrivals".to_string(), arrival_label(arrivals)]);
     }
+    if let Some(compression) = &metrics.compression {
+        meta_table.add_row(vec![
+            "Compression".to_string(),
+            compression_label(compression),
+        ]);
+    }
     meta_table.add_row(vec![
         "Elapsed Duration",
         &format!("{:.2?}", metrics.elapsed),
@@ -1734,6 +1740,12 @@ fn render_markdown_report(view: &ReportView<'_>) -> String {
     if let Some(arrivals) = &metrics.arrivals {
         md.push_str(&format!("- **Arrivals:** {}\n", arrival_label(arrivals)));
     }
+    if let Some(compression) = &metrics.compression {
+        md.push_str(&format!(
+            "- **Compression:** {}\n",
+            compression_label(compression)
+        ));
+    }
     if let Some(distributed) = &metrics.distributed {
         md.push_str(&format!(
             "- **Agents:** {}\n",
@@ -1990,6 +2002,48 @@ pub(crate) fn arrival_label(arrivals: &crate::metrics::ArrivalSummary) -> String
     )
 }
 
+/// What `--compression` did: how many handshakes agreed, and the message
+/// bytes on the wire against their size, in each direction.
+pub(crate) fn compression_label(compression: &crate::metrics::CompressionSummary) -> String {
+    let mut label = format!(
+        "permessage-deflate agreed on {} of {} connections",
+        compression.connections_negotiated, compression.connections_offered
+    );
+    if compression.connections_negotiated > 0 {
+        let ratio = |wire: u64, bytes: u64| {
+            if bytes == 0 {
+                "0 B".to_string()
+            } else {
+                format!(
+                    "{} as {} ({:.0}%)",
+                    format_bytes(bytes),
+                    format_bytes(wire),
+                    wire as f64 * 100.0 / bytes as f64
+                )
+            }
+        };
+        label.push_str(&format!(
+            "; sent {}, received {}",
+            ratio(compression.wire_bytes_sent, compression.bytes_sent),
+            ratio(compression.wire_bytes_recv, compression.bytes_recv)
+        ));
+    }
+    label
+}
+
+/// A byte count in the units the reports use elsewhere (1 MB = 1024 KB).
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    let value = bytes as f64;
+    if value < KB {
+        format!("{bytes} B")
+    } else if value < KB * KB {
+        format!("{:.1} KB", value / KB)
+    } else {
+        format!("{:.2} MB", value / (KB * KB))
+    }
+}
+
 /// The note reports add when an arrival-rate run skipped arrivals because
 /// `--max-connections` sessions were open.
 pub(crate) fn skipped_arrivals_note(metrics: &AggregatedMetrics) -> Option<String> {
@@ -2169,7 +2223,31 @@ mod tests {
             slow_replies: None,
             actions: Vec::new(),
             arrivals: None,
+            compression: None,
         }
+    }
+
+    #[test]
+    fn compression_is_described() {
+        let mut compression = crate::metrics::CompressionSummary {
+            connections_offered: 10,
+            connections_negotiated: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            compression_label(&compression),
+            "permessage-deflate agreed on 0 of 10 connections"
+        );
+        compression.connections_negotiated = 10;
+        compression.bytes_sent = 4 << 20;
+        compression.wire_bytes_sent = 1 << 20;
+        compression.bytes_recv = 2048;
+        compression.wire_bytes_recv = 512;
+        assert_eq!(
+            compression_label(&compression),
+            "permessage-deflate agreed on 10 of 10 connections; sent 4.00 MB as 1.00 MB (25%), \
+             received 2.0 KB as 512 B (25%)"
+        );
     }
 
     #[cfg(feature = "scenario")]

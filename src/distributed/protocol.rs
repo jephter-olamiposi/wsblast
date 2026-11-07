@@ -27,8 +27,11 @@ use std::time::Duration;
 /// one connection), capture records, refreshed authentication tokens and
 /// interval latency in snapshots. Version 3 added chaos injection to the
 /// configuration, and the agent's counts of injected faults, its generator
-/// lag and its open file limit to its result.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// lag and its open file limit to its result. Version 4 added settings an
+/// agent that does not know them would ignore and run without: data rows,
+/// reply captures and checks, named actions, arrival rates, Socket.IO and
+/// compression, and their counts in the result.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// The shortest agent token accepted.
 pub const MIN_TOKEN_LEN: usize = 16;
@@ -422,6 +425,9 @@ pub(crate) struct WireConfig {
     #[serde(default)]
     pub(crate) expect: Option<crate::check::Check>,
     pub(crate) reconnect: bool,
+    /// Whether connections offer permessage-deflate.
+    #[serde(default)]
+    pub(crate) compression: bool,
     pub(crate) graphql: Option<WireGraphql>,
     /// The `--sio-*` settings of a socketio run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -651,6 +657,7 @@ impl WireConfig {
             reply_match: config.reply_match.flag_value(),
             expect: config.expect.clone(),
             reconnect: !config.no_reconnect,
+            compression: crate::runner::compression_offered(config),
             graphql,
             socketio,
             phase: None,
@@ -742,6 +749,16 @@ impl WireConfig {
         }
         if let Some(subprotocol) = self.subprotocol {
             builder = builder.subprotocol(subprotocol);
+        }
+        if self.compression {
+            #[cfg(feature = "compression")]
+            {
+                builder = builder.compression(true);
+            }
+            #[cfg(not(feature = "compression"))]
+            return Err(unsupported(
+                "--compression needs the 'compression' feature, which this agent's build of wsblast does not include",
+            ));
         }
         #[cfg(feature = "socketio")]
         if let Some(sio) = self.socketio {
@@ -1310,6 +1327,9 @@ pub(crate) struct WireResult {
     /// What an arrival-rate run did with the agent's arrivals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) arrivals: Option<crate::metrics::ArrivalCounts>,
+    /// What `--compression` counted on the agent's connections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) compression: Option<crate::metrics::CompressionCounts>,
 }
 
 /// A decoded result, ready to merge.
@@ -1324,6 +1344,7 @@ pub(crate) struct AgentResult {
     pub(crate) lag: LagTotals,
     pub(crate) open_file_limit: Option<OpenFileLimit>,
     pub(crate) arrivals: Option<crate::metrics::ArrivalCounts>,
+    pub(crate) compression: Option<crate::metrics::CompressionCounts>,
 }
 
 impl WireResult {
@@ -1352,6 +1373,7 @@ impl WireResult {
             generator_lag: WireLag::new(&outcome_meta.lag),
             open_file_limit: outcome_meta.open_file_limit,
             arrivals: outcome_meta.arrivals,
+            compression: outcome_meta.compression,
         }
     }
 
@@ -1380,6 +1402,7 @@ impl WireResult {
                 .unwrap_or_default(),
             open_file_limit: self.open_file_limit,
             arrivals: self.arrivals,
+            compression: self.compression,
         })
     }
 }
@@ -1394,6 +1417,7 @@ pub(crate) struct ResultMeta {
     pub(crate) lag: LagTotals,
     pub(crate) open_file_limit: Option<OpenFileLimit>,
     pub(crate) arrivals: Option<crate::metrics::ArrivalCounts>,
+    pub(crate) compression: Option<crate::metrics::CompressionCounts>,
 }
 
 #[cfg(test)]
@@ -2068,6 +2092,7 @@ phases:
                 lag: lag.clone(),
                 open_file_limit: Some(limit.clone()),
                 arrivals: None,
+                compression: None,
             },
             TimeSeries::default(),
             &BTreeMap::new(),

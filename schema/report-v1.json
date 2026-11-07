@@ -429,6 +429,19 @@
           "description": "Scenario runs only: the Send actions that have a name, sorted by name, each with the messages, errors and latency of every phase and connection that sent it. A named action that never sent a message is listed with zeros. Absent when no action has a name, and from reports written before wsblast 0.2.3. The run-level fields above count every action, named or not.",
           "type": "array",
           "items": { "$ref": "#/$defs/action_metrics" }
+        },
+        "compression": {
+          "description": "Runs with --compression only: how many handshakes offered permessage-deflate and how many servers agreed, and the data message bytes on the connections that agreed, before compression and on the wire. A message sent uncompressed on them counts the same on both sides. Absent from other runs and from reports written before wsblast 0.2.4. Scenario phases and distributed agents add up. See METHODOLOGY.md section 7.3.",
+          "type": "object",
+          "required": ["connections_offered", "connections_negotiated", "bytes_sent", "wire_bytes_sent", "bytes_recv", "wire_bytes_recv"],
+          "properties": {
+            "connections_offered": { "description": "Handshakes that offered permessage-deflate, reconnects included.", "$ref": "#/$defs/count" },
+            "connections_negotiated": { "description": "Handshakes whose server agreed.", "$ref": "#/$defs/count" },
+            "bytes_sent": { "description": "Data message bytes sent, before compression.", "$ref": "#/$defs/count" },
+            "wire_bytes_sent": { "description": "The same messages' payload bytes on the wire.", "$ref": "#/$defs/count" },
+            "bytes_recv": { "description": "Data message bytes received, after decompression.", "$ref": "#/$defs/count" },
+            "wire_bytes_recv": { "description": "The same messages' payload bytes on the wire.", "$ref": "#/$defs/count" }
+          }
         }
       }
     },

@@ -96,6 +96,8 @@ pub struct MockConfig {
     rules: Option<Arc<Rules>>,
     /// Engine.IO ping interval and timeout, when the mock speaks Socket.IO.
     socketio: Option<(Duration, Duration)>,
+    #[cfg(feature = "compression")]
+    compression: bool,
     seed: Option<u64>,
     tls: Option<Arc<rustls::ServerConfig>>,
 }
@@ -165,6 +167,10 @@ impl MockConfig {
                 self.reject_ratio * 100.0
             ));
         }
+        #[cfg(feature = "compression")]
+        if self.compression {
+            parts.push("permessage-deflate".to_string());
+        }
         if let Some(stall) = self.stall {
             parts.push(format!("stall {:?} every {:?}", stall.length, stall.every));
         }
@@ -186,6 +192,8 @@ pub struct MockConfigBuilder {
     replay: Option<PathBuf>,
     rules: Option<PathBuf>,
     socketio: Option<(Duration, Duration)>,
+    #[cfg(feature = "compression")]
+    compression: bool,
     seed: Option<u64>,
     tls: Option<(PathBuf, PathBuf)>,
 }
@@ -203,6 +211,8 @@ impl Default for MockConfigBuilder {
             replay: None,
             rules: None,
             socketio: None,
+            #[cfg(feature = "compression")]
+            compression: false,
             seed: None,
             tls: None,
         }
@@ -289,6 +299,17 @@ impl MockConfigBuilder {
     #[cfg_attr(docsrs, doc(cfg(feature = "socketio")))]
     pub fn socketio_ping(mut self, interval: Duration, timeout: Duration) -> Self {
         self.socketio = Some((interval, timeout));
+        self
+    }
+
+    /// Accepts permessage-deflate (RFC 7692) when a client offers it:
+    /// messages from the client are inflated before they are answered, and
+    /// replies are compressed. A client that does not offer it is served
+    /// uncompressed.
+    #[cfg(feature = "compression")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
+    pub fn compression(mut self, enabled: bool) -> Self {
+        self.compression = enabled;
         self
     }
 
@@ -400,6 +421,8 @@ impl MockConfigBuilder {
             replay,
             rules,
             socketio: self.socketio,
+            #[cfg(feature = "compression")]
+            compression: self.compression,
             seed: self.seed,
             tls,
         })
@@ -424,6 +447,8 @@ pub struct MockStats {
     pub frames_received: u64,
     /// Text and binary frames sent to clients (echoes or replayed frames).
     pub frames_sent: u64,
+    /// Connections that agreed on permessage-deflate (`--compression`).
+    pub connections_compressed: u64,
 }
 
 #[derive(Debug, Default)]
@@ -433,6 +458,9 @@ struct Counters {
     active: AtomicU64,
     received: AtomicU64,
     sent: AtomicU64,
+    /// What the compressed connections counted.
+    #[cfg(feature = "compression")]
+    deflate: Arc<crate::deflate::CompressionCounters>,
 }
 
 /// Reads a running server's counters; cheap to clone.
@@ -449,6 +477,10 @@ impl MockStatsHandle {
             connections_active: load(&self.0.active),
             frames_received: load(&self.0.received),
             frames_sent: load(&self.0.sent),
+            #[cfg(feature = "compression")]
+            connections_compressed: self.0.deflate.snapshot().negotiated,
+            #[cfg(not(feature = "compression"))]
+            connections_compressed: 0,
         }
     }
 }
@@ -686,8 +718,43 @@ async fn serve_connection<S>(
         return;
     }
 
+    #[cfg(feature = "compression")]
+    if shared.config.compression {
+        // Boxed, as the layer's buffers and inflater are only worth
+        // reserving on connections that asked for compression.
+        let stream = Box::new(crate::deflate::DeflateStream::new(
+            tcp,
+            crate::deflate::Role::Server,
+            Arc::clone(&shared.counters.deflate),
+        ));
+        return Box::pin(accept_session(stream, shared, plan, cancel, true)).await;
+    }
+    accept_session(tcp, shared, plan, cancel, false).await;
+}
+
+/// Completes the WebSocket handshake and serves the session. With
+/// `compress`, the response accepts a permessage-deflate offer.
+async fn accept_session<S>(
+    tcp: S,
+    shared: Arc<Shared>,
+    plan: ConnectionPlan,
+    cancel: CancellationToken,
+    compress: bool,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    // The error type is fixed by tungstenite's handshake callback.
+    #[allow(clippy::result_large_err)]
+    let answer = move |request: &Request,
+                       mut response: Response|
+          -> std::result::Result<Response, ErrorResponse> {
+        if compress {
+            answer_compression(request, &mut response);
+        }
+        Ok(response)
+    };
     let ws = tokio::select! {
-        ws = tokio_tungstenite::accept_async_with_config(tcp, Some(read_buffer_config())) => ws,
+        ws = tokio_tungstenite::accept_hdr_async_with_config(tcp, answer, Some(read_buffer_config())) => ws,
         () = cancel.cancelled() => return,
     };
     let Ok(ws) = ws else {
@@ -761,6 +828,27 @@ impl Outgoing<'_> {
 /// The mock reads with the client's largest buffer: the WebSocket library's
 /// 128 KiB default would make every read of a small frame clear 128 KiB
 /// first, so the mock, not the client, would limit a load test.
+/// Accepts the client's permessage-deflate offer, if it made one the mock
+/// can take, in the handshake response.
+#[cfg(feature = "compression")]
+fn answer_compression(request: &Request, response: &mut Response) {
+    use http::header::SEC_WEBSOCKET_EXTENSIONS;
+    let answer = request
+        .headers()
+        .get_all(SEC_WEBSOCKET_EXTENSIONS)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(crate::deflate::accept_offer);
+    if let Some(value) = answer.and_then(|a| http::HeaderValue::from_str(&a).ok()) {
+        response
+            .headers_mut()
+            .insert(SEC_WEBSOCKET_EXTENSIONS, value);
+    }
+}
+
+#[cfg(not(feature = "compression"))]
+fn answer_compression(_: &Request, _: &mut Response) {}
+
 fn read_buffer_config() -> WebSocketConfig {
     WebSocketConfig::default().read_buffer_size(crate::connect::MAX_READ_BUFFER)
 }
@@ -1231,6 +1319,10 @@ pub(crate) async fn run_command(args: &crate::cli::MockArgs) -> Result<()> {
     if args.socketio {
         builder = builder.socketio();
     }
+    #[cfg(feature = "compression")]
+    {
+        builder = builder.compression(args.compression);
+    }
     if let (Some(cert), Some(key)) = (&args.tls_cert, &args.tls_key) {
         builder = builder.tls(cert, key);
     }
@@ -1251,11 +1343,16 @@ pub(crate) async fn run_command(args: &crate::cli::MockArgs) -> Result<()> {
     cancel.cancel();
     let _ = printer.await;
     crate::output::outln!(
-        "wsblast mock stopped: {} connections accepted, {} rejected, {} frames received, {} sent",
+        "wsblast mock stopped: {} connections accepted, {} rejected, {} frames received, {} sent{}",
         last.connections_accepted,
         last.connections_rejected,
         last.frames_received,
-        last.frames_sent
+        last.frames_sent,
+        if last.connections_compressed > 0 {
+            format!(", {} compressed connections", last.connections_compressed)
+        } else {
+            String::new()
+        }
     );
     Ok(())
 }

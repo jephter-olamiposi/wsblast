@@ -2,17 +2,20 @@
 # End-to-end checks of every wsblast feature, run against the real binary as
 # a user would: exit codes, report formats, scenarios, capture and replay,
 # exports, comparison, chaos, authentication, TLS, distributed runs, data
-# files, reply checks, named actions, arrival rates, source addresses and
-# Socket.IO. Every server it needs is started locally (wsblast mock, agents,
-# small Python stand-ins for an OTLP collector and an OAuth2 token endpoint).
+# files, reply checks, named actions, arrival rates, source addresses,
+# Socket.IO and compression. Every server it needs is started locally
+# (wsblast mock, agents, small Python stand-ins for an OTLP collector and an
+# OAuth2 token endpoint). When the Python `websockets` package is installed,
+# compression is also checked against its server and client, an independent
+# implementation.
 #
 #   scripts/e2e.sh [path/to/wsblast]
 #
 # The binary must be built with every feature:
 #   cargo build --release --all-features && scripts/e2e.sh target/release/wsblast
 # Needs bash, python3, curl and openssl; the source-address and TUI checks
-# run on Linux only. Uses ports 19001-19033, 19443, 19464, 14318, 14444 and
-# 17701-17703 on 127.0.0.1. Exits 1 when any check fails.
+# run on Linux only. Uses ports 19001-19034, 19443-19444, 19464, 19501,
+# 14318, 14444 and 17701-17703 on 127.0.0.1. Exits 1 when any check fails.
 W=${1:-${WSBLAST:-wsblast}}
 case "$W" in */*) W=$(cd "$(dirname "$W")" && pwd)/$(basename "$W") ;; esac
 "$W" --version >/dev/null 2>&1 || { echo "cannot run $W" >&2; exit 1; }
@@ -221,6 +224,60 @@ $W ws://127.0.0.1:19033 --mode socketio --sio-event chat -c 5 -d 2s -r 10 --expe
 check "Socket.IO events are timed to their acks" "[ $rc = 0 ] && j sio.json '\"/socket.io/\" in d[\"target_url\"] and d[\"metrics\"][\"error_rate\"] == 0 and d[\"metrics\"][\"response_time\"][\"count\"] > 50' | grep -q True" "rc=$rc"
 $W $T --mode socketio -c 1 -d 1s --message-timeout 300ms --no-reconnect --no-progress --format json -o siobad.json >/dev/null 2>&1
 check "Socket.IO against a plain server times out opening" "j siobad.json 'd[\"metrics\"][\"error_breakdown\"].get(\"timeout\") == 1' | grep -q True" "$(j siobad.json 'd[\"metrics\"][\"error_breakdown\"]' 2>&1)"
+
+# 0.2.4: permessage-deflate
+$W mock --listen 127.0.0.1:19034 --compression >mock5.log 2>&1 &
+$W mock --listen 127.0.0.1:19444 --compression --tls-cert c.pem --tls-key k.pem >mtls2.log 2>&1 &
+sleep 0.5
+Z=ws://127.0.0.1:19034
+ZP='{"symbol":"ABC","bid":101.25,"ask":101.27,"size":300,"venue":"XNAS","side":"buy"}'
+$W $Z --compression -c 5 -d 2s -p "$ZP" --expect 'json:/venue="XNAS"' --no-progress --format json -o z.json >/dev/null 2>&1; rc=$?
+check "--compression is agreed and shrinks the wire" "[ $rc = 0 ] && j z.json 'd[\"metrics\"][\"compression\"][\"connections_negotiated\"] == 5 and d[\"metrics\"][\"compression\"][\"wire_bytes_recv\"] * 4 < d[\"metrics\"][\"compression\"][\"bytes_recv\"] == d[\"metrics\"][\"total_bytes_recv\"] and d[\"metrics\"][\"error_rate\"] == 0' | grep -q True" "rc=$rc $(j z.json 'd[\"metrics\"].get(\"compression\")' 2>&1)"
+$W $Z --compression -c 2 -d 1s --no-progress >z.txt 2>&1
+check "the summary has a Compression row" "grep -q 'permessage-deflate agreed on 2 of 2' z.txt" "$(grep -i compress z.txt)"
+$W $T --compression -c 3 -d 1s --no-progress --format json -o zno.json >/dev/null 2>&1; rc=$?
+check "a server that declines is served uncompressed" "[ $rc = 0 ] && j zno.json 'd[\"metrics\"][\"compression\"][\"connections_negotiated\"] == 0 and d[\"metrics\"][\"total_messages_recv\"] > 0' | grep -q True" "rc=$rc"
+SSL_CERT_FILE=c.pem $W wss://127.0.0.1:19444 --compression -c 3 -d 1s -p "$ZP" --no-progress --format json -o ztls.json >/dev/null 2>&1; rc=$?
+check "--compression over wss" "[ $rc = 0 ] && j ztls.json 'd[\"metrics\"][\"compression\"][\"connections_negotiated\"] == 3 and d[\"metrics\"][\"error_rate\"] == 0' | grep -q True" "rc=$rc"
+$W $Z --compression -c 10 -d 2s -n 200 -p "$ZP" --no-progress --agents 127.0.0.1:17701,127.0.0.1:17702 --agent-token $TOK --format json -o zdist.json >/dev/null 2>&1; rc=$?
+check "--compression across agents adds up" "[ $rc = 0 ] && j zdist.json 'd[\"metrics\"][\"compression\"][\"connections_negotiated\"] == 10' | grep -q True" "rc=$rc $(j zdist.json 'd[\"metrics\"].get(\"compression\")' 2>&1)"
+sed "s#$T#$Z#" sc.yaml > zsc.yaml
+$W --scenario zsc.yaml --compression --no-progress --format json -o zsc.json >/dev/null 2>&1; rc=$?
+check "--compression in a scenario adds up its phases" "[ $rc = 0 ] && j zsc.json 'd[\"metrics\"][\"compression\"][\"connections_negotiated\"] == sum(p[\"metrics\"][\"compression\"][\"connections_negotiated\"] for p in d[\"phases\"]) >= 15' | grep -q True" "rc=$rc $(j zsc.json 'd[\"metrics\"].get(\"compression\")' 2>&1)"
+if python3 -c 'import websockets' 2>/dev/null; then
+cat > pyws.py <<'EOF'
+import asyncio, sys
+from websockets.asyncio.server import serve
+async def echo(ws):
+    try:
+        async for m in ws:
+            await ws.send(m)
+    except Exception:
+        pass
+async def main():
+    async with serve(echo, "127.0.0.1", int(sys.argv[1]), max_size=None):
+        await asyncio.get_running_loop().create_future()
+asyncio.run(main())
+EOF
+python3 pyws.py 19501 >pyws.log 2>&1 &
+sleep 1
+$W ws://127.0.0.1:19501 --compression -c 5 -d 2s -p "$ZP" --expect 'json:/size=300' --no-progress --format json -o zpy.json >/dev/null 2>&1; rc=$?
+check "--compression against Python websockets" "[ $rc = 0 ] && j zpy.json 'd[\"metrics\"][\"compression\"][\"connections_negotiated\"] == 5 and d[\"metrics\"][\"error_rate\"] == 0' | grep -q True" "rc=$rc $(tail -3 pyws.log)"
+cat > pycl.py <<'EOF'
+import asyncio, os
+from websockets.asyncio.client import connect
+async def main():
+    async with connect("ws://127.0.0.1:19034", max_size=None) as ws:
+        assert ws.protocol.extensions, "no extension agreed"
+        for m in ["hello " * 50, os.urandom(200000), "x" * 100000, '{"a":1}'] * 5:
+            await ws.send(m)
+            assert await ws.recv() == m
+asyncio.run(main())
+print("ok")
+EOF
+python3 pycl.py >pycl.log 2>&1
+check "a Python websockets client against mock --compression" "grep -q '^ok' pycl.log" "$(tail -2 pycl.log)"
+fi
 
 # TUI under a pseudo-terminal
 if [ $LINUX = 1 ] && command -v script >/dev/null; then

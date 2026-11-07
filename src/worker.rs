@@ -351,6 +351,14 @@ impl WorkerSession {
             req.headers_mut().append(name.clone(), value);
         }
 
+        #[cfg(feature = "compression")]
+        if self.config.compression {
+            req.headers_mut().insert(
+                http::header::SEC_WEBSOCKET_EXTENSIONS,
+                http::HeaderValue::from_static(crate::deflate::OFFER),
+            );
+        }
+
         if let Some(subproto) = &self.config.subprotocol
             && let Ok(val) = http::HeaderValue::from_str(subproto)
         {

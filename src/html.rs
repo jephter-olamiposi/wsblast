@@ -214,6 +214,13 @@ fn render_header(html: &mut String, view: &ReportView<'_>) {
             escape(&crate::report::arrival_label(arrivals))
         );
     }
+    if let Some(compression) = &view.metrics.compression {
+        let _ = writeln!(
+            html,
+            "<dt>Compression</dt><dd>{}</dd>",
+            escape(&crate::report::compression_label(compression))
+        );
+    }
     let rate = match view.rate_per_conn {
         Some(0) => "Unthrottled".to_string(),
         Some(rate) => format!("{rate} msg/s per connection"),

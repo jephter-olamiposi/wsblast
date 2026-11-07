@@ -2943,6 +2943,7 @@ dependencies = [
  "comfy-table",
  "criterion",
  "crossterm 0.28.1",
+ "flate2",
  "futures-util",
  "hdrhistogram",
  "http",

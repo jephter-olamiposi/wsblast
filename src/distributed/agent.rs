@@ -802,6 +802,7 @@ where
             lag: outcome.lag,
             open_file_limit: crate::runner::open_file_limit(connections),
             arrivals: outcome.arrivals,
+            compression: outcome.compression,
         },
         outcome.time_series,
         &outcome.interval_store.buckets(),

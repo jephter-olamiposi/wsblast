@@ -8,9 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `scripts/e2e.sh` runs 46 end-to-end checks against a built binary, as a user would: exit codes and report formats, scenarios, capture and replay, Prometheus and OpenTelemetry export, comparison, chaos, every authentication type, TLS, distributed runs, data files, reply checks, named actions, arrival rates, source addresses and Socket.IO. CI runs it on every push against a release build with every feature.
+- **Compression.** `--compression` offers permessage-deflate (RFC 7692) in every handshake and, where the server agrees, compresses every message wsblast sends and inflates every message it receives, so a server's compressed path can be load-tested as browsers use it. Context takeover, `server_no_context_takeover` and `client_no_context_takeover` are supported, and a server that declines is served uncompressed at no cost. Byte totals, `--expect`, captures and frame capture see the messages as sent; the new Compression row in every report and `metrics.compression` in the JSON report count the handshakes that agreed and the bytes on the wire in each direction, added up over scenario phases and distributed agents. `wsblast mock --compression` accepts the offer on the server side. The compression is built into wsblast (Cargo feature `compression`, on by default), as the WebSocket library has none; it was checked against the Python `websockets` server and client, an independent implementation. Each compressed connection uses about 150 KB. See METHODOLOGY.md, section 7.3.
+- `scripts/e2e.sh` runs 54 end-to-end checks against a built binary, as a user would: exit codes and report formats, scenarios, capture and replay, Prometheus and OpenTelemetry export, comparison, chaos, every authentication type, TLS, distributed runs, data files, reply checks, named actions, arrival rates, source addresses, Socket.IO and compression. CI runs it on every push against a release build with every feature.
 
 ### Changed
+- The distributed control protocol is version 4. An agent of 0.2.3 or earlier ignored the settings 0.2.3 added that it did not know, such as an arrival rate, and ran without them; coordinators and agents of different protocol versions now refuse each other with a message naming both versions.
 - tokio-tungstenite and tungstenite 0.30 instead of 0.26. Throughput and memory per connection are unchanged in the performance budget.
 
 ## [0.2.3] - 2026-11-07

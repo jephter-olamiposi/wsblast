@@ -108,6 +108,7 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--agent-timeout', '--agent-timeout', [CompletionResultType]::ParameterName, 'Time the agents get to become ready before the start, and to send their results after the end of the run')
             [CompletionResult]::new('--agent-ca', '--agent-ca', [CompletionResultType]::ParameterName, 'PEM file of CA certificates to trust for wss:// agents, in addition to the platform''s roots')
             [CompletionResult]::new('--binary', '--binary', [CompletionResultType]::ParameterName, 'Send payload as WebSocket binary frames instead of text frames')
+            [CompletionResult]::new('--compression', '--compression', [CompletionResultType]::ParameterName, 'Offer permessage-deflate compression on every handshake, as browsers do; the report shows how many servers agreed and the bytes saved')
             [CompletionResult]::new('--auth-jwt-per-connection', '--auth-jwt-per-connection', [CompletionResultType]::ParameterName, 'Sign a fresh JWT with a unique jti for every connection attempt instead of sharing one token')
             [CompletionResult]::new('--fail-on-regression', '--fail-on-regression', [CompletionResultType]::ParameterName, 'Fail on regression (exit code 2)')
             [CompletionResult]::new('--tui', '--tui', [CompletionResultType]::ParameterName, 'Launch interactive terminal dashboard (TUI)')
@@ -135,6 +136,7 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--tls-cert', '--tls-cert', [CompletionResultType]::ParameterName, 'PEM certificate chain to serve wss:// instead of ws:// (clients must trust it, e.g. with SSL_CERT_FILE)')
             [CompletionResult]::new('--tls-key', '--tls-key', [CompletionResultType]::ParameterName, 'PEM private key for --tls-cert')
             [CompletionResult]::new('--socketio', '--socketio', [CompletionResultType]::ParameterName, 'Speak Socket.IO (Engine.IO 4): accept any namespace, acknowledge every event that asks for an ack with its arguments, echo the others, and ping every 25s')
+            [CompletionResult]::new('--compression', '--compression', [CompletionResultType]::ParameterName, 'Accept permessage-deflate when a client offers it: inflate its messages and compress the replies')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

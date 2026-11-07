@@ -105,6 +105,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --agent-timeout 'Time the agents get to become ready before the start, and to send their results after the end of the run'
             cand --agent-ca 'PEM file of CA certificates to trust for wss:// agents, in addition to the platform''s roots'
             cand --binary 'Send payload as WebSocket binary frames instead of text frames'
+            cand --compression 'Offer permessage-deflate compression on every handshake, as browsers do; the report shows how many servers agreed and the bytes saved'
             cand --auth-jwt-per-connection 'Sign a fresh JWT with a unique jti for every connection attempt instead of sharing one token'
             cand --fail-on-regression 'Fail on regression (exit code 2)'
             cand --tui 'Launch interactive terminal dashboard (TUI)'
@@ -131,6 +132,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --tls-cert 'PEM certificate chain to serve wss:// instead of ws:// (clients must trust it, e.g. with SSL_CERT_FILE)'
             cand --tls-key 'PEM private key for --tls-cert'
             cand --socketio 'Speak Socket.IO (Engine.IO 4): accept any namespace, acknowledge every event that asks for an ack with its arguments, echo the others, and ping every 25s'
+            cand --compression 'Accept permessage-deflate when a client offers it: inflate its messages and compress the replies'
             cand -h 'Print help'
             cand --help 'Print help'
         }

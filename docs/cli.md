@@ -19,6 +19,7 @@ subcommand.
 | `-r, --rate` | `0` | Messages per second per connection (`0` is unthrottled) |
 | `-n, --requests` | | Stop after this many messages in total |
 | `--source-ip` | | Local addresses connections bind in turn, comma-separated or repeated, so one machine can open more connections to one target than one address's ephemeral ports allow ([METHODOLOGY.md, section 7.2](../METHODOLOGY.md#72-source-addresses)) |
+| `--compression` | off | Offer permessage-deflate in every handshake and, where the server agrees, compress sent messages and inflate received ones. The report shows how many servers agreed and the bytes on the wire ([METHODOLOGY.md, section 7.3](../METHODOLOGY.md#73-compression)) |
 
 ## Messages
 

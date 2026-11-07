@@ -1225,6 +1225,7 @@ impl Coordinator {
     ) -> Result<(AggregatedMetrics, Vec<AgentOutcome>)> {
         let mut totals = MetricsTotals::new()?;
         let mut arrival_counts: Option<crate::metrics::ArrivalCounts> = None;
+        let mut compression: Option<crate::metrics::CompressionCounts> = None;
         let mut parts = Vec::new();
         let mut connections = 0u64;
         let mut not_started = 0u64;
@@ -1235,6 +1236,9 @@ impl Coordinator {
                     totals.add(&result.totals)?;
                     if let Some(counts) = &result.arrivals {
                         arrival_counts.get_or_insert_default().add(counts);
+                    }
+                    if let Some(counts) = &result.compression {
+                        compression.get_or_insert_default().add(counts);
                     }
                     connections += result.connections;
                     not_started += result.not_started;
@@ -1291,7 +1295,8 @@ impl Coordinator {
             .finish(elapsed, connections)
             .with_not_started(not_started)
             .with_time_series(TimeSeries::merge_parallel(parts))
-            .with_arrivals(arrivals, arrival_counts);
+            .with_arrivals(arrivals, arrival_counts)
+            .with_compression(compression);
         // The agents' counts add up; their seeds were derived from the
         // run's, which is the one that repeats the run.
         if let (Some(chaos), Some(seed)) = (metrics.chaos.as_mut(), run.chaos_seed) {
@@ -1327,6 +1332,7 @@ impl Coordinator {
         let mut started_at: Vec<Option<u64>> = vec![None; self.agents.len()];
         let mut first_chaos_seed: Option<u64> = None;
         let mut scenario_arrivals: Option<crate::metrics::ArrivalSummary> = None;
+        let mut scenario_compression: Option<crate::metrics::CompressionSummary> = None;
 
         for (index, run) in runs {
             let phase = &scenario.phases[*index];
@@ -1337,6 +1343,11 @@ impl Coordinator {
                     Some(all) => all.add_phase(phase_arrivals),
                     None => scenario_arrivals = Some(*phase_arrivals),
                 }
+            }
+            if let Some(phase_compression) = &phase_metrics.compression {
+                scenario_compression
+                    .get_or_insert_default()
+                    .add(phase_compression);
             }
             if first_chaos_seed.is_none() {
                 first_chaos_seed = phase_metrics.chaos.as_ref().map(|chaos| chaos.seed);
@@ -1436,6 +1447,7 @@ impl Coordinator {
             )
             .with_distributed(summary);
         metrics.arrivals = scenario_arrivals;
+        metrics.compression = scenario_compression;
         // As on one machine, the scenario reports the seed of the first
         // phase that injected faults.
         if let (Some(chaos), Some(seed)) = (metrics.chaos.as_mut(), first_chaos_seed) {

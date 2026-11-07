@@ -33,7 +33,7 @@ Contents:
    wsblast agent --listen 0.0.0.0:7700
    ```
 
-   The agent prints `wsblast agent listening on ws://0.0.0.0:7700 (protocol 3, one test at a time)` and then one line per test it runs, naming the coordinator, the target and the connection count. Raise the open-file limit on the agent machines (`ulimit -n 65535`) as you would for a single-machine run.
+   The agent prints `wsblast agent listening on ws://0.0.0.0:7700 (protocol 4, one test at a time)` and then one line per test it runs, naming the coordinator, the target and the connection count. Raise the open-file limit on the agent machines (`ulimit -n 65535`) as you would for a single-machine run.
 
 3. On the coordinator, run the test as usual and add `--agents`:
 
@@ -176,7 +176,7 @@ The coordinator opens one WebSocket control connection to each agent, sending th
 
 | Message | Direction | Content |
 | :--- | :--- | :--- |
-| `hello` | both | `protocol` (the protocol version, currently 3) and `version` (the wsblast version). The coordinator sends first and the agent answers. |
+| `hello` | both | `protocol` (the protocol version, currently 4) and `version` (the wsblast version). The coordinator sends first and the agent answers. |
 | `prepare` | coordinator to agent | `config`: the agent's share of the test or of one scenario phase, and `start_timeout`: how long the agent waits for `start`. |
 | `ready` | agent to coordinator | `connections`: the agent validated the configuration, resolved the target, built its TLS settings and waits. Nothing has connected to the target yet. |
 | `start` | coordinator to agent | Start the run now. |
@@ -198,9 +198,9 @@ A test goes through these steps:
 7. **Next phase.** For a scenario, the coordinator sends the next phase's `prepare` on the same connection, and steps 3 to 6 repeat. An agent waits for it for the phase's duration plus `start_timeout` plus 60 seconds.
 8. **Merge.** The coordinator closes the control connections, merges every result that arrived and prints the report.
 
-The `config` of `prepare` is a dedicated wire structure, not a serialised `LoadTestConfig`: the target, the mode, the connections, ramp rate and request limit of this agent, the duration, the stages and the agent's share of them, the agent's share of an arrival-rate model (`arrivals`, absent otherwise), the rate, the payload (text as is, binary as base64), the handshake headers (including resolved `--auth-*` credentials), the subprotocol, the timeouts, the ping interval, `--match`, the reconnect setting and the GraphQL settings; and, when they apply, `phase` (the scenario phase's name, think time and actions), `capture` (how many records the agent may still queue), `live_auth` (the refreshed header's name and current value) and `chaos` (the faults to inject, with the agent's seed). SLOs, the report format and file paths stay on the coordinator.
+The `config` of `prepare` is a dedicated wire structure, not a serialised `LoadTestConfig`: the target, the mode, the connections, ramp rate and request limit of this agent, the duration, the stages and the agent's share of them, the agent's share of an arrival-rate model (`arrivals`, absent otherwise), the rate, the payload (text as is, binary as base64), the handshake headers (including resolved `--auth-*` credentials), the subprotocol, the timeouts, the ping interval, `--match`, the reconnect setting, whether connections offer compression, and the GraphQL and Socket.IO settings; and, when they apply, `phase` (the scenario phase's name, think time and actions), `capture` (how many records the agent may still queue), `live_auth` (the refreshed header's name and current value) and `chaos` (the faults to inject, with the agent's seed). SLOs, the report format and file paths stay on the coordinator.
 
-Version 2 of the protocol added scenario phases, the `capture` and `token` messages and the snapshot's `intervals`. Version 3 added `chaos` to the configuration, and the agent's counts of injected faults, its generator lag and its open file limit to its result. Builds speaking different versions reject each other at the hello, with an error naming both wsblast versions: an agent of an earlier release cannot be given chaos settings it would ignore.
+Version 2 of the protocol added scenario phases, the `capture` and `token` messages and the snapshot's `intervals`. Version 3 added `chaos` to the configuration, and the agent's counts of injected faults, its generator lag and its open file limit to its result. Builds speaking different versions reject each other at the hello, with an error naming both wsblast versions: an agent of an earlier release cannot be given chaos settings it would ignore. Version 4 added the settings of wsblast 0.2.3 and 0.2.4 that an older agent would have ignored and run without (data rows, reply captures and checks, named actions, arrival rates, Socket.IO, compression) and the agent's arrival and compression counts to its result.
 
 A `result` carries the agent's counters, its error breakdown, its interrupted and not-started slot counts, its handshake, RTT and response-time histograms as `[value, count]` pairs of every non-empty bucket, its time series, the latency histogram of every time-series interval in the same form, its generator lag histogram in the same form with its interval counts and threshold, its open file limit, and, when it injected faults, its chaos counts. A histogram rebuilt from these pairs has exactly the agent's buckets, so merging rebuilt histograms gives the same percentiles as merging the agents' own.
 

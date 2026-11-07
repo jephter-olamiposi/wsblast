@@ -309,6 +309,7 @@ impl Runner {
             .with_time_series(outcome.time_series)
             .with_capture(outcome.capture)
             .with_arrivals(self.config.arrivals.as_ref(), outcome.arrivals)
+            .with_compression(outcome.compression)
             .with_generator(
                 outcome.lag.summary(),
                 open_file_limit(self.config.connections),
@@ -535,6 +536,7 @@ impl Runner {
                 self.config.connect_timeout,
                 self.config.connections,
                 &self.config.source_ips,
+                compression_offered(&self.config),
             ) => {
                 Arc::new(target)
             }
@@ -544,6 +546,7 @@ impl Runner {
                 return Ok(RunOutcome {
                     totals: crate::metrics::MetricsTotals::new()?,
                     arrivals: None,
+                    compression: None,
                     elapsed: Duration::ZERO,
                     connections: total_connections,
                     not_started: total_connections,
@@ -604,6 +607,7 @@ impl Runner {
                 self.config.connect_timeout,
                 self.config.connections,
                 &self.config.source_ips,
+                compression_offered(&self.config),
             )
             .await,
         )
@@ -802,9 +806,15 @@ impl Runner {
         #[cfg(not(feature = "capture"))]
         let capture = None;
 
+        #[cfg(feature = "compression")]
+        let compression = target.compression_counts();
+        #[cfg(not(feature = "compression"))]
+        let compression = None;
+
         Ok(RunOutcome {
             totals,
             arrivals: arrival_counts,
+            compression,
             elapsed,
             connections,
             not_started,
@@ -815,6 +825,17 @@ impl Runner {
             capture,
             lag: lag.totals(),
         })
+    }
+}
+
+/// Whether the run's connections offer permessage-deflate.
+pub(crate) fn compression_offered(config: &LoadTestConfig) -> bool {
+    #[cfg(feature = "compression")]
+    return config.compression;
+    #[cfg(not(feature = "compression"))]
+    {
+        let _ = config;
+        false
     }
 }
 
@@ -838,6 +859,8 @@ pub(crate) struct RunOutcome {
     pub(crate) totals: crate::metrics::MetricsTotals,
     /// Sessions an arrival-rate run started and skipped.
     pub(crate) arrivals: Option<crate::metrics::ArrivalCounts>,
+    /// What `--compression` counted on the run's connections.
+    pub(crate) compression: Option<crate::metrics::CompressionCounts>,
     pub(crate) elapsed: Duration,
     /// Connection slots the run was configured to open.
     pub(crate) connections: u64,
@@ -1228,6 +1251,7 @@ impl ScenarioExecutor {
         let mut lag = LagTotals::default();
         let mut largest_phase = 0usize;
         let mut scenario_arrivals: Option<crate::metrics::ArrivalSummary> = None;
+        let mut scenario_compression: Option<crate::metrics::CompressionSummary> = None;
         let scenario_start = Instant::now();
         let mut phase_targets = Vec::with_capacity(self.phases.len());
 
@@ -1310,12 +1334,18 @@ impl ScenarioExecutor {
                 .with_not_started(outcome.not_started)
                 .with_time_series(outcome.time_series.clone())
                 .with_arrivals(phase.arrivals.as_ref(), outcome.arrivals)
+                .with_compression(outcome.compression)
                 .with_generator(outcome.lag.summary(), open_file_limit(phase.connections));
             if let Some(phase_arrivals) = &phase_metrics.arrivals {
                 match scenario_arrivals.as_mut() {
                     Some(all) => all.add_phase(phase_arrivals),
                     None => scenario_arrivals = Some(*phase_arrivals),
                 }
+            }
+            if let Some(phase_compression) = &phase_metrics.compression {
+                scenario_compression
+                    .get_or_insert_default()
+                    .add(phase_compression);
             }
             let phase_slo = crate::report::evaluate_slos(&phase.slo, &phase_metrics);
             if let Some(progress) = &self.progress {
@@ -1357,6 +1387,7 @@ impl ScenarioExecutor {
             .with_capture(capture)
             .with_generator(lag.summary(), open_file_limit(largest_phase));
         metrics.arrivals = scenario_arrivals;
+        metrics.compression = scenario_compression;
         let overall = crate::report::evaluate_slos(
             &self.base_config.slo.or_from(&self.scenario_slo),
             &metrics,

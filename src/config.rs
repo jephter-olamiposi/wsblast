@@ -55,6 +55,9 @@ pub struct LoadTestConfig {
     pub(crate) subprotocol: Option<String>,
     /// Local addresses connections bind in turn (`--source-ip`).
     pub(crate) source_ips: Vec<std::net::IpAddr>,
+    /// Whether connections offer permessage-deflate (`--compression`).
+    #[cfg(feature = "compression")]
+    pub(crate) compression: bool,
     pub(crate) mode: TestMode,
     pub(crate) connect_timeout: Duration,
     pub(crate) message_timeout: Duration,
@@ -217,6 +220,13 @@ impl LoadTestConfig {
         &self.source_ips
     }
 
+    /// Whether connections offer permessage-deflate.
+    #[cfg(feature = "compression")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
+    pub fn compression(&self) -> bool {
+        self.compression
+    }
+
     /// What each worker does on its connection.
     pub fn mode(&self) -> TestMode {
         self.mode
@@ -302,6 +312,8 @@ pub struct LoadTestConfigBuilder {
     data: Option<DataSource>,
     subprotocol: Option<String>,
     source_ips: Vec<std::net::IpAddr>,
+    #[cfg(feature = "compression")]
+    compression: bool,
     mode: TestMode,
     connect_timeout: Duration,
     message_timeout: Duration,
@@ -360,6 +372,8 @@ impl LoadTestConfigBuilder {
             data: None,
             subprotocol: None,
             source_ips: Vec::new(),
+            #[cfg(feature = "compression")]
+            compression: false,
             mode: TestMode::Echo,
             connect_timeout: Duration::from_secs(5),
             message_timeout: Duration::from_secs(5),
@@ -557,6 +571,18 @@ impl LoadTestConfigBuilder {
     /// to one machine.
     pub fn source_ips(mut self, ips: Vec<std::net::IpAddr>) -> Self {
         self.source_ips = ips;
+        self
+    }
+
+    /// Offers permessage-deflate (RFC 7692) on every handshake, as
+    /// browsers do. When the server agrees, data messages are compressed
+    /// both ways, which costs the client and the server CPU and memory per
+    /// connection; when it declines, the connection runs uncompressed. The
+    /// report counts both, with the bytes before and after compression.
+    #[cfg(feature = "compression")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
+    pub fn compression(mut self, enabled: bool) -> Self {
+        self.compression = enabled;
         self
     }
 
@@ -857,6 +883,8 @@ impl LoadTestConfigBuilder {
             data: data.map(std::sync::Arc::new),
             subprotocol: self.subprotocol,
             source_ips,
+            #[cfg(feature = "compression")]
+            compression: self.compression,
             mode: self.mode,
             connect_timeout: self.connect_timeout,
             message_timeout: self.message_timeout,
@@ -3059,6 +3087,10 @@ impl LoadTestConfig {
         builder.data = cli.data.take().map(DataSource::File);
         builder.subprotocol = cli.subprotocol.take();
         builder.source_ips = std::mem::take(&mut cli.source_ip);
+        #[cfg(feature = "compression")]
+        {
+            builder.compression = cli.compression;
+        }
         #[cfg(feature = "graphql-ws")]
         if let Some(graphql) = graphql {
             builder.graphql = GraphQLOptions {

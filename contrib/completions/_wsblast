@@ -118,6 +118,7 @@ graceful\:"Sends a Close frame with code 1001 (going away), then closes the TCP 
 '--agent-timeout=[Time the agents get to become ready before the start, and to send their results after the end of the run]:DURATION:_default' \
 '--agent-ca=[PEM file of CA certificates to trust for wss\:// agents, in addition to the platform'\''s roots]:PEM:_files' \
 '--binary[Send payload as WebSocket binary frames instead of text frames]' \
+'--compression[Offer permessage-deflate compression on every handshake, as browsers do; the report shows how many servers agreed and the bytes saved]' \
 '--auth-jwt-per-connection[Sign a fresh JWT with a unique jti for every connection attempt instead of sharing one token]' \
 '--fail-on-regression[Fail on regression (exit code 2)]' \
 '--tui[Launch interactive terminal dashboard (TUI)]' \
@@ -151,6 +152,7 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM certificate chain to serve wss\:// instead of ws\:// (clients must trust it, e.g. with SSL_CERT_FILE)]:PEM:_files' \
 '--tls-key=[PEM private key for --tls-cert]:PEM:_files' \
 '(--replay --rules)--socketio[Speak Socket.IO (Engine.IO 4)\: accept any namespace, acknowledge every event that asks for an ack with its arguments, echo the others, and ping every 25s]' \
+'--compression[Accept permessage-deflate when a client offers it\: inflate its messages and compress the replies]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0

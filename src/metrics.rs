@@ -673,6 +673,88 @@ pub struct AggregatedMetrics {
     /// the run did with its arrivals. Absent from other runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrivals: Option<ArrivalSummary>,
+    /// Runs with `--compression` only: how many connections agreed to
+    /// permessage-deflate, and the data message bytes before and after
+    /// compression. Absent from other runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compression: Option<CompressionSummary>,
+}
+
+/// What permessage-deflate (`--compression`) did on a run's connections.
+///
+/// The byte counts cover data message payloads: `bytes_sent` is what the
+/// connections sent before compression and `wire_bytes_sent` what went on
+/// the wire, and likewise for received bytes after and before
+/// decompression. Only connections whose server agreed are counted; a
+/// message either end sent uncompressed on them counts the same on both
+/// sides.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct CompressionSummary {
+    /// Handshakes that offered compression, reconnects included.
+    pub connections_offered: u64,
+    /// Handshakes whose server agreed.
+    pub connections_negotiated: u64,
+    /// Data message bytes sent, before compression.
+    pub bytes_sent: u64,
+    /// The same messages' bytes on the wire.
+    pub wire_bytes_sent: u64,
+    /// Data message bytes received, after decompression.
+    pub bytes_recv: u64,
+    /// The same messages' bytes on the wire.
+    pub wire_bytes_recv: u64,
+}
+
+impl CompressionSummary {
+    /// Adds another phase's counts.
+    #[cfg(feature = "scenario")]
+    pub(crate) fn add(&mut self, other: &Self) {
+        self.connections_offered += other.connections_offered;
+        self.connections_negotiated += other.connections_negotiated;
+        self.bytes_sent += other.bytes_sent;
+        self.wire_bytes_sent += other.wire_bytes_sent;
+        self.bytes_recv += other.bytes_recv;
+        self.wire_bytes_recv += other.wire_bytes_recv;
+    }
+}
+
+/// The counts a run's connection layer kept, before they become a
+/// [`CompressionSummary`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "distributed", derive(Serialize, Deserialize))]
+pub(crate) struct CompressionCounts {
+    pub(crate) offered: u64,
+    pub(crate) negotiated: u64,
+    pub(crate) bytes_sent: u64,
+    pub(crate) wire_bytes_sent: u64,
+    pub(crate) bytes_recv: u64,
+    pub(crate) wire_bytes_recv: u64,
+}
+
+impl CompressionCounts {
+    /// Adds another machine's counts.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn add(&mut self, other: &Self) {
+        self.offered += other.offered;
+        self.negotiated += other.negotiated;
+        self.bytes_sent += other.bytes_sent;
+        self.wire_bytes_sent += other.wire_bytes_sent;
+        self.bytes_recv += other.bytes_recv;
+        self.wire_bytes_recv += other.wire_bytes_recv;
+    }
+}
+
+impl From<CompressionCounts> for CompressionSummary {
+    fn from(c: CompressionCounts) -> Self {
+        Self {
+            connections_offered: c.offered,
+            connections_negotiated: c.negotiated,
+            bytes_sent: c.bytes_sent,
+            wire_bytes_sent: c.wire_bytes_sent,
+            bytes_recv: c.bytes_recv,
+            wire_bytes_recv: c.wire_bytes_recv,
+        }
+    }
 }
 
 /// What an arrival-rate run (`--arrival-rate`) did with its arrivals.
@@ -1285,6 +1367,7 @@ impl MetricsTotals {
                 .map(|(name, totals)| ActionMetrics::of(name, totals))
                 .collect(),
             arrivals: None,
+            compression: None,
             error_breakdown,
             capture: None,
             distributed: None,
@@ -1351,6 +1434,13 @@ impl AggregatedMetrics {
         self.arrivals = arrivals
             .zip(counts)
             .map(|(arrivals, counts)| ArrivalSummary::new(arrivals, counts));
+        self
+    }
+
+    /// Attaches what `--compression` did on the run's connections.
+    #[must_use]
+    pub(crate) fn with_compression(mut self, counts: Option<CompressionCounts>) -> Self {
+        self.compression = counts.map(CompressionSummary::from);
         self
     }
 

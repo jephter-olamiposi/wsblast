@@ -26,13 +26,16 @@ use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpSocket, TcpStream};
 use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::{Host, Url};
 
 /// How long a connection attempt runs before the next address is tried in
@@ -60,7 +63,62 @@ pub(crate) fn read_buffer_size(connections: usize) -> usize {
     1 << share.ilog2()
 }
 
-pub(crate) type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+pub(crate) type WsStream = WebSocketStream<Transport>;
+
+/// A client connection's bytes: TCP or TLS, under the permessage-deflate
+/// layer when the run uses `--compression`. The plain stream stays inline,
+/// so uncompressed connections pay no allocation or indirection for it; the
+/// layer, much larger, is boxed.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum Transport {
+    Plain(MaybeTlsStream<TcpStream>),
+    #[cfg(feature = "compression")]
+    Deflate(Box<crate::deflate::DeflateStream<MaybeTlsStream<TcpStream>>>),
+}
+
+macro_rules! each_transport {
+    ($self:ident, $inner:ident => $body:expr) => {
+        match $self.get_mut() {
+            Transport::Plain($inner) => {
+                let $inner = Pin::new($inner);
+                $body
+            }
+            #[cfg(feature = "compression")]
+            Transport::Deflate($inner) => {
+                let $inner = Pin::new($inner.as_mut());
+                $body
+            }
+        }
+    };
+}
+
+impl AsyncRead for Transport {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        each_transport!(self, inner => inner.poll_read(cx, buf))
+    }
+}
+
+impl AsyncWrite for Transport {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        each_transport!(self, inner => inner.poll_write(cx, buf))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        each_transport!(self, inner => inner.poll_flush(cx))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        each_transport!(self, inner => inner.poll_shutdown(cx))
+    }
+}
 
 /// Where and how every worker of one run connects.
 pub(crate) struct ConnectTarget {
@@ -70,12 +128,16 @@ pub(crate) struct ConnectTarget {
     /// Index in `addrs` of the address that most recently accepted a
     /// connection; later connections try it first.
     preferred: AtomicUsize,
-    connector: Connector,
+    /// The TLS client configuration of a `wss://` target.
+    tls: Option<Arc<rustls::ClientConfig>>,
     /// WebSocket settings of every connection: the library defaults with a
     /// read buffer sized for the run.
     ws_config: WebSocketConfig,
     /// The local addresses connections bind, if any.
     sources: SourceIps,
+    /// What `--compression` counted, when the run offers it.
+    #[cfg(feature = "compression")]
+    compression: Option<Arc<crate::deflate::CompressionCounters>>,
 }
 
 /// The local addresses connections bind, by family, taken in turn.
@@ -135,12 +197,11 @@ impl ConnectTarget {
         timeout: Duration,
         connections: usize,
         source_ips: &[IpAddr],
+        compression: bool,
     ) -> Self {
-        let connector = if url.scheme() == "wss" {
-            rustls_connector()
-        } else {
-            Connector::Plain
-        };
+        let tls = (url.scheme() == "wss").then(|| Arc::new(rustls_client_config()));
+        #[cfg(not(feature = "compression"))]
+        let _ = compression;
         let sources = SourceIps::new(source_ips);
         let addrs = tokio::time::timeout(timeout, resolve(url))
             .await
@@ -162,10 +223,20 @@ impl ConnectTarget {
         Self {
             addrs,
             preferred: AtomicUsize::new(0),
-            connector,
+            tls,
             ws_config: WebSocketConfig::default().read_buffer_size(read_buffer_size(connections)),
             sources,
+            #[cfg(feature = "compression")]
+            compression: compression.then(Arc::default),
         }
+    }
+
+    /// What `--compression` counted so far, when the run offers it.
+    #[cfg(feature = "compression")]
+    pub(crate) fn compression_counts(&self) -> Option<crate::metrics::CompressionCounts> {
+        self.compression
+            .as_ref()
+            .map(|counters| counters.snapshot())
     }
 
     /// Opens the TCP connection and completes the TLS and WebSocket
@@ -199,14 +270,41 @@ impl ConnectTarget {
         {
             self.preferred.store(i, Ordering::Relaxed);
         }
-        let (ws_stream, _) = tokio_tungstenite::client_async_tls_with_config(
-            request,
-            tcp,
-            Some(self.ws_config),
-            Some(self.connector.clone()),
-        )
-        .await
-        .map_err(|err| ConnectError::Tungstenite(Box::new(err)))?;
+        let stream = match &self.tls {
+            None => MaybeTlsStream::Plain(tcp),
+            Some(config) => {
+                // As tokio-tungstenite names the server: the request's host,
+                // an IPv6 literal without its brackets.
+                let host = request.uri().host().unwrap_or_default();
+                let host = host.trim_start_matches('[').trim_end_matches(']');
+                let name =
+                    rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|_| {
+                        ConnectError::Tungstenite(Box::new(
+                            tokio_tungstenite::tungstenite::error::TlsError::InvalidDnsName.into(),
+                        ))
+                    })?;
+                let tls = tokio_rustls::TlsConnector::from(Arc::clone(config))
+                    .connect(name, tcp)
+                    .await
+                    .map_err(|err| ConnectError::Tungstenite(Box::new(err.into())))?;
+                MaybeTlsStream::Rustls(tls)
+            }
+        };
+        #[cfg(feature = "compression")]
+        let transport = match &self.compression {
+            Some(counters) => Transport::Deflate(Box::new(crate::deflate::DeflateStream::new(
+                stream,
+                crate::deflate::Role::Client,
+                Arc::clone(counters),
+            ))),
+            None => Transport::Plain(stream),
+        };
+        #[cfg(not(feature = "compression"))]
+        let transport = Transport::Plain(stream);
+        let (ws_stream, _) =
+            tokio_tungstenite::client_async_with_config(request, transport, Some(self.ws_config))
+                .await
+                .map_err(|err| ConnectError::Tungstenite(Box::new(err)))?;
         Ok(ws_stream)
     }
 }
@@ -250,11 +348,6 @@ pub(crate) fn rustls_client_config() -> rustls::ClientConfig {
         .expect("ring supports the default TLS protocol versions")
         .with_root_certificates(roots)
         .with_no_client_auth()
-}
-
-/// The TLS connector every `wss://` handshake of a run shares.
-fn rustls_connector() -> Connector {
-    Connector::Rustls(Arc::new(rustls_client_config()))
 }
 
 /// Connects to the first address that accepts, trying them in the given
@@ -422,9 +515,11 @@ mod tests {
         let target = ConnectTarget {
             addrs: Ok(vec![addr("192.0.2.1:9"), open].into()),
             preferred: AtomicUsize::new(0),
-            connector: Connector::Plain,
+            tls: None,
             ws_config: WebSocketConfig::default(),
             sources: SourceIps::default(),
+            #[cfg(feature = "compression")]
+            compression: None,
         };
         let request = "ws://127.0.0.1/".into_client_request().unwrap();
         // The server never upgrades, so only the TCP step can be observed.
@@ -462,8 +557,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = Url::parse(&format!("ws://{}/", listener.local_addr().unwrap())).unwrap();
         let sources: Vec<IpAddr> = vec!["127.0.0.1".parse().unwrap(), "127.0.0.2".parse().unwrap()];
-        let target =
-            Arc::new(ConnectTarget::prepare(&url, Duration::from_secs(1), 4, &sources).await);
+        let target = Arc::new(
+            ConnectTarget::prepare(&url, Duration::from_secs(1), 4, &sources, false).await,
+        );
         let mut peers = Vec::new();
         for _ in 0..4 {
             let target = Arc::clone(&target);
@@ -501,9 +597,14 @@ mod tests {
     #[tokio::test]
     async fn a_target_without_a_source_of_its_family_fails_every_connection() {
         let url = Url::parse("ws://127.0.0.1:9/").unwrap();
-        let target =
-            ConnectTarget::prepare(&url, Duration::from_secs(1), 1, &["::1".parse().unwrap()])
-                .await;
+        let target = ConnectTarget::prepare(
+            &url,
+            Duration::from_secs(1),
+            1,
+            &["::1".parse().unwrap()],
+            false,
+        )
+        .await;
         assert_eq!(target.addrs.unwrap_err(), ErrorCategory::TcpConnect);
     }
 

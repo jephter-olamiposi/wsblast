@@ -30,6 +30,7 @@ Contents:
 | `--replay FILE` | off | Instead of echoing, send each connection the frames a `--capture` file recorded as received. |
 | `--rules FILE` | off | Answer frames as a YAML rules file says: match by text or JSON field, reply from templates, delay or close. Cannot be combined with `--replay`. See [section 9](#9-scripted-replies---rules). |
 | `--socketio` | off | Speak Socket.IO (Engine.IO 4): accept any namespace, acknowledge every event that asks for an ack with its arguments after the reply delay, echo the others, and ping every 25 s, closing a connection that misses its pong for 20 s. Cannot be combined with `--rules` or `--replay`. See [docs/socketio.md](socketio.md#5-testing-against-the-mock). |
+| `--compression` | off | Accept permessage-deflate when a client offers it: inflate its messages before answering them and compress the replies. Clients that do not offer it are served uncompressed. The stop line counts the compressed connections. See [section 2](#2-how-each-behaviour-works). |
 | `--tls-cert PEM` | off | Serve `wss://` with this PEM certificate chain. Needs `--tls-key`. See [section 8](#8-serving-wss-tls). |
 | `--tls-key PEM` | off | PEM private key (PKCS#8, PKCS#1 or SEC1) for `--tls-cert`. |
 
@@ -46,6 +47,8 @@ Durations take the same units as wsblast's other duration flags: `ns`, `us`, `ms
 **Reject ratio.** For every TCP connection the server draws a number in [0, 1) before reading the upgrade request; when it is below `--reject-ratio`, the upgrade is answered with `HTTP 503 Service Unavailable` and the connection is closed. `0` never rejects and `1` rejects everything. wsblast counts each rejection as one `http_upgrade_rejected` error and one failed handshake, and retries the slot with backoff unless `--no-reconnect` is set, so a ratio of 0.3 leaves about 30 % of the handshake attempts failing, not 30 % of the slots.
 
 **Stalls.** Stalls are server-wide and periodic, counted from the moment the server started: with `--stall-every E --stall-for F`, the server is stalled during `[k·E, k·E + F)` for every k ≥ 1. A reply that becomes due during a stall is held until the stall ends, on every connection, and then sent with the replies queued behind it. Requests are still read during a stall. Nothing is dropped. This is what a garbage-collection pause or a blocked event loop looks like from the outside, and it is the case wsblast's response time exists for: in a paced run (`--rate`), every request that falls due during a stall waits behind the held one, and response time counts that wait while RTT records one slow sample per stall. See [METHODOLOGY.md, section 2.2](../METHODOLOGY.md#22-message-pacing).
+
+**Compression.** With `--compression` the server accepts a `permessage-deflate` offer with context takeover on both sides, answering `server_no_context_takeover` when the client asked for it, and declines an offer that asks for a server window below 32 KiB. Every reply on an accepted connection is compressed, and every behaviour above (delay, stalls, rules, replay, Socket.IO) works on the inflated messages. It is how wsblast's own `--compression` is tested, and a way to measure what compression costs a client.
 
 **Replay.** See [section 5](#5-recording-and-replaying-a-real-server).
 

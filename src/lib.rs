@@ -166,6 +166,8 @@ mod clock;
 mod config;
 mod connect;
 mod data;
+#[cfg(feature = "compression")]
+mod deflate;
 #[cfg(feature = "distributed")]
 #[cfg_attr(docsrs, doc(cfg(feature = "distributed")))]
 pub mod distributed;
@@ -204,7 +206,8 @@ pub use config::{
 pub use error::{ConfigError, ErrorCategory, Result, WorkerError, WsBlastError};
 pub use metrics::{
     ActionMetrics, AgentGenerator, AggregatedMetrics, ArrivalSummary, CaptureSummary, ChaosSummary,
-    DistributedSummary, GeneratorLag, LatencyStats, LiveSnapshot, OpenFileLimit, SlowReplies,
+    CompressionSummary, DistributedSummary, GeneratorLag, LatencyStats, LiveSnapshot,
+    OpenFileLimit, SlowReplies,
 };
 #[cfg(feature = "scenario")]
 pub use report::PhaseTarget;

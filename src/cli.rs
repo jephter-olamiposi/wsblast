@@ -141,6 +141,12 @@ pub(crate) struct Cli {
     #[arg(long = "source-ip", value_name = "IP", value_delimiter = ',')]
     pub source_ip: Vec<std::net::IpAddr>,
 
+    /// Offer permessage-deflate compression on every handshake, as browsers
+    /// do; the report shows how many servers agreed and the bytes saved
+    #[cfg(feature = "compression")]
+    #[arg(long = "compression")]
+    pub compression: bool,
+
     /// Load testing execution mode
     #[arg(long = "mode", value_enum, default_value_t = TestMode::Echo)]
     pub mode: TestMode,
@@ -657,6 +663,11 @@ pub(crate) struct MockArgs {
     #[cfg(feature = "socketio")]
     #[arg(long = "socketio", conflicts_with_all = ["replay", "rules"])]
     pub socketio: bool,
+
+    /// Accept permessage-deflate when a client offers it: inflate its messages and compress the replies
+    #[cfg(feature = "compression")]
+    #[arg(long = "compression")]
+    pub compression: bool,
 
     /// PEM certificate chain to serve wss:// instead of ws:// (clients must trust it, e.g. with SSL_CERT_FILE)
     #[arg(long = "tls-cert", value_name = "PEM", requires = "tls_key")]
