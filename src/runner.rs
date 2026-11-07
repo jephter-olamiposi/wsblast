@@ -561,6 +561,12 @@ impl Runner {
         let interval_store = IntervalStore::new(start_time, interval);
         // One set of latency histograms for every worker of this run, so
         // memory does not grow with the number of connections.
+        #[cfg(feature = "scenario")]
+        let latency = Arc::new(match &self.scenario {
+            Some(phase) => LatencyRecorder::new().with_actions(&phase.action_names),
+            None => LatencyRecorder::new(),
+        });
+        #[cfg(not(feature = "scenario"))]
         let latency = Arc::new(LatencyRecorder::new());
         #[cfg(feature = "distributed")]
         {
@@ -919,6 +925,8 @@ pub struct ScenarioExecutor {
     scenario_name: String,
     /// The top-level `slo:` thresholds of the scenario file.
     scenario_slo: crate::config::SloThresholds,
+    /// The thresholds of the named actions, checked over the whole run.
+    action_slos: Vec<(String, crate::config::SloThresholds)>,
     phases: Vec<ScenarioPhase>,
     /// Resolved endpoint of each entry in `phases`.
     targets: Vec<url::Url>,
@@ -974,6 +982,7 @@ impl ScenarioExecutor {
         Ok(Self {
             scenario_name: scenario.metadata.name.clone(),
             scenario_slo: scenario.slo()?,
+            action_slos: scenario.action_slos(phase)?,
             targets: scenario.resolve_phase_targets(target_override, phase)?,
             phases,
             base_config,
@@ -1183,6 +1192,7 @@ impl ScenarioExecutor {
                 .iter()
                 .map(|phase| (phase.name.as_str(), &phase.slo)),
         );
+        let slo = crate::report::with_action_slos(slo, &self.action_slos, &metrics);
         Ok(ScenarioOutcome {
             metrics,
             phase_targets,

@@ -240,6 +240,9 @@ pub(crate) enum WireAction {
         expect: Option<crate::check::Check>,
         #[serde(default)]
         captures: Vec<crate::check::Capture>,
+        /// The position of the action's name in `WirePhase::action_names`.
+        #[serde(default)]
+        name: Option<usize>,
     },
     Wait {
         duration: Duration,
@@ -264,6 +267,9 @@ pub(crate) struct WirePhase {
     /// The variables the phase captures, which its templates read.
     #[serde(default)]
     pub(crate) vars: Vec<String>,
+    /// The names of the phase's named actions.
+    #[serde(default)]
+    pub(crate) action_names: Vec<String>,
 }
 
 /// Capture settings of an agent's share.
@@ -835,11 +841,13 @@ impl WirePhase {
                         count,
                         expect,
                         captures,
+                        name,
                     } => WireAction::Send {
                         payload: payload.as_ref().map(wire_payload),
                         count: *count,
                         expect: expect.clone(),
                         captures: captures.clone(),
+                        name: *name,
                     },
                     ScenarioAction::Wait(duration) => WireAction::Wait {
                         duration: *duration,
@@ -854,6 +862,7 @@ impl WirePhase {
                 })
                 .collect(),
             vars: phase.vars.clone(),
+            action_names: phase.action_names.clone(),
         }
     }
 
@@ -874,6 +883,7 @@ impl WirePhase {
             ConfigError::InvalidScenario(format!("phase '{}': {reason}", self.name)).into()
         };
         let vars = self.vars.clone();
+        let action_names = self.action_names.clone();
         for name in &vars {
             crate::check::check_var_name(name).map_err(|e| invalid(&format!("capture: {e}")))?;
         }
@@ -887,7 +897,11 @@ impl WirePhase {
                         count,
                         expect,
                         captures,
+                        name,
                     } => {
+                        if name.is_some_and(|name| name >= action_names.len()) {
+                            return Err(invalid("an action names an unknown action name"));
+                        }
                         if count == 0 {
                             return Err(invalid("send action count must be greater than zero"));
                         }
@@ -910,6 +924,7 @@ impl WirePhase {
                             count,
                             expect,
                             captures,
+                            name,
                         }
                     }
                     WireAction::Wait { duration } if duration.is_zero() => {
@@ -948,6 +963,7 @@ impl WirePhase {
             think_time: self.think_time,
             actions,
             vars,
+            action_names,
             slo: crate::config::SloThresholds::default(),
             stages: config.stages.clone(),
             // The coordinator resolved the phase's chaos (its own mapping
@@ -1060,6 +1076,20 @@ pub(crate) struct WireTotals {
     /// The faults the agent injected, with its own seed.
     #[serde(default)]
     pub(crate) chaos: Option<ChaosSummary>,
+    /// The agent's named scenario actions.
+    #[serde(default)]
+    pub(crate) actions: Vec<WireActionTotals>,
+}
+
+/// One named action's totals on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireActionTotals {
+    pub(crate) name: String,
+    pub(crate) sent: u64,
+    pub(crate) errors: u64,
+    pub(crate) sent_message_errors: u64,
+    pub(crate) rtt: Sparse,
+    pub(crate) response: Sparse,
 }
 
 impl From<&MetricsTotals> for WireTotals {
@@ -1078,6 +1108,18 @@ impl From<&MetricsTotals> for WireTotals {
             rtt: to_sparse(&totals.rtt),
             response: to_sparse(&totals.response),
             chaos: totals.chaos.clone(),
+            actions: totals
+                .actions
+                .iter()
+                .map(|(name, action)| WireActionTotals {
+                    name: name.clone(),
+                    sent: action.counts.sent,
+                    errors: action.counts.errors,
+                    sent_message_errors: action.counts.sent_message_errors,
+                    rtt: to_sparse(&action.rtt),
+                    response: to_sparse(&action.response),
+                })
+                .collect(),
         }
     }
 }
@@ -1101,6 +1143,24 @@ impl WireTotals {
             errors: self.errors,
             chaos: self.chaos,
             absorbed: Vec::new(),
+            actions: self
+                .actions
+                .into_iter()
+                .map(|action| {
+                    Ok((
+                        action.name,
+                        crate::metrics::ActionTotals {
+                            rtt: from_sparse(&action.rtt, empty()?)?,
+                            response: from_sparse(&action.response, empty()?)?,
+                            counts: crate::metrics::ActionCounts {
+                                sent: action.sent,
+                                errors: action.errors,
+                                sent_message_errors: action.sent_message_errors,
+                            },
+                        },
+                    ))
+                })
+                .collect::<std::result::Result<_, String>>()?,
         })
     }
 }
@@ -1437,6 +1497,49 @@ mod tests {
         assert!(
             matches!(rebuilt.payload, PayloadConfig::DynamicText(ref t) if t.source() == r#"{"seq":{{seq}}}"#)
         );
+    }
+
+    #[test]
+    fn named_action_totals_travel_with_the_agent_result() {
+        use crate::metrics::{LiveMetrics, WorkerMetrics};
+        let names = ["login".to_string(), "sub".to_string()];
+        let recorder = std::sync::Arc::new(
+            crate::histogram::LatencyRecorder::with_shards(1).with_actions(&names),
+        );
+        let mut worker = WorkerMetrics::with_latency(LiveMetrics::new(), recorder);
+        worker.current_action = Some(1);
+        worker.record_message_sent(10);
+        worker.record_message_recv(10, Some(Duration::from_millis(3)));
+        worker.record_message_sent(10);
+        worker.record_error(
+            ErrorCategory::Timeout,
+            crate::metrics::ErrorScope::SentMessage,
+        );
+        worker.current_action = None;
+        worker.record_message_sent(10);
+        let mut totals = MetricsTotals::new().unwrap();
+        totals.add_worker(worker);
+
+        let wire: WireTotals =
+            serde_json::from_str(&serde_json::to_string(&WireTotals::from(&totals)).unwrap())
+                .unwrap();
+        let mut merged = MetricsTotals::new().unwrap();
+        merged.add(&wire.into_totals().unwrap()).unwrap();
+        merged.add(&totals).unwrap();
+        let metrics = merged.finish(Duration::from_secs(1), 1);
+        // A declared action that sent nothing is still listed.
+        assert_eq!(metrics.actions.len(), 2, "{:?}", metrics.actions);
+        assert_eq!(metrics.actions[0].name, "login");
+        assert_eq!(metrics.actions[0].messages_sent, 0);
+        let sub = &metrics.actions[1];
+        assert_eq!(
+            (sub.name.as_str(), sub.messages_sent, sub.errors),
+            ("sub", 4, 2)
+        );
+        assert_eq!(sub.message_rtt.count, 2);
+        assert!((sub.error_rate - 0.5).abs() < 1e-9, "{sub:?}");
+        // The message sent outside an action counts for the run only.
+        assert_eq!(metrics.total_messages_sent, 6);
     }
 
     #[test]

@@ -411,7 +411,24 @@
             "type": "integer",
             "minimum": 1
           }
+        },
+        "actions": {
+          "description": "Scenario runs only: the Send actions that have a name, sorted by name, each with the messages, errors and latency of every phase and connection that sent it. A named action that never sent a message is listed with zeros. Absent when no action has a name, and from reports written before wsblast 0.2.3. The run-level fields above count every action, named or not.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/action_metrics" }
         }
+      }
+    },
+    "action_metrics": {
+      "type": "object",
+      "required": ["name", "messages_sent", "errors", "error_rate", "message_rtt", "response_time"],
+      "properties": {
+        "name": { "description": "The action's name, from its name key in the scenario.", "type": "string" },
+        "messages_sent": { "description": "Messages the action sent.", "$ref": "#/$defs/count" },
+        "errors": { "description": "Errors while the action ran: reply timeouts, failed checks, write errors and closed connections.", "$ref": "#/$defs/count" },
+        "error_rate": { "description": "errors over messages_sent plus the errors that do not belong to a sent message, as for the run.", "type": "number", "minimum": 0, "maximum": 1 },
+        "message_rtt": { "description": "Round-trip time of the action's replies.", "$ref": "#/$defs/latency_stats" },
+        "response_time": { "description": "Response time from each request's scheduled send time, in a paced phase (rate_per_conn); count is 0 otherwise.", "$ref": "#/$defs/latency_stats" }
       }
     },
     "phase": {

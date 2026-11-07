@@ -192,6 +192,64 @@ pub(crate) fn scenario_slo_evaluation<'a>(
     combined
 }
 
+/// Adds the checks of the named actions' SLOs (`slo:` on a named Send
+/// action) to a scenario's evaluation. Each name's latency gates on its
+/// response time when it recorded one and on its RTT otherwise, like the
+/// run's; an action that sent nothing fails its checks.
+#[cfg(feature = "scenario")]
+pub(crate) fn with_action_slos(
+    mut evaluation: SloEvaluation,
+    slos: &[(String, SloThresholds)],
+    metrics: &AggregatedMetrics,
+) -> SloEvaluation {
+    for (name, slo) in slos {
+        let action = metrics.actions.iter().find(|action| action.name == *name);
+        let empty = LatencyStats::default();
+        let stats = action.map_or(&empty, crate::metrics::ActionMetrics::latency);
+        let basis = if stats.count > 0 && action.is_some_and(|a| a.response_time.count > 0) {
+            "response time"
+        } else {
+            "latency"
+        };
+        let targets = [
+            ("p50", slo.max_p50, stats.p50_duration()),
+            ("p95", slo.max_p95, stats.p95_duration()),
+            ("p99", slo.max_p99, stats.p99_duration()),
+            ("p99.9", slo.max_p999, stats.p999_duration()),
+        ];
+        for (label, target, actual) in targets {
+            let Some(target) = target else { continue };
+            let check = latency_check(
+                &format!("Action {name}: {basis} {label}"),
+                target,
+                actual,
+                stats.count,
+            );
+            evaluation.passed &= check.passed;
+            evaluation.checks.push(check);
+        }
+        if let Some(max_err) = slo.max_error_rate {
+            let check = match action.filter(|a| a.messages_sent > 0 || a.errors > 0) {
+                Some(action) => SloCheck {
+                    name: format!("Action {name}: error rate"),
+                    target: format!("<= {:.2}%", max_err * 100.0),
+                    actual: format!("{:.2}%", action.error_rate * 100.0),
+                    passed: action.error_rate <= max_err,
+                },
+                None => SloCheck {
+                    name: format!("Action {name}: error rate"),
+                    target: format!("<= {:.2}%", max_err * 100.0),
+                    actual: "no messages".into(),
+                    passed: false,
+                },
+            };
+            evaluation.passed &= check.passed;
+            evaluation.checks.push(check);
+        }
+    }
+    evaluation
+}
+
 /// Baseline comparison for regression detection.
 #[cfg(feature = "compare")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1454,6 +1512,17 @@ fn render_text_report(view: &ReportView<'_>) -> String {
     if let Some(hint) = coordinated_omission_hint(metrics) {
         out.push_str(&format!("Note: {hint}\n\n"));
     }
+    if !metrics.actions.is_empty() {
+        let mut table = Table::new();
+        table.load_preset(UTF8_FULL);
+        table.set_header(ACTION_COLUMNS.to_vec());
+        for row in action_rows(metrics) {
+            table.add_row(row.to_vec());
+        }
+        out.push_str("By action:\n");
+        out.push_str(&table.to_string());
+        out.push_str("\n\n");
+    }
 
     let windows = time_windows(metrics);
     if !windows.is_empty() {
@@ -1715,6 +1784,23 @@ fn render_markdown_report(view: &ReportView<'_>) -> String {
     if let Some(hint) = coordinated_omission_hint(metrics) {
         md.push_str(&format!("> **Note:** {hint}\n\n"));
     }
+    if !metrics.actions.is_empty() {
+        md.push_str("### By Action\n\n|");
+        for column in ACTION_COLUMNS {
+            md.push_str(&format!(" {column} |"));
+        }
+        md.push_str("\n| :--- |");
+        md.push_str(&" ---: |".repeat(ACTION_COLUMNS.len() - 1));
+        md.push('\n');
+        for row in action_rows(metrics) {
+            md.push('|');
+            for cell in row {
+                md.push_str(&format!(" {} |", cell.replace('|', "\\|")));
+            }
+            md.push('\n');
+        }
+        md.push('\n');
+    }
 
     let windows = time_windows(metrics);
     if !windows.is_empty() {
@@ -1815,6 +1901,47 @@ pub(crate) fn chaos_label(chaos: &ChaosSummary) -> String {
 /// In a distributed run the lag is the highest of the agents' and the
 /// limit the tightest, each named with its agent, and the agents whose
 /// generator was saturated, or whose limit was too low, are listed.
+/// The columns of the reports' table of named actions.
+pub(crate) const ACTION_COLUMNS: [&str; 8] = [
+    "Action",
+    "Sent",
+    "Errors",
+    "Error rate",
+    "p50",
+    "p95",
+    "p99",
+    "Max",
+];
+
+/// One row per named action: its counts and the percentiles of its
+/// response time when it recorded one, of its RTT otherwise.
+pub(crate) fn action_rows(metrics: &AggregatedMetrics) -> Vec<[String; 8]> {
+    metrics
+        .actions
+        .iter()
+        .map(|action| {
+            let latency = action.latency();
+            let percentile = |us: u64| {
+                if latency.count == 0 {
+                    "-".to_string()
+                } else {
+                    format_us(us)
+                }
+            };
+            [
+                action.name.clone(),
+                action.messages_sent.to_string(),
+                action.errors.to_string(),
+                format!("{:.2}%", action.error_rate * 100.0),
+                percentile(latency.p50_us),
+                percentile(latency.p95_us),
+                percentile(latency.p99_us),
+                percentile(latency.max_us),
+            ]
+        })
+        .collect()
+}
+
 /// The note reports add below the latency percentiles when an echo run
 /// without `--rate` spent at least 1% of its waiting time on replies far
 /// slower than its median and too few to reach p99: the percentiles then
@@ -1974,7 +2101,82 @@ mod tests {
             generator_lag: None,
             open_file_limit: None,
             slow_replies: None,
+            actions: Vec::new(),
         }
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn an_action_that_sent_nothing_fails_its_checks() {
+        let mut metrics = sample_metrics();
+        metrics.actions = vec![crate::metrics::ActionMetrics {
+            name: "idle".into(),
+            ..Default::default()
+        }];
+        let slo = SloThresholds {
+            max_p99: Some(Duration::from_millis(5)),
+            max_error_rate: Some(0.1),
+            ..SloThresholds::default()
+        };
+        let evaluation = with_action_slos(
+            evaluate_slos(&SloThresholds::default(), &metrics),
+            &[("idle".into(), slo)],
+            &metrics,
+        );
+        assert!(!evaluation.passed);
+        let actual: Vec<_> = evaluation
+            .checks
+            .iter()
+            .map(|c| (c.name.as_str(), c.actual.as_str(), c.passed))
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                ("Action idle: latency p99", "no RTT samples", false),
+                ("Action idle: error rate", "no messages", false)
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_list_named_actions() {
+        let mut metrics = sample_metrics();
+        let slo = evaluate_slos(&SloThresholds::default(), &metrics);
+        let render = |metrics: &AggregatedMetrics, format: &str| {
+            render_report(&report_config(format), metrics, &slo)
+        };
+        assert!(!render(&metrics, "text").contains("By action"));
+        assert!(!render(&metrics, "json").contains("\"actions\""));
+
+        metrics.actions = vec![crate::metrics::ActionMetrics {
+            name: "sub|scribe".into(),
+            messages_sent: 40,
+            errors: 2,
+            error_rate: 0.05,
+            message_rtt: latency(1_500),
+            ..Default::default()
+        }];
+        let text = render(&metrics, "text");
+        assert!(text.contains("By action:"), "{text}");
+        assert!(
+            text.contains("sub|scribe") && text.contains("5.00%"),
+            "{text}"
+        );
+        let markdown = render(&metrics, "markdown");
+        assert!(markdown.contains("### By Action"), "{markdown}");
+        assert!(
+            markdown.contains("| sub\\|scribe | 40 | 2 | 5.00% |"),
+            "{markdown}"
+        );
+        let html = render(&metrics, "html");
+        assert!(html.contains("<h2>By action</h2>"), "{html}");
+        let json: serde_json::Value = serde_json::from_str(&render(&metrics, "json")).unwrap();
+        assert_eq!(json["metrics"]["actions"][0]["name"], "sub|scribe");
+        // A saved report reads the actions back.
+        #[cfg(feature = "compare")]
+        let saved = parse_report_metrics(&render(&metrics, "json")).unwrap();
+        #[cfg(feature = "compare")]
+        assert_eq!(saved.actions, metrics.actions);
     }
 
     #[test]

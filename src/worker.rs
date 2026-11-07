@@ -162,6 +162,9 @@ impl WorkerSession {
     /// Opens one connection, recording its handshake latency or why it
     /// failed.
     async fn handshake(&mut self, client_req: &Request, connected_before: bool) -> Handshake {
+        // A failed handshake belongs to no action, even when the last
+        // session ended in the middle of one.
+        self.metrics.current_action = None;
         #[cfg_attr(not(feature = "auth"), allow(unused_mut))]
         let mut request = client_req.clone();
         // A refreshed token is read per attempt, so reconnects present the
@@ -744,7 +747,11 @@ impl WorkerSession {
                         count,
                         expect,
                         captures,
+                        name,
                     } => {
+                        // Sends, latencies and errors until the burst ends
+                        // also count for the action's name.
+                        self.metrics.current_action = *name;
                         for _ in 0..*count {
                             if self.cancel_token.is_cancelled() {
                                 let _ = sink.send(Message::Close(None)).await;
@@ -892,6 +899,7 @@ impl WorkerSession {
                                 return self.chaos_close(&mut sink, graceful).await;
                             }
                         }
+                        self.metrics.current_action = None;
 
                         if !self.apply_think_time().await {
                             let _ = sink.send(Message::Close(None)).await;

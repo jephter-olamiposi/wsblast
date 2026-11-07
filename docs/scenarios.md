@@ -105,7 +105,7 @@ Each action is a map with a `type` key. Type names are case-sensitive: `Send`, `
 
 | Type | Fields | Default | Behaviour |
 | :--- | :--- | :--- | :--- |
-| `Send` | `payload` (string, optional), `count` (integer, optional), `expect` (mapping, optional), `capture` (mapping, optional) | `count: 1` | Sends `count` messages back to back, each one paced by `rate_per_conn` when it is set. In echo mode each message waits for its reply and records an RTT sample, and a response time sample when `rate_per_conn` is set. After the whole burst the worker sleeps `think_time`. `count` must be greater than zero. In echo mode, `expect` checks every reply and `capture` sets variables from it; see [templates, section 3](templates.md#3-values-from-replies-and-reply-checks). |
+| `Send` | `payload` (string, optional), `count` (integer, optional), `expect` (mapping, optional), `capture` (mapping, optional), `name` (string, optional), `slo` (mapping, optional) | `count: 1` | Sends `count` messages back to back, each one paced by `rate_per_conn` when it is set. In echo mode each message waits for its reply and records an RTT sample, and a response time sample when `rate_per_conn` is set. After the whole burst the worker sleeps `think_time`. `count` must be greater than zero. In echo mode, `expect` checks every reply and `capture` sets variables from it; see [templates, section 3](templates.md#3-values-from-replies-and-reply-checks). `name` reports the action's messages on their own, and `slo` gates on them; see [section 7.3](#73-named-actions). |
 | `Wait` | `duration` (duration, required) | | Sleeps for `duration`. Must be greater than zero. |
 | `Ping` | `interval` (duration, required) | | Sends one WebSocket Ping frame (payload `hb`), then sleeps for `interval`. It is a single ping followed by a pause, not a repeating keepalive. Must be greater than zero. Pings are not counted as messages. |
 | `Close` | `code` (integer, optional), `reason` (string, optional) | `code: 1000`, `reason: ""` | Sends a Close frame with this code and reason, then ends the connection for the rest of the phase. The worker does not reconnect. |
@@ -316,6 +316,39 @@ The run exits with code 2 when any check fails: a phase's, the top-level `slo`'s
 
 With `--phase`, only the selected phase runs, so only its `slo` is checked, together with the top-level `slo` and the flags on that phase's metrics.
 
+### 7.3 Named actions
+
+A scenario's latency numbers mix every message it sends, so a slow login hides among a hundred fast subscribes. Give a `Send` action a `name` to report its messages on their own, and an `slo` to gate on them:
+
+```yaml
+version: "1.0"
+target: "ws://127.0.0.1:9001"
+metadata:
+  name: "Login, then subscribe"
+phases:
+  - name: "session"
+    connections: 200
+    duration: "2m"
+    actions:
+      - type: Send
+        name: login
+        payload: '{"op":"login"}'
+        slo: { max_p99: "200ms", max_error_rate: 0.001 }
+      - type: Send
+        name: subscribe
+        count: 20
+        payload: '{"op":"subscribe","id":{{seq}}}'
+        slo: { max_p99: "20ms" }
+      - type: Wait
+        duration: "5s"
+```
+
+- A name collects the messages of every action with that name, in every phase and on every connection. Actions in different phases, or two actions of one phase, can share a name.
+- A named action counts its messages, the errors while it runs (reply timeouts, failed checks, failed writes and connections that close while it waits for a reply) and the latency of its replies: response time when the phase is paced (`rate_per_conn`), RTT otherwise. The run's own numbers still include every message, named or not.
+- An action's `slo` takes `max_p50`, `max_p95`, `max_p99`, `max_p999` and `max_error_rate`, and each name may have one `slo`, on any of its actions. Its checks are listed after the phase checks as `Action login: latency p99` (`response time p99` when paced) and `Action login: error rate`, and a failed one makes the run exit with 2.
+- A named action that sends nothing fails its checks, with "no RTT samples" or "no messages". With `--phase`, only the names that the selected phase sends are checked.
+- Names are 1 to 64 characters, without control characters. Latency thresholds need echo mode, as a phase's do.
+
 ## 8. The report
 
 All phases are merged into one report: the main tables show the metrics of every executed phase together. The JSON report also lists every phase with its own metrics and SLO result under `phases`, and the HTML report shows a Phases section with one row per phase and the SLO checks of every phase that has its own.
@@ -340,6 +373,8 @@ The text and Markdown reports add a phase table when at least one phase sets its
 | `slo` | Every check of the run, as described in [section 7.2](#72-exit-code-and-check-names). |
 | `metrics.total_connections_attempted` | Same as `connections`. |
 | Latency histograms | One distribution over the samples of every phase. |
+
+When an action has a `name`, every format adds a By action table after the latency table, with each name's messages, errors, error rate and latency percentiles, and the JSON report lists the same values under `metrics.actions` ([section 7.3](#73-named-actions)).
 
 The counters in `phases` add up to those of `metrics`. `wsblast render` reads `phases` back, so a rendered report shows the phase table and the Phases section too.
 
@@ -372,6 +407,10 @@ The whole file is validated before any connection is opened, including phases th
 | `count: 0` | `phase 'warmup': send action count must be greater than zero` |
 | Zero `Wait` or `Ping` duration | `phase 'warmup': wait action duration must be greater than zero` |
 | Forbidden or reserved close code | `close code 2000 cannot be sent; use 1000-1003, 1007-1014 or 3000-4999` |
+| `slo` on a `Send` without `name` | `phase 'session': slo on an action needs a name: the thresholds are checked on the named action's messages` |
+| `min_throughput` or `max_generator_lag` in an action `slo` | `phase 'session': action 'login': slo: an action SLO takes max_p50, max_p95, max_p99, max_p999 and max_error_rate; min_throughput and max_generator_lag apply to a phase or the scenario` |
+| A second `slo` for one name | `phase 'session': action 'login': slo: action 'login' already has an slo; give it one, on any of its actions` |
+| An empty, long or control-character action name | `phase 'session': action name '' must be 1 to 64 characters, without control characters` |
 | Unknown `slo` key | ``load.yaml: phases[0].slo: unknown field `max_p99_ms`, expected one of `max_p50`, `max_p95`, `max_p99`, `max_p999`, `max_error_rate`, `min_throughput`, `max_generator_lag` at line 9 column 7`` |
 | Unparsable SLO duration | `phase 'spike': slo: max_p99: Configuration error: Invalid duration 'fast': ...` (`slo: max_p99: ...` at the top level) |
 | `max_error_rate` outside 0 to 1 | `phase 'spike': slo: Configuration error: Invalid threshold specification: max_error_rate must be between 0.0 and 1.0, received 1.5` |

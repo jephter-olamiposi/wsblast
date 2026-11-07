@@ -461,6 +461,22 @@ fn render_latency_table(html: &mut String, view: &ReportView<'_>) {
         let _ = writeln!(html, "<p class=\"note\">{}</p>", escape(&hint));
     }
     html.push_str("</section>\n");
+    if !view.metrics.actions.is_empty() {
+        html.push_str("<section>\n<h2>By action</h2>\n<div class=\"scroll\"><table>\n<thead><tr>");
+        for (i, column) in crate::report::ACTION_COLUMNS.iter().enumerate() {
+            let class = if i == 0 { "" } else { " class=\"num\"" };
+            let _ = write!(html, "<th scope=\"col\"{class}>{}</th>", escape(column));
+        }
+        html.push_str("</tr></thead>\n<tbody>\n");
+        for row in crate::report::action_rows(view.metrics) {
+            let _ = write!(html, "<tr><th scope=\"row\">{}</th>", escape(&row[0]));
+            for cell in &row[1..] {
+                let _ = write!(html, "<td class=\"num\">{}</td>", escape(cell));
+            }
+            html.push_str("</tr>\n");
+        }
+        html.push_str("</tbody></table></div>\n</section>\n");
+    }
 }
 
 fn render_errors(html: &mut String, view: &ReportView<'_>) {

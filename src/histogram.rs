@@ -106,6 +106,17 @@ pub(crate) struct LatencyRecorder {
     handshake: AtomicHistogram,
     rtt: AtomicHistogram,
     response: AtomicHistogram,
+    /// RTT and response time of each named scenario action, by the
+    /// position of its name in the phase's action names.
+    actions: Box<[ActionLatency]>,
+}
+
+/// The distributions of one action name. Its shards are allocated when a
+/// worker first records into them, like the run's.
+struct ActionLatency {
+    name: String,
+    rtt: AtomicHistogram,
+    response: AtomicHistogram,
 }
 
 impl fmt::Debug for LatencyRecorder {
@@ -129,6 +140,55 @@ impl LatencyRecorder {
             handshake: AtomicHistogram::new(shards),
             rtt: AtomicHistogram::new(shards),
             response: AtomicHistogram::new(shards),
+            actions: Box::default(),
+        }
+    }
+
+    /// Adds a pair of distributions for each of `names`, the named actions
+    /// of a scenario phase.
+    #[cfg(any(feature = "scenario", all(test, feature = "distributed")))]
+    pub(crate) fn with_actions(mut self, names: &[String]) -> Self {
+        let shards = self.rtt.shards.len();
+        self.actions = names
+            .iter()
+            .map(|name| ActionLatency {
+                name: name.clone(),
+                rtt: AtomicHistogram::new(shards),
+                response: AtomicHistogram::new(shards),
+            })
+            .collect();
+        self
+    }
+
+    /// The names of the actions, by position.
+    pub(crate) fn action_names(&self) -> impl Iterator<Item = &str> {
+        self.actions.iter().map(|action| action.name.as_str())
+    }
+
+    #[inline]
+    pub(crate) fn record_action_rtt(&self, action: usize, shard: usize, micros: u64) {
+        if let Some(action) = self.actions.get(action) {
+            action.rtt.record(shard, micros);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn record_action_response(&self, action: usize, shard: usize, micros: u64) {
+        if let Some(action) = self.actions.get(action) {
+            action.response.record(shard, micros);
+        }
+    }
+
+    /// Adds the distributions of action `index` to `rtt` and `response`.
+    pub(crate) fn add_action_to(
+        &self,
+        index: usize,
+        rtt: &mut Histogram<u64>,
+        response: &mut Histogram<u64>,
+    ) {
+        if let Some(action) = self.actions.get(index) {
+            action.rtt.add_to(rtt);
+            action.response.add_to(response);
         }
     }
 

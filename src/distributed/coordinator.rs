@@ -94,6 +94,8 @@ struct ScenarioPlan {
     name: String,
     /// The scenario's top-level `slo:` thresholds.
     slo: crate::config::SloThresholds,
+    /// The thresholds of the named actions, checked over the whole run.
+    action_slos: Vec<(String, crate::config::SloThresholds)>,
     phases: Vec<crate::config::ScenarioPhase>,
     targets: Vec<Url>,
 }
@@ -386,12 +388,22 @@ impl Coordinator {
         let agents = parse_agents(agents)?;
         scenario.validate()?;
         scenario.validate_slo_mode(base_config.mode, phase)?;
+        let mut base_config = base_config;
+        if base_config.data.is_none()
+            && let Some(path) = &scenario.data
+        {
+            base_config.data = Some(std::sync::Arc::new(
+                crate::data::DataSet::load(path).map_err(ConfigError::DataFile)?,
+            ));
+        }
         let plan_ = ScenarioPlan {
             name: scenario.metadata.name.clone(),
             slo: scenario.slo()?,
+            action_slos: scenario.action_slos(phase)?,
             targets: scenario.resolve_phase_targets(target_override, phase)?,
             phases: scenario.compile(phase)?,
         };
+        crate::config::validate_phases(&plan_.phases, &base_config)?;
         for (phase, target) in plan_.phases.iter().zip(&plan_.targets) {
             let mut config = crate::runner::phase_config(base_config.clone(), phase);
             config.target_url = target.clone();
@@ -1424,6 +1436,7 @@ impl Coordinator {
                 .iter()
                 .map(|phase| (phase.name.as_str(), &phase.slo)),
         );
+        let slo = crate::report::with_action_slos(slo, &scenario.action_slos, &metrics);
         Ok(DistributedScenarioOutcome {
             scenario: crate::ScenarioOutcome {
                 metrics,

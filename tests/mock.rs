@@ -952,3 +952,153 @@ fn scenario_checks_are_validated() {
         "{stream_error}"
     );
 }
+
+/// A mock whose login takes 20 ms, and whose subscription answers at once.
+#[cfg(feature = "scenario")]
+fn slow_login_rules() -> std::path::PathBuf {
+    rules_file(
+        "slow-login",
+        r#"
+version: "1.0"
+rules:
+  - match: { json: /op, equals: login }
+    reply: ['{"status":"ok","session":{{json:/user}}}']
+    delay: 20ms
+  - match: { json: /op, equals: sub }
+    reply: ['{"status":"ok","session":{{json:/session}}}']
+"#,
+    )
+}
+
+#[cfg(feature = "scenario")]
+async fn run_scenario_outcome(yaml: &str, url: &str) -> wsblast::ScenarioOutcome {
+    let scenario = wsblast::ScenarioConfig::from_yaml(yaml).unwrap();
+    let base = load(url).reconnect(false).build().unwrap();
+    wsblast::ScenarioExecutor::new(&scenario, base, None, Some(url))
+        .unwrap()
+        .with_signal_handling(false)
+        .run()
+        .await
+        .unwrap()
+}
+
+/// Named actions are reported apart, across the phases that share a name:
+/// the slow login does not hide in the fast subscriptions' percentiles, a
+/// failed check counts for its own action only, and an action SLO gates
+/// on its own messages.
+#[cfg(feature = "scenario")]
+#[tokio::test]
+async fn named_actions_are_reported_and_gated_apart() {
+    let mock = Mock::start(MockConfig::builder().rules(slow_login_rules())).await;
+    let outcome = run_scenario_outcome(
+        r#"
+version: "1.0"
+metadata: { name: named }
+phases:
+  - name: first
+    connections: 2
+    duration: 3s
+    actions:
+      - type: Send
+        name: login
+        payload: '{"op":"login","user":"u{{worker_id}}"}'
+        slo: { max_p50: 5ms }
+      - type: Send
+        name: subscribe
+        count: 3
+        payload: '{"op":"sub","session":"s"}'
+        expect: { json: /missing }
+        slo: { max_p99: 15ms }
+      - type: Close
+  - name: second
+    connections: 1
+    duration: 3s
+    actions:
+      - type: Send
+        name: subscribe
+        count: 2
+        payload: '{"op":"sub","session":"s"}'
+      - type: Close
+"#,
+        &mock.url,
+    )
+    .await;
+    mock.stop().await;
+    let actions = &outcome.metrics.actions;
+    let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["login", "subscribe"]);
+    let (login, subscribe) = (&actions[0], &actions[1]);
+    assert_eq!(login.messages_sent, 2, "{login:?}");
+    assert_eq!(login.errors, 0);
+    assert!(login.message_rtt.min_us >= 20_000, "{login:?}");
+    // 2 x 3 in the first phase and 2 in the second, merged by name; only
+    // the first phase's 6 had a failing check.
+    assert_eq!(subscribe.messages_sent, 8, "{subscribe:?}");
+    assert_eq!(subscribe.message_rtt.count, 8);
+    assert_eq!(subscribe.errors, 6, "{subscribe:?}");
+    assert!((subscribe.error_rate - 0.75).abs() < 1e-9);
+    assert!(subscribe.message_rtt.p99_us < 15_000, "{subscribe:?}");
+
+    let check = |name: &str| {
+        outcome
+            .slo
+            .checks
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no check {name}: {:?}", outcome.slo.checks))
+    };
+    assert!(!check("Action login: latency p50").passed);
+    assert!(check("Action subscribe: latency p99").passed);
+    assert!(!outcome.slo.passed);
+}
+
+#[cfg(feature = "scenario")]
+#[test]
+fn action_names_and_slos_are_validated() {
+    let scenario = |actions: &str| {
+        format!(
+            "version: \"1.0\"\nmetadata: {{ name: v }}\nphases:\n  - name: p\n    connections: 1\n    duration: 1s\n    actions:\n{actions}"
+        )
+    };
+    let error = |actions: &str| {
+        wsblast::ScenarioConfig::from_yaml(&scenario(actions))
+            .and_then(|scenario| {
+                wsblast::ScenarioExecutor::new(
+                    &scenario,
+                    LoadTestConfig::builder("ws://127.0.0.1:9001")
+                        .build()
+                        .unwrap(),
+                    None,
+                    None,
+                )
+                .map(|_| ())
+            })
+            .unwrap_err()
+            .to_string()
+    };
+    let long = "x".repeat(65);
+    let cases = [
+        (
+            "      - {type: Send, slo: {max_p99: 5ms}}\n".to_string(),
+            "slo on an action needs a name",
+        ),
+        (
+            "      - {type: Send, name: a, slo: {min_throughput: 5}}\n".to_string(),
+            "an action SLO takes max_p50",
+        ),
+        (
+            "      - {type: Send, name: a, slo: {max_p99: 5ms}}\n      - {type: Send, name: a, slo: {max_p50: 1ms}}\n"
+                .to_string(),
+            "action 'a' already has an slo",
+        ),
+        (format!("      - {{type: Send, name: {long}}}\n"), "must be 1 to 64 characters"),
+        (
+            "      - {type: Send, name: a, slo: {max_p99: soon}}\n".to_string(),
+            "action 'a': slo",
+        ),
+    ];
+    for (actions, expected) in cases {
+        let error = error(&actions);
+        assert!(error.contains(expected), "{actions}: {error}");
+    }
+}

@@ -1764,6 +1764,13 @@ pub(crate) enum ActionConfig {
         /// Variables set from the reply: name to JSON pointer.
         #[serde(default)]
         capture: Option<std::collections::BTreeMap<String, String>>,
+        /// The name the action's messages are reported under.
+        #[serde(default)]
+        name: Option<String>,
+        /// Thresholds checked on the named action's messages over the whole
+        /// scenario.
+        #[serde(default)]
+        slo: Option<Box<SloConfig>>,
     },
     Wait {
         duration: String,
@@ -1836,6 +1843,8 @@ pub(crate) struct ScenarioPhase {
     /// The variables the phase's actions capture from replies, in order;
     /// templates read them as `{{NAME}}`.
     pub(crate) vars: Vec<String>,
+    /// The names of the phase's named actions, in order, each once.
+    pub(crate) action_names: Vec<String>,
     /// Thresholds checked on this phase's own metrics.
     pub(crate) slo: SloThresholds,
     /// The phase's staged load profile; empty for a constant connection
@@ -1859,6 +1868,8 @@ pub(crate) enum ScenarioAction {
         expect: Option<crate::check::Check>,
         /// Variables every reply sets.
         captures: Vec<crate::check::Capture>,
+        /// The position of the action's name in the phase's action names.
+        name: Option<usize>,
     },
     Wait(Duration),
     Ping(Duration),
@@ -2003,6 +2014,58 @@ impl ScenarioConfig {
         compile_slo(self.slo.as_ref(), "slo")
     }
 
+    /// The thresholds of the named actions: `slo:` on a Send action with a
+    /// `name`, checked on that name's messages over the whole scenario. An
+    /// action SLO gates on latency and error rate only, and each name may
+    /// have one. Every phase's actions are validated, and the result keeps
+    /// the names that a phase `selected` runs sends, so `--phase` does not
+    /// fail the checks of an action it never runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidScenario`] for an unparsable threshold,
+    /// a throughput or generator-lag threshold, or a second `slo:` for the
+    /// same name.
+    pub(crate) fn action_slos(
+        &self,
+        selected: Option<&str>,
+    ) -> Result<Vec<(String, SloThresholds)>> {
+        let mut slos: Vec<(String, SloThresholds)> = Vec::new();
+        for phase in &self.phases {
+            for action in &phase.actions {
+                let ActionConfig::Send {
+                    name: Some(name),
+                    slo: Some(slo),
+                    ..
+                } = action
+                else {
+                    continue;
+                };
+                let context = format!("phase '{}': action '{name}': slo", phase.name);
+                if slo.min_throughput.is_some() || slo.max_generator_lag.is_some() {
+                    return Err(ConfigError::InvalidScenario(format!(
+                        "{context}: an action SLO takes max_p50, max_p95, max_p99, max_p999 and max_error_rate; min_throughput and max_generator_lag apply to a phase or the scenario"
+                    ))
+                    .into());
+                }
+                if slos.iter().any(|(other, _)| other == name) {
+                    return Err(ConfigError::InvalidScenario(format!(
+                        "{context}: action '{name}' already has an slo; give it one, on any of its actions"
+                    ))
+                    .into());
+                }
+                slos.push((name.clone(), slo.compile(&context)?));
+            }
+        }
+        let running = self.compile(selected)?;
+        slos.retain(|(name, _)| {
+            running
+                .iter()
+                .any(|phase| phase.action_names.contains(name))
+        });
+        Ok(slos)
+    }
+
     /// Rejects latency SLOs, at the top level or on a phase that `selected`
     /// runs, in a mode that does not measure round-trip time.
     ///
@@ -2012,6 +2075,14 @@ impl ScenarioConfig {
     /// mapping with a latency threshold outside echo mode.
     pub(crate) fn validate_slo_mode(&self, mode: TestMode, selected: Option<&str>) -> Result<()> {
         validate_latency_mode(&self.slo()?, mode, "slo: ", SLO_LATENCY_KEYS)?;
+        for (name, slo) in self.action_slos(selected)? {
+            validate_latency_mode(
+                &slo,
+                mode,
+                &format!("action '{name}': slo: "),
+                SLO_LATENCY_KEYS,
+            )?;
+        }
         for phase in self.compile(selected)? {
             validate_latency_mode(
                 &phase.slo,
@@ -2189,10 +2260,11 @@ impl ScenarioPhase {
         };
 
         let vars = phase_vars(&phase.name, &phase.actions)?;
+        let action_names = phase_action_names(&phase.name, &phase.actions)?;
         let actions = phase
             .actions
             .iter()
-            .map(|action| ScenarioAction::compile(&phase.name, action, &vars))
+            .map(|action| ScenarioAction::compile(&phase.name, action, &vars, &action_names))
             .collect::<Result<Vec<_>>>()?;
 
         Ok(Self {
@@ -2209,6 +2281,7 @@ impl ScenarioPhase {
             think_time,
             actions,
             vars,
+            action_names,
             slo: compile_slo(phase.slo.as_ref(), &format!("phase '{}': slo", phase.name))?,
             stages,
             #[cfg(feature = "chaos")]
@@ -2219,6 +2292,49 @@ impl ScenarioPhase {
                 .transpose()?,
         })
     }
+}
+
+/// The longest action name.
+#[cfg(feature = "scenario")]
+const MAX_ACTION_NAME: usize = 64;
+
+/// The names of a phase's Send actions, in the order they appear, each
+/// once. Several actions may share a name; their messages are reported
+/// together.
+#[cfg(feature = "scenario")]
+fn phase_action_names(phase_name: &str, actions: &[ActionConfig]) -> Result<Vec<String>> {
+    let mut names: Vec<String> = Vec::new();
+    for action in actions {
+        let ActionConfig::Send { name, slo, .. } = action else {
+            continue;
+        };
+        let Some(name) = name else {
+            if slo.is_some() {
+                return Err(invalid_phase(
+                    phase_name,
+                    "slo on an action needs a name: the thresholds are checked on the named action's messages",
+                )
+                .into());
+            }
+            continue;
+        };
+        if name.trim().is_empty()
+            || name.len() > MAX_ACTION_NAME
+            || name.chars().any(char::is_control)
+        {
+            return Err(invalid_phase(
+                phase_name,
+                &format!(
+                    "action name '{name}' must be 1 to {MAX_ACTION_NAME} characters, without control characters"
+                ),
+            )
+            .into());
+        }
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    Ok(names)
 }
 
 /// The variables a phase's actions capture, in the order they appear,
@@ -2256,6 +2372,7 @@ impl ScenarioAction {
         phase_name: &str,
         action: &ActionConfig,
         vars: &[String],
+        action_names: &[String],
     ) -> Result<Self> {
         match action {
             ActionConfig::Send {
@@ -2263,6 +2380,8 @@ impl ScenarioAction {
                 count,
                 expect,
                 capture,
+                name,
+                slo: _,
             } => {
                 let count = count.unwrap_or(1);
                 if count == 0 {
@@ -2295,6 +2414,9 @@ impl ScenarioAction {
                         .map(|expect| expect.compile(phase_name))
                         .transpose()?,
                     captures,
+                    name: name
+                        .as_ref()
+                        .and_then(|name| action_names.iter().position(|n| n == name)),
                 })
             }
             ActionConfig::Wait { duration } => {
@@ -3591,6 +3713,8 @@ mod tests {
                 count: Some(3),
                 expect: None,
                 capture: None,
+                name: None,
+                slo: None,
             },
             ActionConfig::Wait {
                 duration: "10ms".to_string(),
@@ -3663,6 +3787,8 @@ mod tests {
             count: Some(0),
             expect: None,
             capture: None,
+            name: None,
+            slo: None,
         }];
         let error = scenario(vec![warmup]).validate().unwrap_err();
         assert!(
@@ -3998,6 +4124,8 @@ phases:
             count: None,
             expect: None,
             capture: None,
+            name: None,
+            slo: None,
         }];
         assert_unsupported_option(
             LoadTestConfig::from_scenario_config(
@@ -4105,6 +4233,38 @@ phases:
             let message = error.to_string();
             assert!(message.contains(expected), "{message}");
         }
+    }
+
+    #[cfg(feature = "scenario")]
+    #[test]
+    fn action_slos_follow_the_phases_that_run() {
+        use clap::Parser;
+
+        let yaml = "version: \"1.0\"\nmetadata: { name: a }\ntarget: ws://127.0.0.1:9001\n\
+            phases:\n\
+            \x20 - { name: login, connections: 1, duration: 1s, actions: [{type: Send, name: login, slo: {max_p99: 5ms}}] }\n\
+            \x20 - { name: browse, connections: 1, duration: 1s, actions: [{type: Send, name: page, slo: {max_error_rate: 0.1}}] }\n";
+        let scenario = ScenarioConfig::from_yaml(yaml).unwrap();
+        let names = |selected| {
+            scenario
+                .action_slos(selected)
+                .unwrap()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(None), ["login", "page"]);
+        assert_eq!(names(Some("browse")), ["page"]);
+
+        // A latency SLO of an action that runs needs echo mode.
+        let stream = Cli::parse_from(["wsblast", "--scenario", "s.yaml", "--mode", "stream"]);
+        let message = LoadTestConfig::from_scenario_config(&scenario, &stream)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("action 'login': slo: latency SLOs"),
+            "{message}"
+        );
     }
 
     #[cfg(feature = "scenario")]

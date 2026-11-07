@@ -191,9 +191,24 @@ pub struct WorkerMetrics {
     pub(crate) interval_uses_response: bool,
     /// Injected faults, when the run injects any (`--chaos-*`).
     pub(crate) chaos: Option<ChaosSummary>,
+    /// Sends and errors of each named scenario action, by the position of
+    /// its name in the recorder's action names.
+    pub(crate) actions: Vec<ActionCounts>,
+    /// The named action whose message the worker is sending, so its sends,
+    /// latencies and errors also count for the action.
+    pub(crate) current_action: Option<usize>,
     pub(crate) live: Arc<LiveMetrics>,
     /// The live counter shard this worker updates.
     shard: usize,
+}
+
+/// What one worker counted for a named action.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ActionCounts {
+    pub(crate) sent: u64,
+    pub(crate) errors: u64,
+    /// Errors in `errors` that ended a message already counted as sent.
+    pub(crate) sent_message_errors: u64,
 }
 
 fn latency_histogram() -> WsResult<Histogram<u64>> {
@@ -232,9 +247,21 @@ impl WorkerMetrics {
             interval: None,
             interval_uses_response: false,
             chaos: None,
+            actions: Vec::new(),
+            current_action: None,
             shard: live.assign_shard(),
             live,
         }
+    }
+
+    /// The counters of the current action, if there is one.
+    #[inline]
+    fn action_counts(&mut self) -> Option<&mut ActionCounts> {
+        let index = self.current_action?;
+        if self.actions.len() <= index {
+            self.actions.resize(index + 1, ActionCounts::default());
+        }
+        self.actions.get_mut(index)
     }
 
     /// The live counter shard this worker updates.
@@ -302,6 +329,9 @@ impl WorkerMetrics {
     pub(crate) fn record_message_sent(&mut self, bytes: usize) {
         self.messages_sent += 1;
         self.bytes_sent += bytes as u64;
+        if let Some(action) = self.action_counts() {
+            action.sent += 1;
+        }
         self.counters()
             .messages_sent
             .fetch_add(1, Ordering::Relaxed);
@@ -318,6 +348,9 @@ impl WorkerMetrics {
         if let Some(rtt_dur) = rtt {
             let micros = rtt_dur.as_micros().clamp(1, 60_000_000) as u64;
             self.latency.record_rtt(self.shard, micros);
+            if let Some(action) = self.current_action {
+                self.latency.record_action_rtt(action, self.shard, micros);
+            }
             if !self.interval_uses_response
                 && let Some(interval) = self.interval.as_mut()
             {
@@ -338,6 +371,10 @@ impl WorkerMetrics {
     pub(crate) fn record_response_time(&mut self, duration: Duration) {
         let micros = duration.as_micros().clamp(1, 60_000_000) as u64;
         self.latency.record_response(self.shard, micros);
+        if let Some(action) = self.current_action {
+            self.latency
+                .record_action_response(action, self.shard, micros);
+        }
         if let Some(interval) = self.interval.as_mut() {
             interval.record(micros);
         }
@@ -401,6 +438,12 @@ impl WorkerMetrics {
         *self.errors.entry(err).or_insert(0) += 1;
         if scope == ErrorScope::SentMessage {
             self.sent_message_errors += 1;
+        }
+        if let Some(action) = self.action_counts() {
+            action.errors += 1;
+            if scope == ErrorScope::SentMessage {
+                action.sent_message_errors += 1;
+            }
         }
         self.counters().total_errors.fetch_add(1, Ordering::Relaxed);
     }
@@ -599,6 +642,61 @@ pub struct AggregatedMetrics {
     /// added. See METHODOLOGY.md, section 4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slow_replies: Option<SlowReplies>,
+    /// Each named scenario action (`name:` on a Send action), merged over
+    /// every phase that has it, in name order; empty without names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ActionMetrics>,
+}
+
+/// The messages of one named scenario action (`name:` on a Send action),
+/// over every phase and connection that sent them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ActionMetrics {
+    /// The action's name.
+    pub name: String,
+    /// Messages the action sent.
+    pub messages_sent: u64,
+    /// Errors while the action sent or awaited a reply, including failed
+    /// reply checks.
+    pub errors: u64,
+    /// Failed operations over attempted operations, as for the whole run.
+    pub error_rate: f64,
+    /// Round-trip time of its replies; empty outside echo mode.
+    pub message_rtt: LatencyStats,
+    /// Response time from the send schedule, for paced echo; empty
+    /// otherwise.
+    #[serde(default)]
+    pub response_time: LatencyStats,
+}
+
+impl ActionMetrics {
+    fn of(name: &str, totals: &ActionTotals) -> Self {
+        let counts = &totals.counts;
+        let attempted = counts.sent + counts.errors.saturating_sub(counts.sent_message_errors);
+        Self {
+            name: name.to_string(),
+            messages_sent: counts.sent,
+            errors: counts.errors,
+            error_rate: if attempted > 0 {
+                (counts.errors as f64 / attempted as f64).min(1.0)
+            } else {
+                0.0
+            },
+            message_rtt: LatencyStats::from_histogram(&totals.rtt),
+            response_time: LatencyStats::from_histogram(&totals.response),
+        }
+    }
+
+    /// The distribution SLOs and reports use: response time when the
+    /// action recorded it, RTT otherwise.
+    pub fn latency(&self) -> &LatencyStats {
+        if self.response_time.count > 0 {
+            &self.response_time
+        } else {
+            &self.message_rtt
+        }
+    }
 }
 
 /// Replies that took far longer than the run's median RTT, in an echo run
@@ -892,6 +990,32 @@ pub(crate) struct MetricsTotals {
     /// The latency recorders already added, so the recorder that every
     /// worker of a run shares is added once.
     pub(crate) absorbed: Vec<Arc<LatencyRecorder>>,
+    /// Named scenario actions, by name, across every phase added.
+    pub(crate) actions: std::collections::BTreeMap<String, ActionTotals>,
+}
+
+/// The totals of one action name.
+#[derive(Debug, Clone)]
+pub(crate) struct ActionTotals {
+    pub(crate) rtt: Histogram<u64>,
+    pub(crate) response: Histogram<u64>,
+    pub(crate) counts: ActionCounts,
+}
+
+impl ActionTotals {
+    pub(crate) fn new() -> WsResult<Self> {
+        Ok(Self {
+            rtt: latency_histogram()?,
+            response: latency_histogram()?,
+            counts: ActionCounts::default(),
+        })
+    }
+
+    fn add_counts(&mut self, counts: &ActionCounts) {
+        self.counts.sent += counts.sent;
+        self.counts.errors += counts.errors;
+        self.counts.sent_message_errors += counts.sent_message_errors;
+    }
 }
 
 impl MetricsTotals {
@@ -912,7 +1036,19 @@ impl MetricsTotals {
             errors: HashMap::new(),
             chaos: None,
             absorbed: Vec::new(),
+            actions: std::collections::BTreeMap::new(),
         })
+    }
+
+    /// The totals of action `name`, created when first needed. `None` only
+    /// if the histograms cannot be created, which their fixed bounds rule
+    /// out.
+    fn action(&mut self, name: &str) -> Option<&mut ActionTotals> {
+        if !self.actions.contains_key(name) {
+            self.actions
+                .insert(name.to_string(), ActionTotals::new().ok()?);
+        }
+        self.actions.get_mut(name)
     }
 
     /// The empty histogram the totals' latency histograms are built from, for
@@ -927,7 +1063,18 @@ impl MetricsTotals {
         if !self.absorbed.iter().any(|r| Arc::ptr_eq(r, &w.latency)) {
             w.latency
                 .add_to(&mut self.handshake, &mut self.rtt, &mut self.response);
+            for (index, name) in w.latency.action_names().enumerate() {
+                if let Some(action) = self.action(name) {
+                    w.latency
+                        .add_action_to(index, &mut action.rtt, &mut action.response);
+                }
+            }
             self.absorbed.push(Arc::clone(&w.latency));
+        }
+        for (index, name) in w.latency.action_names().enumerate() {
+            if let (Some(counts), Some(action)) = (w.actions.get(index), self.action(name)) {
+                action.add_counts(counts);
+            }
         }
         self.messages_sent += w.messages_sent;
         self.messages_recv += w.messages_recv;
@@ -968,6 +1115,14 @@ impl MetricsTotals {
             *self.errors.entry(*category).or_insert(0) += count;
         }
         add_chaos(&mut self.chaos, other.chaos.as_ref());
+        for (name, theirs) in &other.actions {
+            let ours = self
+                .action(name)
+                .ok_or_else(|| WsBlastError::Metrics("invalid latency histogram bounds".into()))?;
+            ours.rtt.add(&theirs.rtt).map_err(merge_error)?;
+            ours.response.add(&theirs.response).map_err(merge_error)?;
+            ours.add_counts(&theirs.counts);
+        }
         Ok(())
     }
 
@@ -1033,6 +1188,11 @@ impl MetricsTotals {
             } else {
                 None
             },
+            actions: self
+                .actions
+                .iter()
+                .map(|(name, totals)| ActionMetrics::of(name, totals))
+                .collect(),
             error_breakdown,
             capture: None,
             distributed: None,
