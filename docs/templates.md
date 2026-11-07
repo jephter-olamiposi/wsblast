@@ -1,7 +1,8 @@
 # Templates and test data
 
-Payloads and handshake header values can hold placeholders that wsblast fills
-in for every frame or every connection. With a data file, every connection
+Payloads, handshake header values and the Socket.IO `--sio-auth` object
+can hold placeholders that wsblast fills in for every frame or every
+connection. With a data file, every connection
 can send its own user id, token or channel, and in a scenario it can keep
 values from replies, such as a session id, and check what every reply holds.
 
@@ -18,7 +19,8 @@ values from replies, such as a session id, and check what every reply holds.
 Anything else in double braces, such as `{{name}}`, is not a placeholder and
 is sent as written, so payloads that carry their own template syntax are not
 changed. `{{timestamp}}` is never used for measurement: every latency comes
-from a monotonic clock (METHODOLOGY.md, section 4).
+from a monotonic clock (METHODOLOGY.md, section 4). `--sio-auth` takes the
+same placeholders as `-H` values ([docs/socketio.md, section 1.1](socketio.md#11-a-credential-per-connection)).
 
 A payload is parsed once, before the run. Each frame then copies the text
 between the placeholders and formats their values, so a template costs

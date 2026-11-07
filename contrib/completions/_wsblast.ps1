@@ -81,7 +81,7 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--graphql-ws-extensions', '--graphql-ws-extensions', [CompletionResultType]::ParameterName, 'GraphQL WS extensions (JSON)')
             [CompletionResult]::new('--sio-event', '--sio-event', [CompletionResultType]::ParameterName, 'Socket.IO event each message is emitted as (--mode socketio)')
             [CompletionResult]::new('--sio-namespace', '--sio-namespace', [CompletionResultType]::ParameterName, 'Socket.IO namespace to connect to (--mode socketio), ''/'' by default')
-            [CompletionResult]::new('--sio-auth', '--sio-auth', [CompletionResultType]::ParameterName, 'JSON object sent with the Socket.IO namespace connect, as a client''s `auth` option (--mode socketio)')
+            [CompletionResult]::new('--sio-auth', '--sio-auth', [CompletionResultType]::ParameterName, 'JSON object sent with the Socket.IO namespace connect, as a client''s `auth` option (--mode socketio); a template filled in per connection')
             [CompletionResult]::new('--sio-version', '--sio-version', [CompletionResultType]::ParameterName, 'Socket.IO server version (--mode socketio): 2 for Socket.IO 2 servers (Engine.IO 3), 3 or 4 for later ones [default: 4]')
             [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output report format')
             [CompletionResult]::new('--compare', '--compare', [CompletionResultType]::ParameterName, 'Compare two JSON reports for regression detection (--format text, json, markdown or html)')

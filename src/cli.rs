@@ -371,7 +371,7 @@ pub(crate) struct Cli {
     pub sio_namespace: Option<String>,
 
     /// JSON object sent with the Socket.IO namespace connect, as a client's
-    /// `auth` option (--mode socketio)
+    /// `auth` option (--mode socketio); a template filled in per connection
     #[cfg(feature = "socketio")]
     #[arg(long = "sio-auth", value_name = "JSON")]
     pub sio_auth: Option<String>,

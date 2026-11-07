@@ -286,12 +286,13 @@ impl WorkerSession {
         let Some(config) = self.config.socketio.clone() else {
             return SessionEnd::Lost;
         };
+        let auth = config.auth_for(self.template_values(0));
         let opened = tokio::select! {
             biased;
             _ = self.cancel_token.cancelled() => None,
             opened = tokio::time::timeout(
                 self.config.message_timeout,
-                crate::socketio::open(&mut ws_stream, &config),
+                crate::socketio::open(&mut ws_stream, &config, auth.as_deref()),
             ) => Some(opened.unwrap_or(Err(ErrorCategory::Timeout))),
         };
         let ping_every = match opened {
@@ -340,9 +341,9 @@ impl WorkerSession {
         #[cfg(feature = "socketio")]
         if let Some(sio) = &self.config.socketio
             && sio.engine == crate::socketio::EngineIo::V3
-            && let Some(auth) = &sio.auth
+            && let Some(auth) = sio.auth_for(self.template_values(0))
         {
-            let url = crate::socketio::auth_query(&self.config.target_url, auth);
+            let url = crate::socketio::auth_query(&self.config.target_url, &auth);
             return self.finish_handshake_request(url.as_str());
         }
         self.finish_handshake_request(self.config.target_url.as_str())

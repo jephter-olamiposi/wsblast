@@ -78,7 +78,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --graphql-ws-extensions 'GraphQL WS extensions (JSON)'
             cand --sio-event 'Socket.IO event each message is emitted as (--mode socketio)'
             cand --sio-namespace 'Socket.IO namespace to connect to (--mode socketio), ''/'' by default'
-            cand --sio-auth 'JSON object sent with the Socket.IO namespace connect, as a client''s `auth` option (--mode socketio)'
+            cand --sio-auth 'JSON object sent with the Socket.IO namespace connect, as a client''s `auth` option (--mode socketio); a template filled in per connection'
             cand --sio-version 'Socket.IO server version (--mode socketio): 2 for Socket.IO 2 servers (Engine.IO 3), 3 or 4 for later ones [default: 4]'
             cand --format 'Output report format'
             cand --compare 'Compare two JSON reports for regression detection (--format text, json, markdown or html)'

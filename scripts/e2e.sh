@@ -302,6 +302,10 @@ for (const ns of ["/", "/files"]) {
     socket.emit("hello", Buffer.from([1, 2, 3]));
   });
 }
+const users = { ada: "t1", bob: "t2", cy: "t3" };
+io.of("/auth")
+  .use((s, next) => (users[s.handshake.auth.user] === s.handshake.auth.token ? next() : next(new Error("not authorized"))))
+  .on("connection", (s) => s.on("chat", (msg, ack) => ack({ user: s.handshake.auth.user })));
 EOF
 node sio-server.js 19502 >sioserver.log 2>&1 &
 sleep 1.5
@@ -310,6 +314,8 @@ check "Socket.IO against a socket.io 4 server, compressed" "[ $rc = 0 ] && j sio
 $W ws://127.0.0.1:19502 --mode socketio --sio-event chat --sio-namespace /files -c 3 -d 2s --payload-file blob.bin --binary --no-progress --format json -o siojsbin.json >/dev/null 2>&1; rc=$?
 check "Socket.IO binary events against a socket.io 4 server" "[ $rc = 0 ] && j siojsbin.json '(m:=d[\"metrics\"])[\"error_rate\"] == 0 and m[\"total_messages_recv\"] > 100 and m[\"total_bytes_recv\"] == 3000 * m[\"total_messages_recv\"]' | grep -q True" "rc=$rc"
 $W ws://127.0.0.1:19502 --mode socketio --sio-event mixed -c 2 -d 1s --payload-file blob.bin --binary --expect 'json:/0/size=3000' --no-progress --format json -o siojsmix.json >/dev/null 2>&1; rc=$?
+$W ws://127.0.0.1:19502 --mode socketio --sio-event chat --sio-namespace /auth --data users.csv --sio-auth '{"user":"{{data.user}}","token":"{{data.token}}"}' -c 3 -d 1s --expect 'json:/0/user' --no-progress --format json -o sioauth.json >/dev/null 2>&1; rc=$?
+check "--sio-auth filled in per connection from --data" "[ $rc = 0 ] && j sioauth.json 'd[\"metrics\"][\"error_rate\"] == 0 and d[\"metrics\"][\"total_messages_recv\"] > 30' | grep -q True" "rc=$rc $(j sioauth.json "d['metrics']['error_breakdown']" 2>&1)"
 check "a socket.io binary ack with JSON arguments is checked" "[ $rc = 0 ] && j siojsmix.json 'd[\"metrics\"][\"error_rate\"] == 0 and d[\"metrics\"][\"total_messages_recv\"] > 50' | grep -q True" "rc=$rc"
 cat > sio-client.js <<'EOF'
 const { io } = require("socket.io-client");
@@ -350,6 +356,10 @@ for (const ns of ["/", "/chat"]) {
     socket.emit("hello", Buffer.from([1, 2, 3]));
   });
 }
+const users = { ada: "t1", bob: "t2", cy: "t3" };
+io.of("/users")
+  .use((s, next) => (users[s.handshake.query.user] === s.handshake.query.token ? next() : next(new Error("not authorized"))))
+  .on("connection", (s) => s.on("chat", (msg, ack) => ack({ user: s.handshake.query.user })));
 EOF
 node sio2/server.js 19503 >sio2server.log 2>&1 &
 sleep 1.5
@@ -358,6 +368,8 @@ check "--sio-version 2 against a socket.io 2 server, past its ping timeout" "[ $
 $W ws://127.0.0.1:19503 --mode socketio --sio-version 2 --sio-namespace /chat --sio-auth '{"token":"t1"}' --sio-event chat -c 3 -d 2s --payload-file blob.bin --binary --no-progress --format json -o sio2bin.json >/dev/null 2>&1; rc=$?
 check "--sio-version 2 binary events in a namespace with auth" "[ $rc = 0 ] && j sio2bin.json '(m:=d[\"metrics\"])[\"error_rate\"] == 0 and m[\"total_bytes_recv\"] == 3000 * m[\"total_messages_recv\"] > 0 and \"t1\" not in d[\"target_url\"]' | grep -q True" "rc=$rc"
 $W ws://127.0.0.1:19503 --mode socketio --sio-version 2 --sio-namespace /chat --sio-auth '{"token":"no"}' -c 1 -d 1s --no-reconnect --no-progress --format json -o sio2deny.json >/dev/null 2>&1
+$W ws://127.0.0.1:19503 --mode socketio --sio-version 2 --sio-event chat --sio-namespace /users --data users.csv --sio-auth '{"user":"{{data.user}}","token":"{{data.token}}"}' -c 3 -d 1s --expect 'json:/0/user' --no-progress --format json -o sio2auth.json >/dev/null 2>&1; rc=$?
+check "--sio-version 2 auth query filled in per connection" "[ $rc = 0 ] && j sio2auth.json 'd[\"metrics\"][\"error_rate\"] == 0 and d[\"metrics\"][\"total_messages_recv\"] > 30' | grep -q True" "rc=$rc $(j sio2auth.json "d['metrics']['error_breakdown']" 2>&1)"
 check "a refused Socket.IO 2 namespace is a protocol_error" "j sio2deny.json 'd[\"metrics\"][\"error_breakdown\"].get(\"protocol_error\") == 1' | grep -q True" "$(j sio2deny.json "d['metrics']['error_breakdown']" 2>&1)"
 cat > sio2/client.js <<'EOF'
 const io = require("socket.io-client");

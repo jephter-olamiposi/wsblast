@@ -89,7 +89,7 @@ complete -c wsblast -n "__fish_wsblast_needs_command" -l graphql-ws-variables -d
 complete -c wsblast -n "__fish_wsblast_needs_command" -l graphql-ws-extensions -d 'GraphQL WS extensions (JSON)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l sio-event -d 'Socket.IO event each message is emitted as (--mode socketio)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l sio-namespace -d 'Socket.IO namespace to connect to (--mode socketio), \'/\' by default' -r
-complete -c wsblast -n "__fish_wsblast_needs_command" -l sio-auth -d 'JSON object sent with the Socket.IO namespace connect, as a client\'s `auth` option (--mode socketio)' -r
+complete -c wsblast -n "__fish_wsblast_needs_command" -l sio-auth -d 'JSON object sent with the Socket.IO namespace connect, as a client\'s `auth` option (--mode socketio); a template filled in per connection' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l sio-version -d 'Socket.IO server version (--mode socketio): 2 for Socket.IO 2 servers (Engine.IO 3), 3 or 4 for later ones [default: 4]' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l format -d 'Output report format' -r -f -a "text\t'Human-readable styled terminal tables'
 json\t'Schema-versioned JSON for CI parsing and metric archiving'

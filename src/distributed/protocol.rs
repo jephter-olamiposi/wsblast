@@ -616,7 +616,7 @@ impl WireConfig {
         let socketio = config.socketio.as_ref().map(|sio| WireSocketIo {
             namespace: sio.namespace.clone(),
             event: sio.event.clone(),
-            auth: sio.auth.clone(),
+            auth: sio.auth.as_ref().map(|auth| auth.source().to_string()),
             version: match sio.engine {
                 crate::socketio::EngineIo::V3 => 2,
                 crate::socketio::EngineIo::V4 => 4,

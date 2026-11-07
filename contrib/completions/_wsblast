@@ -87,7 +87,7 @@ ES256\:"ECDSA with P-256 and SHA-256"))' \
 '--graphql-ws-extensions=[GraphQL WS extensions (JSON)]:JSON:_default' \
 '--sio-event=[Socket.IO event each message is emitted as (--mode socketio)]:NAME:_default' \
 '--sio-namespace=[Socket.IO namespace to connect to (--mode socketio), '\''/'\'' by default]:NAMESPACE:_default' \
-'--sio-auth=[JSON object sent with the Socket.IO namespace connect, as a client'\''s \`auth\` option (--mode socketio)]:JSON:_default' \
+'--sio-auth=[JSON object sent with the Socket.IO namespace connect, as a client'\''s \`auth\` option (--mode socketio); a template filled in per connection]:JSON:_default' \
 '--sio-version=[Socket.IO server version (--mode socketio)\: 2 for Socket.IO 2 servers (Engine.IO 3), 3 or 4 for later ones \[default\: 4\]]:VERSION:_default' \
 '--format=[Output report format]:FORMAT:((text\:"Human-readable styled terminal tables"
 json\:"Schema-versioned JSON for CI parsing and metric archiving"

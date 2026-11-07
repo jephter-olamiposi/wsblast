@@ -39,8 +39,28 @@ io.on("connection", (socket) => {
 | `--mode socketio` | | Socket.IO mode. |
 | `--sio-event NAME` | `message` | The event every message is emitted as. The names Socket.IO reserves (`connect`, `connect_error`, `disconnect`, `disconnecting`, `newListener`, `removeListener`) are rejected. |
 | `--sio-namespace NS` | `/` | The namespace to connect to, such as `/chat`. It must start with `/` and hold no `,`. |
-| `--sio-auth JSON` | none | A JSON object sent with the namespace connect, as a Socket.IO client's `auth` option, such as `{"token":"abc"}`; with `--sio-version 2`, its fields are query parameters of the handshake instead. Templates are not filled in; use `-H` with `{{data.COLUMN}}` for a per-connection credential in a header. |
+| `--sio-auth JSON` | none | A JSON object sent with the namespace connect, as a Socket.IO client's `auth` option, such as `{"token":"abc"}`; with `--sio-version 2`, its fields are query parameters of the handshake instead. It is a template filled in for each connection ([section 1.1](#11-a-credential-per-connection)). |
 | `--sio-version V` | `4` | The server's Socket.IO version: `2` for Socket.IO 2 (Engine.IO 3), `3` or `4` for Socket.IO 3 and later (Engine.IO 4), which speak the same protocol. |
+
+### 1.1 A credential per connection
+
+`--sio-auth` is filled in for each connection, as `-H` header values are:
+`{{worker_id}}` is the connection's number, `{{data.COLUMN}}` a column of
+the connection's row of the `--data` file, and `{{timestamp}}` the time it
+connects. With a file of users and tokens, every connection logs in as its
+own user:
+
+```bash
+printf 'user,token\nada,t1\nbob,t2\n' > users.csv
+wsblast ws://localhost:3000 --mode socketio --data users.csv \
+  --sio-auth '{"user":"{{data.user}}","token":"{{data.token}}"}' -c 100 -d 1m
+```
+
+Values are inserted as they are, so a string value is quoted in the
+template, and a number can stand on its own: `{"worker":{{worker_id}}}`.
+Before the run, the template is filled in with every row of the file, and
+a row that does not give a JSON object (a value holding a `"`, say) fails
+with a message naming the row.
 
 Any other option works as in echo mode. `--match` keeps its default: the
 reply to an event is its ack, matched by the ack id. With `--binary` (or a

@@ -38,7 +38,9 @@ use tokio_tungstenite::tungstenite::Error as TungsteniteError;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_util::sync::PollSender;
 
+use crate::data::DataSet;
 use crate::error::ErrorCategory;
+use crate::template::{Template, Values};
 
 /// The Engine.IO protocol a session speaks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -129,9 +131,10 @@ pub(crate) struct SocketIoConfig {
     pub(crate) namespace: String,
     /// The event every data frame is emitted as.
     pub(crate) event: String,
-    /// The JSON object sent with the namespace connect, if any; with
-    /// Engine.IO 3, its fields are query parameters of the handshake.
-    pub(crate) auth: Option<String>,
+    /// The JSON object sent with the namespace connect, if any, as a
+    /// template filled in for each connection; with Engine.IO 3, its fields
+    /// are query parameters of the handshake.
+    pub(crate) auth: Option<Template>,
     pub(crate) engine: EngineIo,
 }
 
@@ -153,8 +156,10 @@ impl SocketIoConfig {
                 self.event
             ));
         }
+        // A template is checked once it is filled in, by `check_auth`.
         if let Some(auth) = &self.auth
-            && !serde_json::from_str::<serde_json::Value>(auth).is_ok_and(|v| v.is_object())
+            && !auth.is_dynamic()
+            && !is_json_object(auth.source())
         {
             return Err(
                 "--sio-auth must be a JSON object, such as {\"token\":\"abc\"}".to_string(),
@@ -162,6 +167,46 @@ impl SocketIoConfig {
         }
         Ok(())
     }
+
+    /// The `--sio-auth` object of the connection whose templates `values`
+    /// fill.
+    pub(crate) fn auth_for(&self, values: Values<'_>) -> Option<String> {
+        self.auth.as_ref().map(|auth| auth.render(values))
+    }
+}
+
+fn is_json_object(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text).is_ok_and(|v| v.is_object())
+}
+
+/// Checks a `--sio-auth` template against the data file: every column it
+/// reads must exist, and filled in with every row (or once, without a
+/// file) it must give a JSON object, so a value that breaks the JSON fails
+/// before the run, naming the row.
+pub(crate) fn check_auth(auth: &Template, data: Option<&DataSet>) -> Result<(), String> {
+    if !auth.is_dynamic() {
+        return Ok(());
+    }
+    auth.check_data(data)
+        .map_err(|e| format!("--sio-auth: {e}"))?;
+    let rows = data.map_or(1, DataSet::len);
+    for row in 0..rows {
+        let rendered = auth.render(Values {
+            seq: 0,
+            worker_id: row,
+            data: data.map(|data| (data, row)),
+            vars: &[],
+        });
+        if !is_json_object(&rendered) {
+            let source = data.map_or_else(String::new, |data| {
+                format!(" with row {} of {}", row + 1, data.path())
+            });
+            return Err(format!(
+                "--sio-auth must give a JSON object{source}, but gives {rendered}; values are inserted as they are, so quote them in the template (\"{{{{data.token}}}}\") and keep quotes out of the data"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Adds the Engine.IO query to `url`, and the default Socket.IO path when
@@ -378,6 +423,7 @@ struct Pending {
 pub(crate) async fn open<S>(
     ws: &mut S,
     config: &SocketIoConfig,
+    auth: Option<&str>,
 ) -> Result<Option<Duration>, ErrorCategory>
 where
     S: Sink<Message, Error = TungsteniteError>
@@ -427,7 +473,7 @@ where
             }
             let auth = match config.engine {
                 EngineIo::V3 => "",
-                EngineIo::V4 => config.auth.as_deref().unwrap_or_default(),
+                EngineIo::V4 => auth.unwrap_or_default(),
             };
             let connect = Packet {
                 kind: b'0',
@@ -985,6 +1031,40 @@ mod tests {
     }
 
     #[test]
+    fn auth_templates_are_checked_with_every_row() {
+        let data = DataSet::parse("users.csv", "user,token\nada,t1\nbob,\"t\"\"2\"\n").unwrap();
+        let auth = Template::parse(r#"{"user":"{{data.user}}","token":"{{data.token}}"}"#);
+        let err = check_auth(&auth, Some(&data)).unwrap_err();
+        assert!(err.contains("row 2 of users.csv"), "{err}");
+        let good = DataSet::parse("users.csv", "user,token\nada,t1\nbob,t2\n").unwrap();
+        assert!(check_auth(&auth, Some(&good)).is_ok());
+        assert!(
+            check_auth(&auth, None)
+                .unwrap_err()
+                .contains("needs a data file")
+        );
+        let missing = Template::parse(r#"{"k":"{{data.key}}"}"#);
+        assert!(
+            check_auth(&missing, Some(&good))
+                .unwrap_err()
+                .contains("no column 'key'")
+        );
+        // A placeholder outside quotes is fine when its value is JSON.
+        let worker = Template::parse(r#"{"worker":{{worker_id}}}"#);
+        assert!(check_auth(&worker, None).is_ok());
+        let mut sio = config("/");
+        sio.auth = Some(worker);
+        assert!(sio.validate().is_ok());
+        let values = Values {
+            seq: 0,
+            worker_id: 7,
+            data: None,
+            vars: &[],
+        };
+        assert_eq!(sio.auth_for(values).as_deref(), Some(r#"{"worker":7}"#));
+    }
+
+    #[test]
     fn settings_are_checked() {
         assert!(config("/").validate().is_ok());
         assert!(
@@ -998,9 +1078,9 @@ mod tests {
         reserved.event = "connect".into();
         assert!(reserved.validate().unwrap_err().contains("reserved"));
         let mut auth = config("/");
-        auth.auth = Some("[1]".into());
+        auth.auth = Some(Template::parse("[1]"));
         assert!(auth.validate().unwrap_err().contains("JSON object"));
-        auth.auth = Some(r#"{"token":"t"}"#.into());
+        auth.auth = Some(Template::parse(r#"{"token":"t"}"#));
         assert!(auth.validate().is_ok());
     }
 

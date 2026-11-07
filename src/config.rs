@@ -845,6 +845,10 @@ impl LoadTestConfigBuilder {
                 .map_err(|e| ConfigError::InvalidOption(format!("payload: {e}")))?;
         }
         let (headers, header_templates) = split_header_templates(self.headers, data.as_ref())?;
+        #[cfg(feature = "socketio")]
+        if let Some(auth) = socketio.as_ref().and_then(|sio| sio.auth.as_ref()) {
+            crate::socketio::check_auth(auth, data.as_ref()).map_err(ConfigError::InvalidOption)?;
+        }
         let mut source_ips = Vec::with_capacity(self.source_ips.len());
         for ip in self.source_ips {
             if !source_ips.contains(&ip) {
@@ -1237,7 +1241,7 @@ impl SocketIoOptions {
         let config = crate::socketio::SocketIoConfig {
             namespace: self.namespace.unwrap_or_else(|| "/".to_string()),
             event: self.event.unwrap_or_else(|| "message".to_string()),
-            auth: self.auth,
+            auth: self.auth.map(crate::template::Template::parse),
             engine,
         };
         config.validate().map_err(ConfigError::InvalidOption)?;
