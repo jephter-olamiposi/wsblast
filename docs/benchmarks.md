@@ -15,7 +15,7 @@ injustice, please open an issue or a pull request.
 
 ## Setup
 
-- wsblast 0.2.3, k6 v1.8.2, Artillery 2.0.34
+- wsblast 0.2.4, k6 v1.8.2, Artillery 2.0.34
 - Linux 6.18, Intel Xeon at 2.10 GHz, 2 cores, 8 GB of memory
 - The target is `wsblast mock`, an echo server, on core 1. Each tool runs on
   core 0 (`taskset`), so "one core" means one core.
@@ -31,18 +31,21 @@ reply arrives, for 30 seconds.
 
 | Tool | Replies per second | Tool CPU time | Replies per CPU second |
 | :--- | ---: | ---: | ---: |
-| wsblast | 155,323 | 28.6 s | 162,870 |
-| k6 | 28,136 | 29.7 s | 28,381 |
-| Artillery | 19,436 | 33.5 s | 17,406 |
+| wsblast | 157,219 | 29.2 s | 161,471 |
+| k6 | 29,314 | 29.7 s | 29,630 |
+| Artillery | 17,563 | 33.8 s | 15,612 |
 
 Each tool uses its whole core, so the first column is what one core of each
 can drive against a server that keeps up. The last column is the comparison
 between the tools: replies divided by the CPU time the tool used. It
 includes startup, which costs Artillery about 2.8 seconds of CPU and the
 others under 0.2 seconds. Without it, Artillery's figure would be about
-19,000. wsblast 0.2.2 reached 71,496 replies per CPU second on this test; 0.2.3
+17,000. wsblast 0.2.2 reached 71,496 replies per CPU second on this test; 0.2.3
 reads with smaller buffers and parses payload templates once
-([CHANGELOG.md](../CHANGELOG.md)).
+([CHANGELOG.md](../CHANGELOG.md)). 0.2.4 opens TLS itself and can add a
+compression layer under the WebSocket library; run back to back with 0.2.3
+on this machine, it was within run-to-run noise of it (about 163,000 replies
+per CPU second against 158,000, three runs each).
 
 ## 2. Memory per connection
 
@@ -52,13 +55,15 @@ column is the slope between the two runs, so fixed costs cancel out.
 
 | Tool | Peak at 500 | Peak at 2,000 | Per additional connection |
 | :--- | ---: | ---: | ---: |
-| wsblast | 20 MB | 39 MB | 13 KB |
-| k6 | 159 MB | 532 MB | 254 KB |
-| Artillery | 319 MB | 349 MB | 20 KB |
+| wsblast | 20 MB | 38 MB | 12 KB |
+| k6 | 162 MB | 535 MB | 255 KB |
+| Artillery | 323 MB | 342 MB | 12 KB |
 
 wsblast's read buffers share a budget of 16 MiB that is not all used at
 these counts (see [METHODOLOGY.md](../METHODOLOGY.md), section 10); 0.2.2
-needed 102 MB for 2,000 connections. k6 runs a JavaScript runtime for each
+needed 102 MB for 2,000 connections. These connections are uncompressed;
+with `--compression` each one also holds a deflater and an inflater, about
+150 KB (METHODOLOGY.md, section 7.3). k6 runs a JavaScript runtime for each
 virtual user, which is most of its cost per connection. Artillery's Node.js
 process starts large and then grows slowly.
 
@@ -70,10 +75,10 @@ while the server is stalled, so a correct p99 is close to a second.
 
 | Tool and metric | p50 | p99 | max |
 | :--- | ---: | ---: | ---: |
-| wsblast, response time (from schedule) | 0 ms | 895 ms | 996 ms |
-| wsblast, round-trip time | 0 ms | 1 ms | 996 ms |
-| k6, sends on a timer, timestamps in the payload | 0 ms | 854 ms | 985 ms |
-| k6, sends after each reply | 0 ms | 1 ms | 1003 ms |
+| wsblast, response time (from schedule) | 0 ms | 892 ms | 993 ms |
+| wsblast, round-trip time | 0 ms | 1 ms | 993 ms |
+| k6, sends on a timer, timestamps in the payload | 0 ms | 869 ms | 996 ms |
+| k6, sends after each reply | 0 ms | 3 ms | 995 ms |
 | Artillery | not reported | not reported | not reported |
 
 A client that waits for each reply before sending the next one sends nothing
