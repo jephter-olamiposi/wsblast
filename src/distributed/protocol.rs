@@ -400,6 +400,22 @@ pub(crate) struct WireConfig {
     /// The faults this agent injects, when the run or phase injects any.
     #[serde(default)]
     pub(crate) chaos: Option<WireChaos>,
+    /// The run's data file, with this agent's place among the agents.
+    #[serde(default)]
+    pub(crate) data: Option<WireData>,
+}
+
+/// A data file on the wire: its rows, and which of them the agent's
+/// connections use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireData {
+    /// The file's name on the coordinator, for messages.
+    pub(crate) path: String,
+    pub(crate) columns: Vec<String>,
+    pub(crate) rows: Vec<Vec<String>>,
+    /// Set by `plan`: agent `index` of `agents` uses every `agents`-th row
+    /// from row `index`.
+    pub(crate) share: Option<Share>,
 }
 
 fn unsupported(message: impl Into<String>) -> WsBlastError {
@@ -461,6 +477,9 @@ pub(crate) fn plan(config: &LoadTestConfig, agents: usize) -> Result<Vec<WireCon
                 .max_requests
                 .map(|requests| split(requests, index, agents));
             wire.stage_share = (!config.stages.is_empty()).then_some(share);
+            if let Some(data) = wire.data.as_mut() {
+                data.share = Some(share);
+            }
             #[cfg(feature = "chaos")]
             if let Some(chaos) = &config.chaos {
                 let seed = crate::chaos::agent_seed(chaos.seed.unwrap_or_default(), index);
@@ -485,7 +504,9 @@ impl WireConfig {
             PayloadConfig::StaticText(text) => WirePayload::Text {
                 text: text.as_str().to_string(),
             },
-            PayloadConfig::DynamicText(text) => WirePayload::Text { text: text.clone() },
+            PayloadConfig::DynamicText(template) => WirePayload::Text {
+                text: template.source().to_string(),
+            },
             PayloadConfig::Binary(bytes) => WirePayload::Binary {
                 base64: crate::base64::encode(bytes),
             },
@@ -503,7 +524,16 @@ impl WireConfig {
                         )))
                     })
             })
+            .chain(config.header_templates.iter().map(|(name, template)| {
+                Ok((name.as_str().to_string(), template.source().to_string()))
+            }))
             .collect::<Result<Vec<_>>>()?;
+        let data = config.data.as_deref().map(|data| WireData {
+            path: data.path().to_string(),
+            columns: data.columns().to_vec(),
+            rows: data.rows().to_vec(),
+            share: None,
+        });
         #[cfg(feature = "graphql-ws")]
         let graphql = config.graphql_ws.as_ref().map(|graphql| WireGraphql {
             operation: graphql.operation.clone(),
@@ -552,6 +582,7 @@ impl WireConfig {
             live_auth,
             // Set per agent by `plan`, with the agent's own seed.
             chaos: None,
+            data,
         })
     }
 
@@ -609,6 +640,21 @@ impl WireConfig {
         };
         for (name, value) in &self.headers {
             builder = builder.header(name, value);
+        }
+        if let Some(data) = self.data {
+            let mut set = crate::data::DataSet::from_parts(data.path, data.columns, data.rows)
+                .map_err(ConfigError::DataFile)?;
+            if let Some(share) = data.share {
+                if share.agents == 0 || share.index >= share.agents {
+                    return Err(ConfigError::InvalidOption(format!(
+                        "invalid data share {} of {}",
+                        share.index, share.agents
+                    ))
+                    .into());
+                }
+                set = set.with_share(share.index, share.agents);
+            }
+            builder = builder.data_set(set);
         }
         if let Some(subprotocol) = self.subprotocol {
             builder = builder.subprotocol(subprotocol);
@@ -736,7 +782,9 @@ fn wire_payload(payload: &PayloadConfig) -> WirePayload {
         PayloadConfig::StaticText(text) => WirePayload::Text {
             text: text.as_str().to_string(),
         },
-        PayloadConfig::DynamicText(text) => WirePayload::Text { text: text.clone() },
+        PayloadConfig::DynamicText(template) => WirePayload::Text {
+            text: template.source().to_string(),
+        },
         PayloadConfig::Binary(bytes) => WirePayload::Binary {
             base64: crate::base64::encode(bytes),
         },
@@ -1252,6 +1300,41 @@ mod tests {
     }
 
     #[test]
+    fn agents_get_the_data_rows_and_use_different_ones() {
+        let data = crate::data::DataSet::parse("users.csv", "user\na\nb\nc\nd\ne\nf\n").unwrap();
+        let whole = config(
+            LoadTestConfig::builder("ws://127.0.0.1:9/")
+                .connections(6)
+                .data_set(data)
+                .payload_text("{{data.user}}")
+                .header("X-User", "{{data.user}}"),
+        );
+        let wires = plan(&whole, 2).unwrap();
+        // Templated headers travel as their template.
+        assert!(
+            wires[0]
+                .headers
+                .contains(&("x-user".to_string(), "{{data.user}}".to_string()))
+        );
+        let users: Vec<Vec<String>> = wires
+            .iter()
+            .map(|wire| {
+                let agent = wire.clone().into_config().unwrap();
+                assert_eq!(agent.header_templates.len(), 1);
+                let data = agent.data.clone().unwrap();
+                (0..agent.connections)
+                    .map(|worker| {
+                        data.value(data.row_for(worker), "user")
+                            .unwrap()
+                            .to_string()
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(users, [["a", "c", "e"], ["b", "d", "f"]]);
+    }
+
+    #[test]
     fn wire_config_round_trips_through_json_and_validation() {
         let original = config(
             LoadTestConfig::builder("wss://example.com/socket?x=1")
@@ -1294,7 +1377,7 @@ mod tests {
         assert_eq!(rebuilt.ping_interval, original.ping_interval);
         assert!(rebuilt.no_reconnect);
         assert!(
-            matches!(rebuilt.payload, PayloadConfig::DynamicText(ref t) if t == r#"{"seq":{{seq}}}"#)
+            matches!(rebuilt.payload, PayloadConfig::DynamicText(ref t) if t.source() == r#"{"seq":{{seq}}}"#)
         );
     }
 
@@ -1463,7 +1546,7 @@ phases:
         assert_eq!(rebuilt.actions.len(), 4);
         assert!(matches!(
             &rebuilt.actions[0],
-            crate::config::ScenarioAction::Send { payload: Some(PayloadConfig::DynamicText(t)), count: 3 } if t == "{{seq}}"
+            crate::config::ScenarioAction::Send { payload: Some(PayloadConfig::DynamicText(t)), count: 3 } if t.source() == "{{seq}}"
         ));
         assert!(matches!(
             rebuilt.actions[1],

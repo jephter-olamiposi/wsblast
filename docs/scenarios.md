@@ -57,6 +57,7 @@ phases:                           # required, at least one
 | `metadata.description` | string | no | none | Not used by the run. |
 | `metadata.tags` | list of strings | no | none | Not used by the run. |
 | `slo` | SLO mapping | no | none | Thresholds checked on the merged metrics of every phase. See [section 7](#7-slos). |
+| `data` | path | no | none | A data file whose columns payloads read as `{{data.COLUMN}}`, relative to the scenario file. `--data` replaces it. See [templates](templates.md#2-data-files). |
 | `phases` | list of phases | yes | | At least one. Phase names must be unique. |
 
 Unknown keys are rejected at every level: the top level, `metadata`, each phase, each `slo` mapping and each action. A misspelled field fails validation with its name and the list of valid keys, so it cannot silently fall back to a default:

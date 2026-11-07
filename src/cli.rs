@@ -81,7 +81,7 @@ pub(crate) struct Cli {
     )]
     pub rate: u64,
 
-    /// Inline message payload to send (supports {{timestamp}}, {{worker_id}}, {{seq}})
+    /// Inline message payload to send (supports {{timestamp}}, {{worker_id}}, {{seq}} and, with --data, {{data.COLUMN}})
     #[arg(short = 'p', long = "payload", value_name = "TEXT")]
     pub payload: Option<String>,
 
@@ -93,7 +93,11 @@ pub(crate) struct Cli {
     #[arg(long = "binary", default_value_t = false)]
     pub binary: bool,
 
-    /// Custom HTTP header to include in the WebSocket handshake (can be specified multiple times)
+    /// Per-connection test data: a CSV file with a header row, or JSON Lines. Connection N uses row N (wrapping round); payloads and -H values read its columns as {{data.COLUMN}}
+    #[arg(long = "data", value_name = "FILE")]
+    pub data: Option<PathBuf>,
+
+    /// Custom HTTP header to include in the WebSocket handshake (can be specified multiple times; the value may hold {{worker_id}} and {{data.COLUMN}})
     #[arg(short = 'H', long = "header", value_name = "HEADER:VALUE")]
     pub headers: Vec<String>,
 

@@ -45,6 +45,11 @@ pub struct LoadTestConfig {
     pub(crate) rate_per_conn: u64,
     pub(crate) payload: PayloadConfig,
     pub(crate) headers: HeaderMap,
+    /// Handshake headers whose values are templates, filled in for each
+    /// connection: `{{worker_id}}` or a `{{data.COLUMN}}`.
+    pub(crate) header_templates: Vec<(HeaderName, crate::template::Template)>,
+    /// The run's data file (`--data`), whose rows templates read.
+    pub(crate) data: Option<std::sync::Arc<crate::data::DataSet>>,
     pub(crate) subprotocol: Option<String>,
     pub(crate) mode: TestMode,
     pub(crate) connect_timeout: Duration,
@@ -166,7 +171,9 @@ impl LoadTestConfig {
         self.rate_per_conn
     }
 
-    /// Extra headers sent with every handshake.
+    /// Extra headers sent with every handshake, except those whose values
+    /// are templates (`{{worker_id}}`, `{{data.COLUMN}}`), which are filled
+    /// in for each connection.
     pub fn headers(&self) -> &HeaderMap {
         &self.headers
     }
@@ -257,6 +264,7 @@ pub struct LoadTestConfigBuilder {
     payload: PayloadConfig,
     headers: HeaderMap,
     invalid_header: Option<String>,
+    data: Option<DataSource>,
     subprotocol: Option<String>,
     mode: TestMode,
     connect_timeout: Duration,
@@ -275,6 +283,15 @@ pub struct LoadTestConfigBuilder {
     capture_limit: u64,
     #[cfg(feature = "chaos")]
     chaos: Option<crate::chaos::ChaosConfig>,
+}
+
+/// Where the builder's data file comes from.
+#[derive(Debug, Clone)]
+enum DataSource {
+    File(PathBuf),
+    /// Rows a distributed agent received from the coordinator.
+    #[cfg(feature = "distributed")]
+    Loaded(crate::data::DataSet),
 }
 
 /// GraphQL WS settings collected by the builder and checked in `build`.
@@ -300,6 +317,7 @@ impl LoadTestConfigBuilder {
             payload: PayloadConfig::from_text(DEFAULT_TEXT_PAYLOAD.to_string()),
             headers: HeaderMap::new(),
             invalid_header: None,
+            data: None,
             subprotocol: None,
             mode: TestMode::Echo,
             connect_timeout: Duration::from_secs(5),
@@ -384,7 +402,9 @@ impl LoadTestConfigBuilder {
     }
 
     /// Sends `text` as text frames. The placeholders `{{seq}}`,
-    /// `{{timestamp}}` and `{{worker_id}}` are filled in for every frame.
+    /// `{{timestamp}}`, `{{worker_id}}` and, with a
+    /// [data file](Self::data_file), `{{data.COLUMN}}` are filled in for
+    /// every frame.
     pub fn payload_text(mut self, text: impl Into<String>) -> Self {
         self.payload = PayloadConfig::from_text(text.into());
         self
@@ -396,7 +416,27 @@ impl LoadTestConfigBuilder {
         self
     }
 
-    /// Adds a handshake header. Repeating a name sends every value.
+    /// Reads per-connection test data from `path`: a CSV file with a header
+    /// row, or JSON Lines with one flat object per line. Connection `n`
+    /// uses row `n` modulo the number of rows, and payloads and header
+    /// values read its columns as `{{data.COLUMN}}`.
+    ///
+    /// The file is read, and every `{{data.COLUMN}}` checked against it, by
+    /// [`build`](Self::build).
+    pub fn data_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.data = Some(DataSource::File(path.into()));
+        self
+    }
+
+    #[cfg(feature = "distributed")]
+    pub(crate) fn data_set(mut self, data: crate::data::DataSet) -> Self {
+        self.data = Some(DataSource::Loaded(data));
+        self
+    }
+
+    /// Adds a handshake header. Repeating a name sends every value. The
+    /// value may hold `{{worker_id}}` and `{{data.COLUMN}}`, filled in for
+    /// each connection.
     ///
     /// An invalid name or value is reported by [`build`](Self::build).
     pub fn header(mut self, name: &str, value: &str) -> Self {
@@ -621,6 +661,20 @@ impl LoadTestConfigBuilder {
             return Err(ConfigError::InvalidHeader(message).into());
         }
         validate_slo(&self.slo, self.mode)?;
+        let data = match self.data {
+            Some(DataSource::File(path)) => {
+                Some(crate::data::DataSet::load(&path).map_err(ConfigError::DataFile)?)
+            }
+            #[cfg(feature = "distributed")]
+            Some(DataSource::Loaded(data)) => Some(data),
+            None => None,
+        };
+        if let Some(template) = self.payload.template() {
+            template
+                .check_data(data.as_ref())
+                .map_err(|e| ConfigError::InvalidOption(format!("payload: {e}")))?;
+        }
+        let (headers, header_templates) = split_header_templates(self.headers, data.as_ref())?;
         #[cfg(feature = "chaos")]
         let chaos = match self.chaos {
             Some(chaos) => {
@@ -644,7 +698,9 @@ impl LoadTestConfigBuilder {
             max_requests: self.max_requests,
             rate_per_conn: self.rate_per_conn,
             payload: self.payload,
-            headers: self.headers,
+            headers,
+            header_templates,
+            data: data.map(std::sync::Arc::new),
             subprotocol: self.subprotocol,
             mode: self.mode,
             connect_timeout: self.connect_timeout,
@@ -974,6 +1030,57 @@ fn is_json_pointer(pointer: &str) -> bool {
     true
 }
 
+/// Moves the headers whose values are templates out of `headers`, and checks
+/// them against the data file. A template is filled in with every row
+/// before the run, so a value that is not valid in a header fails here,
+/// naming the row, instead of failing a handshake.
+fn split_header_templates(
+    headers: HeaderMap,
+    data: Option<&crate::data::DataSet>,
+) -> Result<(HeaderMap, Vec<(HeaderName, crate::template::Template)>)> {
+    let mut fixed = HeaderMap::new();
+    let mut templates = Vec::new();
+    let mut name = None;
+    for (key, value) in headers {
+        // `HeaderMap::into_iter` names only the first value of each name.
+        if let Some(key) = key {
+            name = Some(key);
+        }
+        let Some(name) = name.clone() else { continue };
+        let template = value
+            .to_str()
+            .ok()
+            .map(crate::template::Template::parse)
+            .filter(crate::template::Template::is_dynamic);
+        let Some(template) = template else {
+            fixed.append(name, value);
+            continue;
+        };
+        template
+            .check_data(data)
+            .map_err(|e| ConfigError::InvalidOption(format!("header {name}: {e}")))?;
+        let rows = data.map_or(1, crate::data::DataSet::len);
+        for row in 0..rows {
+            let rendered = template.render(crate::template::Values {
+                seq: 0,
+                worker_id: row,
+                data: data.map(|data| (data, row)),
+            });
+            if HeaderValue::from_str(&rendered).is_err() {
+                let source = data.map_or_else(String::new, |data| {
+                    format!(" with row {} of {}", row + 1, data.path())
+                });
+                return Err(ConfigError::InvalidOption(format!(
+                    "header {name}: the value is not a valid HTTP header value{source}"
+                ))
+                .into());
+            }
+        }
+        templates.push((name, template));
+    }
+    Ok((fixed, templates))
+}
+
 /// Rejects reply matching that the configured mode or payloads cannot honour.
 ///
 /// JSON matching compares against the request's `{{seq}}`, so every payload a
@@ -995,7 +1102,7 @@ fn validate_reply_match<'a>(
     }
     if let ReplyMatch::JsonPointer(_) = reply_match {
         let carries_seq = |payload: &PayloadConfig| match payload {
-            PayloadConfig::DynamicText(template) => template.contains("{{seq}}"),
+            PayloadConfig::DynamicText(template) => template.has_seq(),
             PayloadConfig::StaticText(_) | PayloadConfig::Binary(_) => false,
         };
         if !payloads.all(carries_seq) {
@@ -1014,8 +1121,8 @@ fn validate_reply_match<'a>(
 pub(crate) enum PayloadConfig {
     /// Static UTF-8 text cached as Utf8Bytes for O(1) zero-allocation cloning.
     StaticText(Utf8Bytes),
-    /// Dynamic text template requiring macro substitutions on each frame dispatch.
-    DynamicText(String),
+    /// A text template with placeholders, filled in for every frame.
+    DynamicText(crate::template::Template),
     /// Binary frame payload cached as Bytes for O(1) zero-allocation cloning.
     Binary(Bytes),
 }
@@ -1023,10 +1130,19 @@ pub(crate) enum PayloadConfig {
 impl PayloadConfig {
     /// Classifies text payload into either a pre-allocated static frame or a dynamic template.
     pub(crate) fn from_text(text: String) -> Self {
-        if text.contains("{{") {
-            Self::DynamicText(text)
+        let template = crate::template::Template::parse(text);
+        if template.is_dynamic() {
+            Self::DynamicText(template)
         } else {
-            Self::StaticText(Utf8Bytes::from(text))
+            Self::StaticText(Utf8Bytes::from(template.source().to_string()))
+        }
+    }
+
+    /// The template of a text payload with placeholders.
+    pub(crate) fn template(&self) -> Option<&crate::template::Template> {
+        match self {
+            Self::DynamicText(template) => Some(template),
+            Self::StaticText(_) | Self::Binary(_) => None,
         }
     }
 }
@@ -1297,6 +1413,10 @@ pub struct ScenarioConfig {
     /// SLOs checked on the metrics of the whole scenario.
     #[serde(default)]
     pub(crate) slo: Option<SloConfig>,
+    /// The scenario's data file, relative to the scenario file. `--data`
+    /// takes precedence.
+    #[serde(default)]
+    pub(crate) data: Option<PathBuf>,
     pub(crate) phases: Vec<PhaseConfig>,
 }
 
@@ -1710,13 +1830,20 @@ impl ScenarioConfig {
     }
 
     fn parse(yaml: &str, path: Option<&Path>) -> Result<Self> {
-        let scenario: Self = serde_norway::from_str(yaml).map_err(|e| {
+        let mut scenario: Self = serde_norway::from_str(yaml).map_err(|e| {
             ConfigError::InvalidScenario(match path {
                 Some(path) => format!("{}: {e}", path.display()),
                 None => e.to_string(),
             })
         })?;
         scenario.validate()?;
+        // A relative data file is next to the scenario, wherever wsblast
+        // runs from.
+        if let (Some(data), Some(dir)) = (&scenario.data, path.and_then(Path::parent))
+            && data.is_relative()
+        {
+            scenario.data = Some(dir.join(data));
+        }
         Ok(scenario)
     }
 
@@ -2302,6 +2429,7 @@ impl LoadTestConfig {
         }
         builder.payload = payload;
         builder.headers = headers;
+        builder.data = cli.data.take().map(DataSource::File);
         builder.subprotocol = cli.subprotocol.take();
         #[cfg(feature = "graphql-ws")]
         if let Some(graphql) = graphql {
@@ -2350,7 +2478,11 @@ impl LoadTestConfig {
             .next()
             .map(String::from);
 
-        let mut config = Self::from_cli_with_target(cli.clone(), target)?;
+        let mut cli_for_config = cli.clone();
+        if cli_for_config.data.is_none() {
+            cli_for_config.data.clone_from(&scenario.data);
+        }
+        let mut config = Self::from_cli_with_target(cli_for_config, target)?;
         scenario.validate_slo_mode(config.mode, cli.phase.as_deref())?;
 
         config.connections = phase.connections;
@@ -2369,11 +2501,15 @@ impl LoadTestConfig {
                 }
                 _ => None,
             });
-            validate_reply_match(
-                &config.reply_match,
-                config.mode,
-                std::iter::once(phase_payload).chain(action_payloads),
-            )?;
+            let payloads: Vec<&PayloadConfig> = std::iter::once(phase_payload)
+                .chain(action_payloads)
+                .collect();
+            for template in payloads.iter().filter_map(|payload| payload.template()) {
+                template
+                    .check_data(config.data.as_deref())
+                    .map_err(|e| invalid_phase(&phase.name, &format!("payload: {e}")))?;
+            }
+            validate_reply_match(&config.reply_match, config.mode, payloads.into_iter())?;
         }
 
         Ok(config)
@@ -3270,6 +3406,7 @@ mod tests {
                 tags: None,
             },
             slo: None,
+            data: None,
             phases,
         }
     }

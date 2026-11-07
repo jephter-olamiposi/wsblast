@@ -471,6 +471,18 @@ impl Runner {
             self.config.ramp_rate,
             self.config.duration,
         );
+        if let Some(data) = &self.config.data
+            && data.len() < self.config.connections
+        {
+            eprintln!(
+                "{} {} has {} rows for {} connections, so rows are reused: connection {} uses the first row again.",
+                colored::Colorize::bold("Warning:").yellow(),
+                data.path(),
+                data.len(),
+                self.config.connections,
+                data.len() + 1
+            );
+        }
     }
 
     /// Resolves the target and builds the TLS configuration without starting

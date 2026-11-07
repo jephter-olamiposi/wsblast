@@ -10,7 +10,7 @@ use futures_util::{FutureExt, SinkExt, StreamExt};
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_tungstenite::tungstenite::Error as TungsteniteError;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -275,6 +275,13 @@ impl WorkerSession {
             .map_err(|_| ErrorCategory::Other)?;
 
         req.headers_mut().extend(self.config.headers.clone());
+        // Checked with every row of the data file when the run was
+        // configured, so a value fails here only if it is not valid HTTP.
+        for (name, template) in &self.config.header_templates {
+            let value = http::HeaderValue::from_str(&template.render(self.template_values(0)))
+                .map_err(|_| ErrorCategory::Other)?;
+            req.headers_mut().append(name.clone(), value);
+        }
 
         if let Some(subproto) = &self.config.subprotocol
             && let Ok(val) = http::HeaderValue::from_str(subproto)
@@ -1105,22 +1112,25 @@ impl WorkerSession {
         self.render_message(&self.config.payload, seq)
     }
 
+    /// The values this connection fills templates with for frame `seq`.
+    fn template_values(&self, seq: u64) -> crate::template::Values<'_> {
+        crate::template::Values {
+            seq,
+            worker_id: self.worker_id,
+            data: self
+                .config
+                .data
+                .as_deref()
+                .map(|data| (data, data.row_for(self.worker_id))),
+        }
+    }
+
     fn render_message(&self, payload: &PayloadConfig, seq: u64) -> Message {
         match payload {
             PayloadConfig::Binary(bytes) => Message::Binary(bytes.clone()),
             PayloadConfig::StaticText(utf8) => Message::Text(utf8.clone()),
             PayloadConfig::DynamicText(template) => {
-                let now_ms = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-
-                let rendered = template
-                    .replace("{{timestamp}}", &now_ms.to_string())
-                    .replace("{{worker_id}}", &self.worker_id.to_string())
-                    .replace("{{seq}}", &seq.to_string());
-
-                Message::Text(Utf8Bytes::from(rendered))
+                Message::Text(Utf8Bytes::from(template.render(self.template_values(seq))))
             }
         }
     }

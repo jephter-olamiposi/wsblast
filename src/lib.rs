@@ -164,6 +164,7 @@ mod cli;
 mod clock;
 mod config;
 mod connect;
+mod data;
 #[cfg(feature = "distributed")]
 #[cfg_attr(docsrs, doc(cfg(feature = "distributed")))]
 pub mod distributed;
@@ -182,6 +183,7 @@ mod report;
 mod runner;
 #[cfg(feature = "compare")]
 mod series_compare;
+mod template;
 mod timeseries;
 #[cfg(any(feature = "mock", feature = "distributed"))]
 mod tls;

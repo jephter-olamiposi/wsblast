@@ -96,6 +96,11 @@ pub enum ConfigError {
     #[error("Unsupported option combination: {0}")]
     UnsupportedOption(String),
 
+    /// The data file (`--data`) could not be read, or is not a valid
+    /// table; the message names the file and the line.
+    #[error("Data file error: {0}")]
+    DataFile(String),
+
     /// A payload, scenario or report file cannot be read.
     #[error("Payload file error at '{path}': {source}")]
     PayloadFile {

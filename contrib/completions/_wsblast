@@ -27,11 +27,12 @@ _wsblast() {
 '--requests=[Maximum total messages to send across all workers (optional limit)]:NUM:_default' \
 '-r+[Message rate per connection per second (0 = unthrottled / maximum possible)]:MSG_PER_SEC:_default' \
 '--rate=[Message rate per connection per second (0 = unthrottled / maximum possible)]:MSG_PER_SEC:_default' \
-'-p+[Inline message payload to send (supports {{timestamp}}, {{worker_id}}, {{seq}})]:TEXT:_default' \
-'--payload=[Inline message payload to send (supports {{timestamp}}, {{worker_id}}, {{seq}})]:TEXT:_default' \
+'-p+[Inline message payload to send (supports {{timestamp}}, {{worker_id}}, {{seq}} and, with --data, {{data.COLUMN}})]:TEXT:_default' \
+'--payload=[Inline message payload to send (supports {{timestamp}}, {{worker_id}}, {{seq}} and, with --data, {{data.COLUMN}})]:TEXT:_default' \
 '(-p --payload)--payload-file=[Path to a file containing the message payload]:FILE:_files' \
-'*-H+[Custom HTTP header to include in the WebSocket handshake (can be specified multiple times)]:HEADER:VALUE:_default' \
-'*--header=[Custom HTTP header to include in the WebSocket handshake (can be specified multiple times)]:HEADER:VALUE:_default' \
+'--data=[Per-connection test data\: a CSV file with a header row, or JSON Lines. Connection N uses row N (wrapping round); payloads and -H values read its columns as {{data.COLUMN}}]:FILE:_files' \
+'*-H+[Custom HTTP header to include in the WebSocket handshake (can be specified multiple times; the value may hold {{worker_id}} and {{data.COLUMN}})]:HEADER:VALUE:_default' \
+'*--header=[Custom HTTP header to include in the WebSocket handshake (can be specified multiple times; the value may hold {{worker_id}} and {{data.COLUMN}})]:HEADER:VALUE:_default' \
 '--subprotocol=[Optional WebSocket subprotocol to request during handshake]:NAME:_default' \
 '--mode=[Load testing execution mode]:MODE:((echo\:"Send request frame, await response, and record round-trip latency (RTT)"
 stream\:"Continuously stream frames without awaiting per-frame acknowledgments"

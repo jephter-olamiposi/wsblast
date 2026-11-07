@@ -20,9 +20,10 @@ subcommand.
 
 | Option | Default | Description |
 | :--- | :--- | :--- |
-| `-p, --payload` / `--payload-file` | JSON template | Payload; `{{seq}}`, `{{timestamp}}` and `{{worker_id}}` are filled in per frame |
+| `-p, --payload` / `--payload-file` | JSON template | Payload; `{{seq}}`, `{{timestamp}}`, `{{worker_id}}` and `{{data.COLUMN}}` are filled in per frame ([templates](templates.md)) |
+| `--data` | | Per-connection test data: a CSV file with a header row, or JSON Lines; connection N uses row N ([templates](templates.md#2-data-files)) |
 | `--binary` | | Send binary frames |
-| `-H, --header` | | Handshake header, repeatable |
+| `-H, --header` | | Handshake header, repeatable; the value may hold `{{worker_id}}` and `{{data.COLUMN}}` |
 | `--mode` | `echo` | `echo`, `stream` or `listen` |
 | `--match` | `first` | Reply matching in echo mode: `first`, `exact` or `json:/path` |
 
