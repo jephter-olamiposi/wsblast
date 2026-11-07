@@ -41,7 +41,8 @@ _wsblast() {
 '--mode=[Load testing execution mode]:MODE:((echo\:"Send request frame, await response, and record round-trip latency (RTT)"
 stream\:"Continuously stream frames without awaiting per-frame acknowledgments"
 listen\:"Connect workers and passively record incoming server-pushed broadcast messages"
-graphql-ws\:"Apollo GraphQL WS protocol (subscriptions)"))' \
+graphql-ws\:"Apollo GraphQL WS protocol (subscriptions)"
+socketio\:"Socket.IO\: emit each message as an event and record the time to its acknowledgement, as echo mode records the time to the reply"))' \
 '--connect-timeout=[Connection handshake timeout (e.g., '\''5s'\'', '\''2000ms'\'')]:DURATION:_default' \
 '--message-timeout=[Per-message response timeout in echo mode (e.g., '\''5s'\'', '\''1000ms'\'')]:DURATION:_default' \
 '--match=[Echo reply matching\: first (default\: the first data frame after a send is the reply), exact, or json\:POINTER (an RFC 6901 pointer such as json\:/seq)]:MODE:_default' \
@@ -84,6 +85,9 @@ ES256\:"ECDSA with P-256 and SHA-256"))' \
 '--graphql-ws-operation=[GraphQL WS operation (query/mutation/subscription)]:OPERATION:_default' \
 '--graphql-ws-variables=[GraphQL WS variables (JSON)]:JSON:_default' \
 '--graphql-ws-extensions=[GraphQL WS extensions (JSON)]:JSON:_default' \
+'--sio-event=[Socket.IO event each message is emitted as (--mode socketio)]:NAME:_default' \
+'--sio-namespace=[Socket.IO namespace to connect to (--mode socketio), '\''/'\'' by default]:NAMESPACE:_default' \
+'--sio-auth=[JSON object sent with the Socket.IO namespace connect, as a client'\''s \`auth\` option (--mode socketio)]:JSON:_default' \
 '--format=[Output report format]:FORMAT:((text\:"Human-readable styled terminal tables"
 json\:"Schema-versioned JSON for CI parsing and metric archiving"
 markdown\:"GitHub Flavored Markdown table for PR comments and job summaries"
@@ -146,6 +150,7 @@ _arguments "${_arguments_options[@]}" : \
 '(--replay)--rules=[Answer frames as a YAML rules file says\: match by text or JSON field, reply from templates, delay or close]:FILE:_files' \
 '--tls-cert=[PEM certificate chain to serve wss\:// instead of ws\:// (clients must trust it, e.g. with SSL_CERT_FILE)]:PEM:_files' \
 '--tls-key=[PEM private key for --tls-cert]:PEM:_files' \
+'(--replay --rules)--socketio[Speak Socket.IO (Engine.IO 4)\: accept any namespace, acknowledge every event that asks for an ack with its arguments, echo the others, and ping every 25s]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0

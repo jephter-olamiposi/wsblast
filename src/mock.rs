@@ -94,6 +94,8 @@ pub struct MockConfig {
     stall: Option<Stall>,
     replay: Option<Arc<ReplayScript>>,
     rules: Option<Arc<Rules>>,
+    /// Engine.IO ping interval and timeout, when the mock speaks Socket.IO.
+    socketio: Option<(Duration, Duration)>,
     seed: Option<u64>,
     tls: Option<Arc<rustls::ServerConfig>>,
 }
@@ -143,6 +145,9 @@ impl MockConfig {
                     rules::Unmatched::Ignore => "ignored",
                 }
             )),
+            (None, None) if self.socketio.is_some() => {
+                parts.push("Socket.IO, acknowledging every event".to_string());
+            }
             (None, None) => parts.push("echo".to_string()),
         }
         if !self.delay.is_zero() {
@@ -180,6 +185,7 @@ pub struct MockConfigBuilder {
     stall_for: Option<Duration>,
     replay: Option<PathBuf>,
     rules: Option<PathBuf>,
+    socketio: Option<(Duration, Duration)>,
     seed: Option<u64>,
     tls: Option<(PathBuf, PathBuf)>,
 }
@@ -196,6 +202,7 @@ impl Default for MockConfigBuilder {
             stall_for: None,
             replay: None,
             rules: None,
+            socketio: None,
             seed: None,
             tls: None,
         }
@@ -264,6 +271,27 @@ impl MockConfigBuilder {
         self
     }
 
+    /// Speaks Socket.IO over WebSocket, as a Socket.IO 4 server does: sends
+    /// the Engine.IO open packet, accepts a connect to any namespace,
+    /// acknowledges every event that asks for an ack with the event's
+    /// arguments after the reply delay, and echoes events that do not.
+    /// It pings every 25 seconds and closes a connection that does not answer
+    /// within 20. Cannot be combined with rules or replay.
+    #[cfg(feature = "socketio")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "socketio")))]
+    pub fn socketio(self) -> Self {
+        self.socketio_ping(Duration::from_secs(25), Duration::from_secs(20))
+    }
+
+    /// Like [`socketio`](Self::socketio), with this ping interval and ping
+    /// timeout.
+    #[cfg(feature = "socketio")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "socketio")))]
+    pub fn socketio_ping(mut self, interval: Duration, timeout: Duration) -> Self {
+        self.socketio = Some((interval, timeout));
+        self
+    }
+
     /// Seeds the generator behind jitter and rejections, for repeatable
     /// runs. Without a seed every server draws a different sequence.
     pub fn seed(mut self, seed: u64) -> Self {
@@ -327,6 +355,19 @@ impl MockConfigBuilder {
                 ));
             }
         };
+        if self.socketio.is_some() && (self.replay.is_some() || self.rules.is_some()) {
+            return Err(invalid(
+                "--socketio cannot be combined with --rules or --replay",
+            ));
+        }
+        if self
+            .socketio
+            .is_some_and(|(interval, timeout)| interval.is_zero() || timeout.is_zero())
+        {
+            return Err(invalid(
+                "the Socket.IO ping interval and timeout must be greater than zero",
+            ));
+        }
         if self.replay.is_some() && self.rules.is_some() {
             return Err(invalid(
                 "--rules and --replay cannot be combined: replay sends recorded frames, rules answer received ones",
@@ -358,6 +399,7 @@ impl MockConfigBuilder {
             stall,
             replay,
             rules,
+            socketio: self.socketio,
             seed: self.seed,
             tls,
         })
@@ -663,6 +705,9 @@ type WsStream<S> = SplitStream<WebSocketStream<S>>;
 /// An entry of a session's reply queue.
 enum Queued {
     Frame(Message),
+    /// A protocol frame that is not a reply: the Socket.IO open and
+    /// connect packets. It is sent, but not counted as a reply.
+    Control(Message),
     /// Close the connection with this code and reason, as a rule says.
     Close(u16, String),
 }
@@ -743,6 +788,18 @@ async fn run_session<S>(
     // Data frames received on this connection, for rules' `after` and
     // `{{seq}}`.
     let mut received = 0u64;
+    // A Socket.IO session's id, its next ping and the deadline of the pong
+    // it waits for.
+    let sid = format!("wsblast-mock-{}", plan.index);
+    let mut ping_at = None;
+    let mut pong_by: Option<Instant> = None;
+    if let (Some((interval, timeout)), Outgoing::Echo(queue)) =
+        (shared.config.socketio, &mut outgoing)
+    {
+        let open = socketio_open(&sid, interval, timeout);
+        queue.push_back((Instant::now(), Queued::Control(Message::Text(open.into()))));
+        ping_at = Some(Instant::now() + interval);
+    }
 
     loop {
         let due = outgoing.next_due(shared, &mut rng);
@@ -759,11 +816,30 @@ async fn run_session<S>(
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => Event::Cancelled,
+                () = sleep_until(pong_by.or(ping_at)) => Event::Ping,
                 () = sleep_until(due) => Event::Due,
                 msg = stream.next() => Event::Received(msg),
             }
         };
         match event {
+            Event::Ping => {
+                let now = Instant::now();
+                if pong_by.is_some_and(|by| by <= now) {
+                    // An Engine.IO server drops a client that missed a ping.
+                    close(&mut sink, CloseCode::Normal, "ping timeout".to_string()).await;
+                    drain(&mut stream).await;
+                    return;
+                }
+                if let (Some((interval, timeout)), Some(at)) = (shared.config.socketio, ping_at)
+                    && at <= now
+                {
+                    if sink.send(Message::Text("2".into())).await.is_err() {
+                        return;
+                    }
+                    pong_by = Some(now + timeout);
+                    ping_at = Some(now + interval);
+                }
+            }
             Event::Cancelled => {
                 shut_down(&mut sink, &mut stream).await;
                 return;
@@ -780,6 +856,12 @@ async fn run_session<S>(
                 }
                 let msg = match outgoing.pop() {
                     None => continue,
+                    Some(Queued::Control(msg)) => {
+                        if sink.send(msg).await.is_err() {
+                            return;
+                        }
+                        continue;
+                    }
                     Some(Queued::Frame(msg)) => msg,
                     Some(Queued::Close(code, reason)) => {
                         close(&mut sink, CloseCode::from(code), reason).await;
@@ -799,6 +881,26 @@ async fn run_session<S>(
                 }
             }
             Event::Received(msg) => match msg {
+                Some(Ok(Message::Text(text))) if shared.config.socketio.is_some() => {
+                    if text.as_str() == "3" {
+                        pong_by = None;
+                        continue;
+                    }
+                    let (reply, event) = socketio_reply(text.as_str(), &sid);
+                    if event {
+                        shared.counters.received.fetch_add(1, Ordering::Relaxed);
+                        received += 1;
+                    }
+                    if let (Some(reply), Outgoing::Echo(queue)) = (reply, &mut outgoing) {
+                        let reply = Message::Text(reply.into());
+                        if event {
+                            let due = Instant::now() + shared.reply_delay(&mut rng);
+                            queue.push_back((due, Queued::Frame(reply)));
+                        } else {
+                            queue.push_back((Instant::now(), Queued::Control(reply)));
+                        }
+                    }
+                }
                 Some(Ok(msg @ (Message::Text(_) | Message::Binary(_)))) => {
                     shared.counters.received.fetch_add(1, Ordering::Relaxed);
                     received += 1;
@@ -821,6 +923,8 @@ async fn run_session<S>(
 /// What woke a mock session up.
 enum Event {
     Cancelled,
+    /// A Socket.IO ping is due, or the pong to the last one is late.
+    Ping,
     /// The next outgoing frame is due.
     Due,
     Received(Option<std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>),
@@ -858,6 +962,29 @@ fn queue_replies(
             }
         }
     }
+}
+
+/// The Engine.IO open packet of a Socket.IO session.
+#[cfg(feature = "socketio")]
+fn socketio_open(sid: &str, interval: Duration, timeout: Duration) -> String {
+    crate::socketio::mock_open(sid, interval.as_millis(), timeout.as_millis())
+}
+
+#[cfg(not(feature = "socketio"))]
+fn socketio_open(_: &str, _: Duration, _: Duration) -> String {
+    String::new()
+}
+
+/// What a Socket.IO session answers to a client's frame, and whether the
+/// frame was an event.
+#[cfg(feature = "socketio")]
+fn socketio_reply(text: &str, sid: &str) -> (Option<String>, bool) {
+    crate::socketio::mock_reply(text, sid)
+}
+
+#[cfg(not(feature = "socketio"))]
+fn socketio_reply(_: &str, _: &str) -> (Option<String>, bool) {
+    (None, false)
 }
 
 async fn sleep_until(due: Option<Instant>) {
@@ -1099,6 +1226,10 @@ pub(crate) async fn run_command(args: &crate::cli::MockArgs) -> Result<()> {
     }
     if let Some(path) = &args.rules {
         builder = builder.rules(path);
+    }
+    #[cfg(feature = "socketio")]
+    if args.socketio {
+        builder = builder.socketio();
     }
     if let (Some(cert), Some(key)) = (&args.tls_cert, &args.tls_key) {
         builder = builder.tls(cert, key);

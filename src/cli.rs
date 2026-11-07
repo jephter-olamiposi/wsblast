@@ -354,6 +354,22 @@ pub(crate) struct Cli {
     #[arg(long = "graphql-ws-extensions", value_name = "JSON")]
     pub graphql_ws_extensions: Option<String>,
 
+    /// Socket.IO event each message is emitted as (--mode socketio)
+    #[cfg(feature = "socketio")]
+    #[arg(long = "sio-event", value_name = "NAME")]
+    pub sio_event: Option<String>,
+
+    /// Socket.IO namespace to connect to (--mode socketio), '/' by default
+    #[cfg(feature = "socketio")]
+    #[arg(long = "sio-namespace", value_name = "NAMESPACE")]
+    pub sio_namespace: Option<String>,
+
+    /// JSON object sent with the Socket.IO namespace connect, as a client's
+    /// `auth` option (--mode socketio)
+    #[cfg(feature = "socketio")]
+    #[arg(long = "sio-auth", value_name = "JSON")]
+    pub sio_auth: Option<String>,
+
     /// Output report format
     #[arg(long = "format", value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
@@ -637,6 +653,11 @@ pub(crate) struct MockArgs {
     #[arg(long = "rules", value_name = "FILE", conflicts_with = "replay")]
     pub rules: Option<PathBuf>,
 
+    /// Speak Socket.IO (Engine.IO 4): accept any namespace, acknowledge every event that asks for an ack with its arguments, echo the others, and ping every 25s
+    #[cfg(feature = "socketio")]
+    #[arg(long = "socketio", conflicts_with_all = ["replay", "rules"])]
+    pub socketio: bool,
+
     /// PEM certificate chain to serve wss:// instead of ws:// (clients must trust it, e.g. with SSL_CERT_FILE)
     #[arg(long = "tls-cert", value_name = "PEM", requires = "tls_key")]
     pub tls_cert: Option<PathBuf>,
@@ -713,7 +734,8 @@ impl JwtAlg {
 
 /// What each worker does on its connection.
 ///
-/// Only [`TestMode::Echo`] measures round-trip time, so latency SLOs require it.
+/// Only [`TestMode::Echo`] (and `TestMode::SocketIo`, with the `socketio`
+/// feature) measures round-trip time, so latency SLOs require it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[non_exhaustive]
 pub enum TestMode {
@@ -728,6 +750,25 @@ pub enum TestMode {
     #[cfg(feature = "graphql-ws")]
     #[value(name = "graphql-ws", alias = "graph-qlws")]
     GraphQLWS,
+    /// Socket.IO: emit each message as an event and record the time to its
+    /// acknowledgement, as echo mode records the time to the reply.
+    #[cfg_attr(docsrs, doc(cfg(feature = "socketio")))]
+    #[cfg(feature = "socketio")]
+    #[value(name = "socketio", alias = "socket.io")]
+    SocketIo,
+}
+
+impl TestMode {
+    /// Whether every message waits for its reply and records its round-trip
+    /// time: echo mode, and Socket.IO mode, whose reply is the event's ack.
+    pub(crate) fn awaits_replies(self) -> bool {
+        match self {
+            Self::Echo => true,
+            #[cfg(feature = "socketio")]
+            Self::SocketIo => true,
+            _ => false,
+        }
+    }
 }
 
 /// Format of the report produced by [`render_report`](crate::render_report).

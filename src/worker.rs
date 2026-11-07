@@ -246,6 +246,11 @@ impl WorkerSession {
             + Send
             + 'a,
     {
+        #[cfg(feature = "socketio")]
+        if self.config.mode == TestMode::SocketIo {
+            return Box::pin(self.run_socketio(ws_stream));
+        }
+
         #[cfg(feature = "scenario")]
         if let Some(phase) = self.scenario.clone()
             && !phase.actions.is_empty()
@@ -259,7 +264,63 @@ impl WorkerSession {
             TestMode::Listen => Box::pin(self.run_listen_loop(ws_stream)),
             #[cfg(feature = "graphql-ws")]
             TestMode::GraphQLWS => Box::pin(self.run_graphql_ws_loop(ws_stream)),
+            // Routed to `run_socketio` above.
+            #[cfg(feature = "socketio")]
+            TestMode::SocketIo => Box::pin(std::future::ready(SessionEnd::Lost)),
         }
+    }
+
+    /// A Socket.IO session: opens the namespace, then runs the echo loop, or
+    /// the phase's actions, through a pump that turns each data frame into
+    /// an event and its acknowledgement into the reply. A failed open is one
+    /// error before any message, and the connection is retried like a lost
+    /// one.
+    #[cfg(feature = "socketio")]
+    async fn run_socketio<S>(&mut self, mut ws_stream: S) -> SessionEnd
+    where
+        S: futures_util::Sink<Message, Error = TungsteniteError>
+            + futures_util::Stream<Item = std::result::Result<Message, TungsteniteError>>
+            + Unpin
+            + Send,
+    {
+        let Some(config) = self.config.socketio.clone() else {
+            return SessionEnd::Lost;
+        };
+        let opened = tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => None,
+            opened = tokio::time::timeout(
+                self.config.message_timeout,
+                crate::socketio::open(&mut ws_stream, &config),
+            ) => Some(opened.unwrap_or(Err(ErrorCategory::Timeout))),
+        };
+        match opened {
+            None => {
+                let _ = ws_stream.send(Message::Close(None)).await;
+                return SessionEnd::Finished;
+            }
+            Some(Err(category)) => {
+                self.metrics.record_error(category, ErrorScope::Attempt);
+                let _ = ws_stream.send(Message::Close(None)).await;
+                return self.session_end();
+            }
+            Some(Ok(())) => {}
+        }
+        let (channel, ends) = crate::socketio::channel();
+        let mut unsolicited = 0u64;
+        let pump = crate::socketio::pump(ws_stream, &config, ends, &mut unsolicited);
+        let session = async {
+            #[cfg(feature = "scenario")]
+            if let Some(phase) = self.scenario.clone()
+                && !phase.actions.is_empty()
+            {
+                return self.run_action_loop(channel, phase).await;
+            }
+            self.run_echo_loop(channel).await
+        };
+        let (end, ()) = tokio::join!(session, pump);
+        self.metrics.record_unsolicited_frames(unsolicited);
+        end
     }
 
     /// Classifies a session that ended on its own: cancellation (including the
@@ -709,7 +770,7 @@ impl WorkerSession {
         self.vars = vec![String::new(); phase.vars.len()];
 
         let mut seq = 0u64;
-        let echo = self.config.mode == TestMode::Echo;
+        let echo = self.config.mode.awaits_replies();
         let mut schedule = if echo {
             SendSchedule::new(self.config.rate_per_conn)
         } else {
@@ -821,7 +882,7 @@ impl WorkerSession {
 
                             self.metrics.record_message_sent(frame_len);
 
-                            if self.config.mode == TestMode::Echo {
+                            if self.config.mode.awaits_replies() {
                                 let mut unsolicited = 0u64;
                                 let recv_fut = self.await_reply(
                                     &mut stream,

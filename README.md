@@ -188,6 +188,7 @@ docker build -t wsblast https://github.com/jephter-olamiposi/wsblast.git
 | `compare` | yes | `--compare` and `--fail-on-regression` against a baseline report |
 | `auth` | yes | Bearer token and API key authentication, including tokens from a command |
 | `graphql-ws` | yes | GraphQL subscriptions over `graphql-transport-ws` and legacy `graphql-ws` |
+| `socketio` | yes | `--mode socketio`: Socket.IO events timed to their acks, and `wsblast mock --socketio` |
 | `prometheus` | yes | A live `/metrics` endpoint for the duration of a run |
 | `capture` | yes | A JSON Lines record of every frame and connection event |
 | `mock` | yes | `wsblast mock`, a local test server with configurable faults and scripted replies |

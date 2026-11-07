@@ -98,7 +98,7 @@ pub(crate) fn latency_basis_for(
     config: &LoadTestConfig,
     skips_response_time: bool,
 ) -> &'static str {
-    let paced_echo = config.mode == crate::cli::TestMode::Echo && config.rate_per_conn > 0;
+    let paced_echo = config.mode.awaits_replies() && config.rate_per_conn > 0;
     if paced_echo && !skips_response_time {
         "response_time"
     } else {
@@ -1279,7 +1279,7 @@ impl ScenarioExecutor {
             }
 
             let mut config = self.base_config.clone();
-            config.target_url = target.clone();
+            config.set_target(target);
             phase_targets.push(PhaseTarget {
                 phase: phase.name.clone(),
                 target_url: target.clone(),

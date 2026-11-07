@@ -184,6 +184,8 @@ mod report;
 mod runner;
 #[cfg(feature = "compare")]
 mod series_compare;
+#[cfg(feature = "socketio")]
+mod socketio;
 mod template;
 mod timeseries;
 #[cfg(any(feature = "mock", feature = "distributed"))]

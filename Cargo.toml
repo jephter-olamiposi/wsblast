@@ -91,10 +91,13 @@ ring = { version = "0.17.14", default-features = false, features = ["alloc"], op
 # they are opt-in. `jwt` is opt-in as well: it adds no crate to the tree, but
 # it signs credentials, which most runs do not need.
 # Library users can opt out with `default-features = false`.
-default = ["scenario", "compare", "auth", "graphql-ws", "prometheus", "capture", "mock", "distributed", "chaos"]
+default = ["scenario", "compare", "auth", "graphql-ws", "socketio", "prometheus", "capture", "mock", "distributed", "chaos"]
 scenario = ["dep:serde_norway"]
 auth = []
 graphql-ws = []
+# `--mode socketio`: Socket.IO (Engine.IO 4) events and acks over WebSocket,
+# and `wsblast mock --socketio`.
+socketio = []
 compare = []
 # `--prometheus-listen`: a /metrics endpoint served for the length of a run.
 prometheus = ["tokio/io-util"]
@@ -120,7 +123,7 @@ jwt = ["auth", "dep:ring"]
 # HTTPS with the same blocking HTTP client and rustls setup as `otel`.
 oauth2 = ["auth", "dep:reqwest"]
 # Kept so existing `--features full` invocations keep working.
-full = ["scenario", "auth", "graphql-ws", "compare", "prometheus", "capture", "mock", "distributed", "chaos"]
+full = ["scenario", "auth", "graphql-ws", "socketio", "compare", "prometheus", "capture", "mock", "distributed", "chaos"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

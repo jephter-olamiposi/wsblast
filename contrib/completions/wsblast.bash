@@ -32,7 +32,7 @@ _wsblast() {
 
     case "${cmd}" in
         wsblast)
-            opts="-u -c -d -n -r -p -H -o -h -V --url --connections --ramp-rate --duration --stages --arrival-rate --session-duration --max-connections --requests --rate --payload --payload-file --binary --data --header --subprotocol --source-ip --mode --connect-timeout --message-timeout --match --expect --ping-interval --max-p50 --max-p95 --max-p99 --max-p999 --max-error-rate --min-throughput --max-generator-lag --auth-type --auth-token --auth-token-cmd --auth-token-cmd-timeout --auth-token-refresh --auth-header --auth-apikey --auth-apikey-header --auth-jwt-alg --auth-jwt-key --auth-jwt-claims --auth-jwt-ttl --auth-jwt-kid --auth-jwt-per-connection --auth-oauth2-token-url --auth-oauth2-client-id --auth-oauth2-client-secret-file --auth-oauth2-scope --auth-oauth2-audience --graphql-ws-operation-name --graphql-ws-operation --graphql-ws-variables --graphql-ws-extensions --format --compare --compare-threshold --compare-window --fail-on-regression --capture --capture-limit --chaos-delay --chaos-drop --chaos-corrupt --chaos-close --chaos-close-mode --chaos-read-pause --chaos-seed --output --tui --no-progress --no-reconnect --prometheus-listen --otel-endpoint --otel-interval --otel-service-name --scenario --phase --agents --agent-token --agent-timeout --agent-ca --help --version mock agent render"
+            opts="-u -c -d -n -r -p -H -o -h -V --url --connections --ramp-rate --duration --stages --arrival-rate --session-duration --max-connections --requests --rate --payload --payload-file --binary --data --header --subprotocol --source-ip --mode --connect-timeout --message-timeout --match --expect --ping-interval --max-p50 --max-p95 --max-p99 --max-p999 --max-error-rate --min-throughput --max-generator-lag --auth-type --auth-token --auth-token-cmd --auth-token-cmd-timeout --auth-token-refresh --auth-header --auth-apikey --auth-apikey-header --auth-jwt-alg --auth-jwt-key --auth-jwt-claims --auth-jwt-ttl --auth-jwt-kid --auth-jwt-per-connection --auth-oauth2-token-url --auth-oauth2-client-id --auth-oauth2-client-secret-file --auth-oauth2-scope --auth-oauth2-audience --graphql-ws-operation-name --graphql-ws-operation --graphql-ws-variables --graphql-ws-extensions --sio-event --sio-namespace --sio-auth --format --compare --compare-threshold --compare-window --fail-on-regression --capture --capture-limit --chaos-delay --chaos-drop --chaos-corrupt --chaos-close --chaos-close-mode --chaos-read-pause --chaos-seed --output --tui --no-progress --no-reconnect --prometheus-listen --otel-endpoint --otel-interval --otel-service-name --scenario --phase --agents --agent-token --agent-timeout --agent-ca --help --version mock agent render"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -131,7 +131,7 @@ _wsblast() {
                     return 0
                     ;;
                 --mode)
-                    COMPREPLY=($(compgen -W "echo stream listen graphql-ws" -- "${cur}"))
+                    COMPREPLY=($(compgen -W "echo stream listen graphql-ws socketio" -- "${cur}"))
                     return 0
                     ;;
                 --connect-timeout)
@@ -267,6 +267,18 @@ _wsblast() {
                     return 0
                     ;;
                 --graphql-ws-extensions)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --sio-event)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --sio-namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --sio-auth)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -408,7 +420,7 @@ _wsblast() {
             return 0
             ;;
         wsblast__subcmd__mock)
-            opts="-h --listen --delay --jitter --close-after --reject-ratio --stall-every --stall-for --replay --rules --tls-cert --tls-key --help"
+            opts="-h --listen --delay --jitter --close-after --reject-ratio --stall-every --stall-for --replay --rules --socketio --tls-cert --tls-key --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

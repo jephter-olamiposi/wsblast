@@ -38,7 +38,7 @@
     "mode": {
       "description": "Session mode, printed with Rust Debug formatting.",
       "type": "string",
-      "enum": ["Echo", "Stream", "Listen", "GraphQLWS"]
+      "enum": ["Echo", "Stream", "Listen", "GraphQLWS", "SocketIo"]
     },
     "rate_per_conn": {
       "description": "Messages per second per connection (--rate), 0 for unthrottled. Absent from scenario reports, whose phases set their own rates, and from reports written before wsblast 0.2.2.",

@@ -79,6 +79,9 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--graphql-ws-operation', '--graphql-ws-operation', [CompletionResultType]::ParameterName, 'GraphQL WS operation (query/mutation/subscription)')
             [CompletionResult]::new('--graphql-ws-variables', '--graphql-ws-variables', [CompletionResultType]::ParameterName, 'GraphQL WS variables (JSON)')
             [CompletionResult]::new('--graphql-ws-extensions', '--graphql-ws-extensions', [CompletionResultType]::ParameterName, 'GraphQL WS extensions (JSON)')
+            [CompletionResult]::new('--sio-event', '--sio-event', [CompletionResultType]::ParameterName, 'Socket.IO event each message is emitted as (--mode socketio)')
+            [CompletionResult]::new('--sio-namespace', '--sio-namespace', [CompletionResultType]::ParameterName, 'Socket.IO namespace to connect to (--mode socketio), ''/'' by default')
+            [CompletionResult]::new('--sio-auth', '--sio-auth', [CompletionResultType]::ParameterName, 'JSON object sent with the Socket.IO namespace connect, as a client''s `auth` option (--mode socketio)')
             [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output report format')
             [CompletionResult]::new('--compare', '--compare', [CompletionResultType]::ParameterName, 'Compare two JSON reports for regression detection (--format text, json, markdown or html)')
             [CompletionResult]::new('--compare-threshold', '--compare-threshold', [CompletionResultType]::ParameterName, 'Regression threshold percentage (default: 10%)')
@@ -131,6 +134,7 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--rules', '--rules', [CompletionResultType]::ParameterName, 'Answer frames as a YAML rules file says: match by text or JSON field, reply from templates, delay or close')
             [CompletionResult]::new('--tls-cert', '--tls-cert', [CompletionResultType]::ParameterName, 'PEM certificate chain to serve wss:// instead of ws:// (clients must trust it, e.g. with SSL_CERT_FILE)')
             [CompletionResult]::new('--tls-key', '--tls-key', [CompletionResultType]::ParameterName, 'PEM private key for --tls-cert')
+            [CompletionResult]::new('--socketio', '--socketio', [CompletionResultType]::ParameterName, 'Speak Socket.IO (Engine.IO 4): accept any namespace, acknowledge every event that asks for an ack with its arguments, echo the others, and ping every 25s')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

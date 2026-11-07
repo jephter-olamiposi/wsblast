@@ -28,7 +28,8 @@ subcommand.
 | `--data` | | Per-connection test data: a CSV file with a header row, or JSON Lines; connection N uses row N ([templates](templates.md#2-data-files)) |
 | `--binary` | | Send binary frames |
 | `-H, --header` | | Handshake header, repeatable; the value may hold `{{worker_id}}` and `{{data.COLUMN}}` |
-| `--mode` | `echo` | `echo`, `stream` or `listen` |
+| `--mode` | `echo` | `echo`, `stream`, `listen`, `graphql-ws` or `socketio` |
+| `--sio-event`, `--sio-namespace`, `--sio-auth` | `message`, `/`, none | With `--mode socketio`: the event each message is emitted as, the namespace, and the JSON object sent with the namespace connect ([Socket.IO](socketio.md)) |
 | `--match` | `first` | Reply matching in echo mode: `first`, `exact` or `json:/path` |
 | `--expect` | | Check every echo reply: `json:/pointer`, `json:/pointer=VALUE` or `contains:TEXT`; a reply that fails is a `check_failed` error ([templates](templates.md#3-values-from-replies-and-reply-checks)) |
 

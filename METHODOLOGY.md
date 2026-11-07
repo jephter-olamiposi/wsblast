@@ -82,8 +82,11 @@ Every mode answers a server Ping with a Pong.
 | `stream` | Each frame written | Every text or binary frame read | None | Rejected at startup |
 | `listen` | 0 | Every text or binary frame read | None | Rejected at startup |
 | `graphql-ws` | `connection_init` and `subscribe` (2 per session) | Each `next` or `data` message | None | Rejected at startup |
+| `socketio` | Each event emitted | Each ack of the latest event, in the test window | One per ack: from the event to its ack | Allowed |
 
-Only echo mode measures round-trip time. `--max-p50`, `--max-p95`, `--max-p99` and `--max-p999` with any other mode fail at startup with exit code 1:
+Socket.IO mode runs the echo loop over an Engine.IO session: every message is an event with an ack id, the ack with that id is the reply, and everything this document says about echo mode (pacing, response time, timeouts, `--expect`, the error rate) applies to it. The namespace connect is not part of the handshake latency; a session that fails to open counts one error before any message. Engine.IO pings are answered as they arrive, and are not messages. See [docs/socketio.md](docs/socketio.md).
+
+Only these two modes measure round-trip time. `--max-p50`, `--max-p95`, `--max-p99` and `--max-p999` with any other mode fail at startup with exit code 1:
 
 ```text
 Error: Configuration error: Unsupported option combination: latency SLOs (--max-p50/--max-p95/--max-p99/--max-p999) require --mode echo; Stream mode does not measure round-trip time

@@ -45,6 +45,7 @@ jobs:
           - scenario
           - auth
           - graphql-ws
+          - socketio
           - compare
           - prometheus
           - otel

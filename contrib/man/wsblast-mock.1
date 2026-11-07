@@ -4,7 +4,7 @@
 .SH NAME
 wsblast\-mock \- Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file
 .SH SYNOPSIS
-\fBwsblast mock\fR [\fB\-\-listen\fR] [\fB\-\-delay\fR] [\fB\-\-jitter\fR] [\fB\-\-close\-after\fR] [\fB\-\-reject\-ratio\fR] [\fB\-\-stall\-every\fR] [\fB\-\-stall\-for\fR] [\fB\-\-replay\fR] [\fB\-\-rules\fR] [\fB\-\-tls\-cert\fR] [\fB\-\-tls\-key\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBwsblast mock\fR [\fB\-\-listen\fR] [\fB\-\-delay\fR] [\fB\-\-jitter\fR] [\fB\-\-close\-after\fR] [\fB\-\-reject\-ratio\fR] [\fB\-\-stall\-every\fR] [\fB\-\-stall\-for\fR] [\fB\-\-replay\fR] [\fB\-\-rules\fR] [\fB\-\-socketio\fR] [\fB\-\-tls\-cert\fR] [\fB\-\-tls\-key\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file
 .SH OPTIONS
@@ -35,6 +35,9 @@ Instead of echoing, send each connection the frames a \-\-capture file recorded 
 .TP
 \fB\-\-rules\fR \fI<FILE>\fR
 Answer frames as a YAML rules file says: match by text or JSON field, reply from templates, delay or close
+.TP
+\fB\-\-socketio\fR
+Speak Socket.IO (Engine.IO 4): accept any namespace, acknowledge every event that asks for an ack with its arguments, echo the others, and ping every 25s
 .TP
 \fB\-\-tls\-cert\fR \fI<PEM>\fR
 PEM certificate chain to serve wss:// instead of ws:// (clients must trust it, e.g. with SSL_CERT_FILE)

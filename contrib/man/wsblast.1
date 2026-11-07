@@ -4,7 +4,7 @@
 .SH NAME
 wsblast \- High\-performance WebSocket load\-testing CLI with percentile latency & CI gating
 .SH SYNOPSIS
-\fBwsblast\fR [\fB\-u\fR|\fB\-\-url\fR] [\fB\-c\fR|\fB\-\-connections\fR] [\fB\-\-ramp\-rate\fR] [\fB\-d\fR|\fB\-\-duration\fR] [\fB\-\-stages\fR] [\fB\-\-arrival\-rate\fR] [\fB\-\-session\-duration\fR] [\fB\-\-max\-connections\fR] [\fB\-n\fR|\fB\-\-requests\fR] [\fB\-r\fR|\fB\-\-rate\fR] [\fB\-p\fR|\fB\-\-payload\fR] [\fB\-\-payload\-file\fR] [\fB\-\-binary\fR] [\fB\-\-data\fR] [\fB\-H\fR|\fB\-\-header\fR] [\fB\-\-subprotocol\fR] [\fB\-\-source\-ip\fR] [\fB\-\-mode\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-message\-timeout\fR] [\fB\-\-match\fR] [\fB\-\-expect\fR] [\fB\-\-ping\-interval\fR] [\fB\-\-max\-p50\fR] [\fB\-\-max\-p95\fR] [\fB\-\-max\-p99\fR] [\fB\-\-max\-p999\fR] [\fB\-\-max\-error\-rate\fR] [\fB\-\-min\-throughput\fR] [\fB\-\-max\-generator\-lag\fR] [\fB\-\-auth\-type\fR] [\fB\-\-auth\-token\fR] [\fB\-\-auth\-token\-cmd\fR] [\fB\-\-auth\-token\-cmd\-timeout\fR] [\fB\-\-auth\-token\-refresh\fR] [\fB\-\-auth\-header\fR] [\fB\-\-auth\-apikey\fR] [\fB\-\-auth\-apikey\-header\fR] [\fB\-\-auth\-jwt\-alg\fR] [\fB\-\-auth\-jwt\-key\fR] [\fB\-\-auth\-jwt\-claims\fR] [\fB\-\-auth\-jwt\-ttl\fR] [\fB\-\-auth\-jwt\-kid\fR] [\fB\-\-auth\-jwt\-per\-connection\fR] [\fB\-\-auth\-oauth2\-token\-url\fR] [\fB\-\-auth\-oauth2\-client\-id\fR] [\fB\-\-auth\-oauth2\-client\-secret\-file\fR] [\fB\-\-auth\-oauth2\-scope\fR] [\fB\-\-auth\-oauth2\-audience\fR] [\fB\-\-graphql\-ws\-operation\-name\fR] [\fB\-\-graphql\-ws\-operation\fR] [\fB\-\-graphql\-ws\-variables\fR] [\fB\-\-graphql\-ws\-extensions\fR] [\fB\-\-format\fR] [\fB\-\-compare\fR] [\fB\-\-compare\-threshold\fR] [\fB\-\-compare\-window\fR] [\fB\-\-fail\-on\-regression\fR] [\fB\-\-capture\fR] [\fB\-\-capture\-limit\fR] [\fB\-\-chaos\-delay\fR] [\fB\-\-chaos\-drop\fR] [\fB\-\-chaos\-corrupt\fR] [\fB\-\-chaos\-close\fR] [\fB\-\-chaos\-close\-mode\fR] [\fB\-\-chaos\-read\-pause\fR] [\fB\-\-chaos\-seed\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-tui\fR] [\fB\-\-no\-progress\fR] [\fB\-\-no\-reconnect\fR] [\fB\-\-prometheus\-listen\fR] [\fB\-\-otel\-endpoint\fR] [\fB\-\-otel\-interval\fR] [\fB\-\-otel\-service\-name\fR] [\fB\-\-scenario\fR] [\fB\-\-phase\fR] [\fB\-\-agents\fR] [\fB\-\-agent\-token\fR] [\fB\-\-agent\-timeout\fR] [\fB\-\-agent\-ca\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIURL\fR] [\fIsubcommands\fR]
+\fBwsblast\fR [\fB\-u\fR|\fB\-\-url\fR] [\fB\-c\fR|\fB\-\-connections\fR] [\fB\-\-ramp\-rate\fR] [\fB\-d\fR|\fB\-\-duration\fR] [\fB\-\-stages\fR] [\fB\-\-arrival\-rate\fR] [\fB\-\-session\-duration\fR] [\fB\-\-max\-connections\fR] [\fB\-n\fR|\fB\-\-requests\fR] [\fB\-r\fR|\fB\-\-rate\fR] [\fB\-p\fR|\fB\-\-payload\fR] [\fB\-\-payload\-file\fR] [\fB\-\-binary\fR] [\fB\-\-data\fR] [\fB\-H\fR|\fB\-\-header\fR] [\fB\-\-subprotocol\fR] [\fB\-\-source\-ip\fR] [\fB\-\-mode\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-message\-timeout\fR] [\fB\-\-match\fR] [\fB\-\-expect\fR] [\fB\-\-ping\-interval\fR] [\fB\-\-max\-p50\fR] [\fB\-\-max\-p95\fR] [\fB\-\-max\-p99\fR] [\fB\-\-max\-p999\fR] [\fB\-\-max\-error\-rate\fR] [\fB\-\-min\-throughput\fR] [\fB\-\-max\-generator\-lag\fR] [\fB\-\-auth\-type\fR] [\fB\-\-auth\-token\fR] [\fB\-\-auth\-token\-cmd\fR] [\fB\-\-auth\-token\-cmd\-timeout\fR] [\fB\-\-auth\-token\-refresh\fR] [\fB\-\-auth\-header\fR] [\fB\-\-auth\-apikey\fR] [\fB\-\-auth\-apikey\-header\fR] [\fB\-\-auth\-jwt\-alg\fR] [\fB\-\-auth\-jwt\-key\fR] [\fB\-\-auth\-jwt\-claims\fR] [\fB\-\-auth\-jwt\-ttl\fR] [\fB\-\-auth\-jwt\-kid\fR] [\fB\-\-auth\-jwt\-per\-connection\fR] [\fB\-\-auth\-oauth2\-token\-url\fR] [\fB\-\-auth\-oauth2\-client\-id\fR] [\fB\-\-auth\-oauth2\-client\-secret\-file\fR] [\fB\-\-auth\-oauth2\-scope\fR] [\fB\-\-auth\-oauth2\-audience\fR] [\fB\-\-graphql\-ws\-operation\-name\fR] [\fB\-\-graphql\-ws\-operation\fR] [\fB\-\-graphql\-ws\-variables\fR] [\fB\-\-graphql\-ws\-extensions\fR] [\fB\-\-sio\-event\fR] [\fB\-\-sio\-namespace\fR] [\fB\-\-sio\-auth\fR] [\fB\-\-format\fR] [\fB\-\-compare\fR] [\fB\-\-compare\-threshold\fR] [\fB\-\-compare\-window\fR] [\fB\-\-fail\-on\-regression\fR] [\fB\-\-capture\fR] [\fB\-\-capture\-limit\fR] [\fB\-\-chaos\-delay\fR] [\fB\-\-chaos\-drop\fR] [\fB\-\-chaos\-corrupt\fR] [\fB\-\-chaos\-close\fR] [\fB\-\-chaos\-close\-mode\fR] [\fB\-\-chaos\-read\-pause\fR] [\fB\-\-chaos\-seed\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-tui\fR] [\fB\-\-no\-progress\fR] [\fB\-\-no\-reconnect\fR] [\fB\-\-prometheus\-listen\fR] [\fB\-\-otel\-endpoint\fR] [\fB\-\-otel\-interval\fR] [\fB\-\-otel\-service\-name\fR] [\fB\-\-scenario\fR] [\fB\-\-phase\fR] [\fB\-\-agents\fR] [\fB\-\-agent\-token\fR] [\fB\-\-agent\-timeout\fR] [\fB\-\-agent\-ca\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIURL\fR] [\fIsubcommands\fR]
 .SH DESCRIPTION
 wsblast stresses WebSocket targets, computes high\-resolution latency percentiles (p50/p95/p99/p99.9), maps failure taxonomy, and gates CI pipelines via SLO thresholds.
 .SH OPTIONS
@@ -75,6 +75,8 @@ stream: Continuously stream frames without awaiting per\-frame acknowledgments
 listen: Connect workers and passively record incoming server\-pushed broadcast messages
 .IP \(bu 2
 graphql\-ws: Apollo GraphQL WS protocol (subscriptions)
+.IP \(bu 2
+socketio: Socket.IO: emit each message as an event and record the time to its acknowledgement, as echo mode records the time to the reply
 .RE
 .TP
 \fB\-\-connect\-timeout\fR \fI<DURATION>\fR [default: 5s]
@@ -221,6 +223,15 @@ GraphQL WS variables (JSON)
 .TP
 \fB\-\-graphql\-ws\-extensions\fR \fI<JSON>\fR
 GraphQL WS extensions (JSON)
+.TP
+\fB\-\-sio\-event\fR \fI<NAME>\fR
+Socket.IO event each message is emitted as (\-\-mode socketio)
+.TP
+\fB\-\-sio\-namespace\fR \fI<NAMESPACE>\fR
+Socket.IO namespace to connect to (\-\-mode socketio), \*(Aq/\*(Aq by default
+.TP
+\fB\-\-sio\-auth\fR \fI<JSON>\fR
+JSON object sent with the Socket.IO namespace connect, as a client\*(Aqs `auth` option (\-\-mode socketio)
 .TP
 \fB\-\-format\fR \fI<FORMAT>\fR [default: text]
 Output report format

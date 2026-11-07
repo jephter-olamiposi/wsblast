@@ -29,6 +29,7 @@ Contents:
 | `--stall-for DURATION` | off | How long each stall lasts. Must be shorter than `--stall-every`. |
 | `--replay FILE` | off | Instead of echoing, send each connection the frames a `--capture` file recorded as received. |
 | `--rules FILE` | off | Answer frames as a YAML rules file says: match by text or JSON field, reply from templates, delay or close. Cannot be combined with `--replay`. See [section 9](#9-scripted-replies---rules). |
+| `--socketio` | off | Speak Socket.IO (Engine.IO 4): accept any namespace, acknowledge every event that asks for an ack with its arguments after the reply delay, echo the others, and ping every 25 s, closing a connection that misses its pong for 20 s. Cannot be combined with `--rules` or `--replay`. See [docs/socketio.md](socketio.md#5-testing-against-the-mock). |
 | `--tls-cert PEM` | off | Serve `wss://` with this PEM certificate chain. Needs `--tls-key`. See [section 8](#8-serving-wss-tls). |
 | `--tls-key PEM` | off | PEM private key (PKCS#8, PKCS#1 or SEC1) for `--tls-cert`. |
 

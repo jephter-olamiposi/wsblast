@@ -76,6 +76,9 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --graphql-ws-operation 'GraphQL WS operation (query/mutation/subscription)'
             cand --graphql-ws-variables 'GraphQL WS variables (JSON)'
             cand --graphql-ws-extensions 'GraphQL WS extensions (JSON)'
+            cand --sio-event 'Socket.IO event each message is emitted as (--mode socketio)'
+            cand --sio-namespace 'Socket.IO namespace to connect to (--mode socketio), ''/'' by default'
+            cand --sio-auth 'JSON object sent with the Socket.IO namespace connect, as a client''s `auth` option (--mode socketio)'
             cand --format 'Output report format'
             cand --compare 'Compare two JSON reports for regression detection (--format text, json, markdown or html)'
             cand --compare-threshold 'Regression threshold percentage (default: 10%)'
@@ -127,6 +130,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --rules 'Answer frames as a YAML rules file says: match by text or JSON field, reply from templates, delay or close'
             cand --tls-cert 'PEM certificate chain to serve wss:// instead of ws:// (clients must trust it, e.g. with SSL_CERT_FILE)'
             cand --tls-key 'PEM private key for --tls-cert'
+            cand --socketio 'Speak Socket.IO (Engine.IO 4): accept any namespace, acknowledge every event that asks for an ack with its arguments, echo the others, and ping every 25s'
             cand -h 'Print help'
             cand --help 'Print help'
         }

@@ -1,6 +1,6 @@
 # Print an optspec for argparse to handle cmd's options that are independent of any subcommand.
 function __fish_wsblast_global_optspecs
-    string join \n u/url= c/connections= ramp-rate= d/duration= stages= arrival-rate= session-duration= max-connections= n/requests= r/rate= p/payload= payload-file= binary data= H/header= subprotocol= source-ip= mode= connect-timeout= message-timeout= match= expect= ping-interval= max-p50= max-p95= max-p99= max-p999= max-error-rate= min-throughput= max-generator-lag= auth-type= auth-token= auth-token-cmd= auth-token-cmd-timeout= auth-token-refresh= auth-header= auth-apikey= auth-apikey-header= auth-jwt-alg= auth-jwt-key= auth-jwt-claims= auth-jwt-ttl= auth-jwt-kid= auth-jwt-per-connection auth-oauth2-token-url= auth-oauth2-client-id= auth-oauth2-client-secret-file= auth-oauth2-scope= auth-oauth2-audience= graphql-ws-operation-name= graphql-ws-operation= graphql-ws-variables= graphql-ws-extensions= format= compare= compare-threshold= compare-window= fail-on-regression capture= capture-limit= chaos-delay= chaos-drop= chaos-corrupt= chaos-close= chaos-close-mode= chaos-read-pause= chaos-seed= o/output= tui no-progress no-reconnect prometheus-listen= otel-endpoint= otel-interval= otel-service-name= scenario= phase= agents= agent-token= agent-timeout= agent-ca= h/help V/version
+    string join \n u/url= c/connections= ramp-rate= d/duration= stages= arrival-rate= session-duration= max-connections= n/requests= r/rate= p/payload= payload-file= binary data= H/header= subprotocol= source-ip= mode= connect-timeout= message-timeout= match= expect= ping-interval= max-p50= max-p95= max-p99= max-p999= max-error-rate= min-throughput= max-generator-lag= auth-type= auth-token= auth-token-cmd= auth-token-cmd-timeout= auth-token-refresh= auth-header= auth-apikey= auth-apikey-header= auth-jwt-alg= auth-jwt-key= auth-jwt-claims= auth-jwt-ttl= auth-jwt-kid= auth-jwt-per-connection auth-oauth2-token-url= auth-oauth2-client-id= auth-oauth2-client-secret-file= auth-oauth2-scope= auth-oauth2-audience= graphql-ws-operation-name= graphql-ws-operation= graphql-ws-variables= graphql-ws-extensions= sio-event= sio-namespace= sio-auth= format= compare= compare-threshold= compare-window= fail-on-regression capture= capture-limit= chaos-delay= chaos-drop= chaos-corrupt= chaos-close= chaos-close-mode= chaos-read-pause= chaos-seed= o/output= tui no-progress no-reconnect prometheus-listen= otel-endpoint= otel-interval= otel-service-name= scenario= phase= agents= agent-token= agent-timeout= agent-ca= h/help V/version
 end
 
 function __fish_wsblast_needs_command
@@ -43,7 +43,8 @@ complete -c wsblast -n "__fish_wsblast_needs_command" -l source-ip -d 'Local add
 complete -c wsblast -n "__fish_wsblast_needs_command" -l mode -d 'Load testing execution mode' -r -f -a "echo\t'Send request frame, await response, and record round-trip latency (RTT)'
 stream\t'Continuously stream frames without awaiting per-frame acknowledgments'
 listen\t'Connect workers and passively record incoming server-pushed broadcast messages'
-graphql-ws\t'Apollo GraphQL WS protocol (subscriptions)'"
+graphql-ws\t'Apollo GraphQL WS protocol (subscriptions)'
+socketio\t'Socket.IO: emit each message as an event and record the time to its acknowledgement, as echo mode records the time to the reply'"
 complete -c wsblast -n "__fish_wsblast_needs_command" -l connect-timeout -d 'Connection handshake timeout (e.g., \'5s\', \'2000ms\')' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l message-timeout -d 'Per-message response timeout in echo mode (e.g., \'5s\', \'1000ms\')' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l match -d 'Echo reply matching: first (default: the first data frame after a send is the reply), exact, or json:POINTER (an RFC 6901 pointer such as json:/seq)' -r
@@ -86,6 +87,9 @@ complete -c wsblast -n "__fish_wsblast_needs_command" -l graphql-ws-operation-na
 complete -c wsblast -n "__fish_wsblast_needs_command" -l graphql-ws-operation -d 'GraphQL WS operation (query/mutation/subscription)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l graphql-ws-variables -d 'GraphQL WS variables (JSON)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l graphql-ws-extensions -d 'GraphQL WS extensions (JSON)' -r
+complete -c wsblast -n "__fish_wsblast_needs_command" -l sio-event -d 'Socket.IO event each message is emitted as (--mode socketio)' -r
+complete -c wsblast -n "__fish_wsblast_needs_command" -l sio-namespace -d 'Socket.IO namespace to connect to (--mode socketio), \'/\' by default' -r
+complete -c wsblast -n "__fish_wsblast_needs_command" -l sio-auth -d 'JSON object sent with the Socket.IO namespace connect, as a client\'s `auth` option (--mode socketio)' -r
 complete -c wsblast -n "__fish_wsblast_needs_command" -l format -d 'Output report format' -r -f -a "text\t'Human-readable styled terminal tables'
 json\t'Schema-versioned JSON for CI parsing and metric archiving'
 markdown\t'GitHub Flavored Markdown table for PR comments and job summaries'
@@ -136,6 +140,7 @@ complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l replay -d 'Inst
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l rules -d 'Answer frames as a YAML rules file says: match by text or JSON field, reply from templates, delay or close' -r -F
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l tls-cert -d 'PEM certificate chain to serve wss:// instead of ws:// (clients must trust it, e.g. with SSL_CERT_FILE)' -r -F
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l tls-key -d 'PEM private key for --tls-cert' -r -F
+complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l socketio -d 'Speak Socket.IO (Engine.IO 4): accept any namespace, acknowledge every event that asks for an ack with its arguments, echo the others, and ping every 25s'
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -s h -l help -d 'Print help'
 complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -l listen -d 'Address to accept coordinators on (host:port, e.g. \'0.0.0.0:7700\'; port 0 picks a free port)' -r
 complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -l token -d 'Token coordinators must present, at least 16 characters; required, here or in WSBLAST_AGENT_TOKEN' -r

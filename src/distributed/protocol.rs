@@ -196,6 +196,14 @@ impl Share {
     }
 }
 
+/// The Socket.IO settings on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireSocketIo {
+    pub(crate) namespace: String,
+    pub(crate) event: String,
+    pub(crate) auth: Option<String>,
+}
+
 /// An arrival-rate model on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WireArrivals {
@@ -415,6 +423,9 @@ pub(crate) struct WireConfig {
     pub(crate) expect: Option<crate::check::Check>,
     pub(crate) reconnect: bool,
     pub(crate) graphql: Option<WireGraphql>,
+    /// The `--sio-*` settings of a socketio run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) socketio: Option<WireSocketIo>,
     /// The scenario phase this share runs, if any.
     #[serde(default)]
     pub(crate) phase: Option<WirePhase>,
@@ -593,6 +604,14 @@ impl WireConfig {
         });
         #[cfg(not(feature = "graphql-ws"))]
         let graphql = None;
+        #[cfg(feature = "socketio")]
+        let socketio = config.socketio.as_ref().map(|sio| WireSocketIo {
+            namespace: sio.namespace.clone(),
+            event: sio.event.clone(),
+            auth: sio.auth.clone(),
+        });
+        #[cfg(not(feature = "socketio"))]
+        let socketio = None;
         #[cfg(feature = "auth")]
         let live_auth = config
             .live_auth
@@ -633,6 +652,7 @@ impl WireConfig {
             expect: config.expect.clone(),
             reconnect: !config.no_reconnect,
             graphql,
+            socketio,
             phase: None,
             capture: None,
             live_auth,
@@ -722,6 +742,15 @@ impl WireConfig {
         }
         if let Some(subprotocol) = self.subprotocol {
             builder = builder.subprotocol(subprotocol);
+        }
+        #[cfg(feature = "socketio")]
+        if let Some(sio) = self.socketio {
+            builder = builder
+                .socketio_namespace(sio.namespace)
+                .socketio_event(sio.event);
+            if let Some(auth) = sio.auth {
+                builder = builder.socketio_auth(auth);
+            }
         }
         if let Some(graphql) = self.graphql {
             #[cfg(feature = "graphql-ws")]

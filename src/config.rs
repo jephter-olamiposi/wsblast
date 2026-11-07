@@ -67,6 +67,9 @@ pub struct LoadTestConfig {
     pub(crate) live_auth: Option<crate::auth::LiveAuthHeader>,
     #[cfg(feature = "graphql-ws")]
     pub(crate) graphql_ws: Option<GraphQLWSConfig>,
+    /// The namespace, event and auth of `--mode socketio`.
+    #[cfg(feature = "socketio")]
+    pub(crate) socketio: Option<crate::socketio::SocketIoConfig>,
     pub(crate) slo: SloThresholds,
     pub(crate) output_format: OutputFormat,
     pub(crate) output_path: Option<PathBuf>,
@@ -92,6 +95,18 @@ pub struct LoadTestConfig {
 }
 
 impl LoadTestConfig {
+    /// Points the run at `url`, a scenario phase's target, with the
+    /// Socket.IO path and query added in socketio mode, as the builder adds
+    /// them to the configured target.
+    #[cfg(feature = "scenario")]
+    pub(crate) fn set_target(&mut self, url: &Url) {
+        self.target_url = url.clone();
+        #[cfg(feature = "socketio")]
+        if self.socketio.is_some() {
+            crate::socketio::socketio_url(&mut self.target_url);
+        }
+    }
+
     /// The number of connections a staged run should have open `elapsed`
     /// after it started: the stage target, or this agent's share of it.
     pub(crate) fn stage_target(&self, elapsed: Duration) -> usize {
@@ -293,6 +308,8 @@ pub struct LoadTestConfigBuilder {
     ping_interval: Duration,
     #[cfg(feature = "graphql-ws")]
     graphql: GraphQLOptions,
+    #[cfg(feature = "socketio")]
+    socketio: SocketIoOptions,
     slo: SloThresholds,
     output_format: OutputFormat,
     progress: bool,
@@ -349,6 +366,8 @@ impl LoadTestConfigBuilder {
             ping_interval: Duration::ZERO,
             #[cfg(feature = "graphql-ws")]
             graphql: GraphQLOptions::default(),
+            #[cfg(feature = "socketio")]
+            socketio: SocketIoOptions::default(),
             slo: SloThresholds::default(),
             output_format: OutputFormat::Text,
             progress: false,
@@ -654,6 +673,32 @@ impl LoadTestConfigBuilder {
         self
     }
 
+    /// Sets the event `--mode socketio` emits each message as; `message`
+    /// by default.
+    #[cfg(feature = "socketio")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "socketio")))]
+    pub fn socketio_event(mut self, event: impl Into<String>) -> Self {
+        self.socketio.event = Some(event.into());
+        self
+    }
+
+    /// Sets the namespace `--mode socketio` connects to; `/` by default.
+    #[cfg(feature = "socketio")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "socketio")))]
+    pub fn socketio_namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.socketio.namespace = Some(namespace.into());
+        self
+    }
+
+    /// Sets the JSON object `--mode socketio` sends with the namespace
+    /// connect, as a Socket.IO client's `auth` option.
+    #[cfg(feature = "socketio")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "socketio")))]
+    pub fn socketio_auth(mut self, auth: impl Into<String>) -> Self {
+        self.socketio.auth = Some(auth.into());
+        self
+    }
+
     /// Sets the GraphQL operation sent by [`TestMode::GraphQLWS`] workers.
     /// Required in that mode.
     #[cfg(feature = "graphql-ws")]
@@ -736,6 +781,14 @@ impl LoadTestConfigBuilder {
         }
         #[cfg(feature = "graphql-ws")]
         let graphql_ws = validate_graphql(self.mode, self.graphql)?;
+        #[cfg(feature = "socketio")]
+        let mut target_url = target_url;
+        #[cfg(feature = "socketio")]
+        let socketio = self.socketio.compile(self.mode, &self.payload)?;
+        #[cfg(feature = "socketio")]
+        if socketio.is_some() {
+            crate::socketio::socketio_url(&mut target_url);
+        }
         validate_reply_match(&self.reply_match, self.mode, std::iter::once(&self.payload))?;
         if let Some(message) = self.invalid_header {
             return Err(ConfigError::InvalidHeader(message).into());
@@ -768,9 +821,9 @@ impl LoadTestConfigBuilder {
             .map(crate::check::Check::parse_flag)
             .transpose()
             .map_err(ConfigError::InvalidOption)?;
-        if expect.is_some() && self.mode != TestMode::Echo {
+        if expect.is_some() && !self.mode.awaits_replies() {
             return Err(ConfigError::UnsupportedOption(format!(
-                "--expect requires --mode echo; {:?} mode does not wait for replies",
+                "--expect requires --mode echo or socketio; {:?} mode does not wait for replies",
                 self.mode
             ))
             .into());
@@ -814,6 +867,8 @@ impl LoadTestConfigBuilder {
             live_auth: None,
             #[cfg(feature = "graphql-ws")]
             graphql_ws,
+            #[cfg(feature = "socketio")]
+            socketio,
             slo: self.slo,
             output_format: self.output_format,
             output_path: None,
@@ -849,7 +904,7 @@ pub(crate) fn validate_chaos_mode(
     if !chaos.acts_on_sends() {
         return Ok(());
     }
-    let sends_data = has_actions || matches!(mode, TestMode::Echo | TestMode::Stream);
+    let sends_data = has_actions || mode.awaits_replies() || mode == TestMode::Stream;
     if !sends_data {
         return Err(ConfigError::UnsupportedOption(format!(
             "{prefix}chaos injection needs data sends to act on; {mode:?} mode sends none, use --mode echo or stream, or an action script (--chaos-read-pause works in every mode)"
@@ -1091,13 +1146,60 @@ fn validate_latency_mode(
 ) -> Result<()> {
     // Only echo mode measures round-trip time; any other mode would leave the
     // RTT histogram empty and a latency budget could never be evaluated.
-    if slo.has_latency() && mode != TestMode::Echo {
+    if slo.has_latency() && !mode.awaits_replies() {
         return Err(ConfigError::UnsupportedOption(format!(
             "{prefix}latency SLOs ({keys}) require --mode echo; {mode:?} mode does not measure round-trip time"
         ))
         .into());
     }
     Ok(())
+}
+
+/// The `--sio-*` settings of a builder, unchecked.
+#[cfg(feature = "socketio")]
+#[derive(Debug, Clone, Default)]
+struct SocketIoOptions {
+    event: Option<String>,
+    namespace: Option<String>,
+    auth: Option<String>,
+}
+
+#[cfg(feature = "socketio")]
+impl SocketIoOptions {
+    /// The Socket.IO settings of a run in `mode`: `None` outside socketio
+    /// mode, where the options are rejected, and checked settings inside it,
+    /// which needs a text payload.
+    fn compile(
+        self,
+        mode: TestMode,
+        payload: &PayloadConfig,
+    ) -> Result<Option<crate::socketio::SocketIoConfig>> {
+        let set = self.event.is_some() || self.namespace.is_some() || self.auth.is_some();
+        if mode != TestMode::SocketIo {
+            if set {
+                return Err(ConfigError::UnsupportedOption(
+                    "--sio-event, --sio-namespace and --sio-auth require --mode socketio"
+                        .to_string(),
+                )
+                .into());
+            }
+            return Ok(None);
+        }
+        if matches!(payload, PayloadConfig::Binary(_)) {
+            return Err(ConfigError::UnsupportedOption(
+                "--mode socketio sends text events; binary payloads (--binary) are not supported"
+                    .to_string(),
+            )
+            .into());
+        }
+        let config = crate::socketio::SocketIoConfig {
+            namespace: self.namespace.unwrap_or_else(|| "/".to_string()),
+            event: self.event.unwrap_or_else(|| "message".to_string()),
+            auth: self.auth,
+        };
+        config.validate().map_err(ConfigError::InvalidOption)?;
+        Ok(Some(config))
+    }
 }
 
 /// Rejects GraphQL options outside `graphql-ws` mode, and a missing operation
@@ -2966,6 +3068,14 @@ impl LoadTestConfig {
                 extensions: graphql.extensions,
             };
         }
+        #[cfg(feature = "socketio")]
+        {
+            builder.socketio = SocketIoOptions {
+                event: cli.sio_event.take(),
+                namespace: cli.sio_namespace.take(),
+                auth: cli.sio_auth.take(),
+            };
+        }
 
         let mut config = builder.build()?;
         config.output_path = cli.output_file.take();
@@ -3037,11 +3147,11 @@ pub(crate) fn validate_phases(phases: &[ScenarioPhase], config: &LoadTestConfig)
             matches!(action, ScenarioAction::Send { expect, captures, .. }
                 if expect.is_some() || !captures.is_empty())
         });
-        if checks_replies && config.mode != TestMode::Echo {
+        if checks_replies && !config.mode.awaits_replies() {
             return Err(invalid_phase(
                 &phase.name,
                 &format!(
-                    "expect and capture need --mode echo; {:?} mode does not wait for replies",
+                    "expect and capture need --mode echo or socketio; {:?} mode does not wait for replies",
                     config.mode
                 ),
             )

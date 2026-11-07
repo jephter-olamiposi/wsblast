@@ -406,7 +406,7 @@ impl Coordinator {
         crate::config::validate_phases(&plan_.phases, &base_config)?;
         for (phase, target) in plan_.phases.iter().zip(&plan_.targets) {
             let mut config = crate::runner::phase_config(base_config.clone(), phase);
-            config.target_url = target.clone();
+            config.set_target(target);
             plan(&config, agents.len()).map_err(|err| match err {
                 WsBlastError::Config(ConfigError::InvalidOption(reason)) => WsBlastError::Config(
                     ConfigError::InvalidOption(format!("phase '{}': {reason}", phase.name)),
@@ -639,7 +639,7 @@ impl Coordinator {
                 });
             }
             let mut config = crate::runner::phase_config(self.config.clone(), phase);
-            config.target_url = target.clone();
+            config.set_target(target);
             let spec = PhaseSpec {
                 basis: crate::runner::latency_basis_for(
                     &config,

@@ -1168,3 +1168,155 @@ async fn arrivals_beyond_the_cap_are_skipped() {
     assert!(text.contains("capped at 5 open"), "{text}");
     assert!(text.contains("raise --max-connections"), "{text}");
 }
+
+#[cfg(feature = "socketio")]
+fn socketio_load(url: &str) -> LoadTestConfigBuilder {
+    load(url).mode(wsblast::TestMode::SocketIo)
+}
+
+/// Every message is an event whose acknowledgement is the reply: the RTT
+/// is the time from event to ack, which the mock holds for its delay.
+#[cfg(feature = "socketio")]
+#[tokio::test]
+async fn socketio_events_are_timed_to_their_acks() {
+    let mock = Mock::start(
+        MockConfig::builder()
+            .socketio()
+            .delay(Duration::from_millis(5)),
+    )
+    .await;
+    let metrics = run(socketio_load(&mock.url)
+        .rate_per_connection(20)
+        .duration(Duration::from_secs(1))
+        .socketio_namespace("/chat")
+        .socketio_event("chat")
+        .expect("json:/0/seq"))
+    .await;
+    let stats = mock.stop().await;
+
+    assert_eq!(metrics.total_connections_established, 2);
+    assert_eq!(metrics.error_rate, 0.0, "{:?}", metrics.error_breakdown);
+    assert!(metrics.total_messages_recv >= 30, "{metrics:?}");
+    assert!(
+        metrics.message_rtt.min_us >= 5_000,
+        "{:?}",
+        metrics.message_rtt
+    );
+    // Paced, like echo mode, so response time is recorded too.
+    assert_eq!(metrics.response_time.count, metrics.message_rtt.count);
+    // The mock counts events, not the namespace connects or pongs.
+    assert_eq!(stats.frames_received, metrics.total_messages_sent);
+    assert_eq!(metrics.total_unsolicited_frames, 0);
+}
+
+/// The server pings far more often than the client sends: the pump answers
+/// every ping while the loop waits for its next send, so the server never
+/// drops the connection.
+#[cfg(feature = "socketio")]
+#[tokio::test]
+async fn socketio_pings_are_answered_between_sends() {
+    let mock = Mock::start(
+        MockConfig::builder().socketio_ping(Duration::from_millis(40), Duration::from_millis(60)),
+    )
+    .await;
+    let metrics = run(socketio_load(&mock.url)
+        .connections(1)
+        .rate_per_connection(1)
+        .duration(Duration::from_millis(1200)))
+    .await;
+    let stats = mock.stop().await;
+
+    assert_eq!(metrics.total_reconnects, 0, "{metrics:?}");
+    assert_eq!(stats.connections_accepted, 1);
+    assert!(metrics.error_breakdown.is_empty(), "{metrics:?}");
+    assert_eq!(metrics.total_messages_recv, 2);
+}
+
+/// A server that does not speak Engine.IO never opens a session, so each
+/// attempt is one timeout before any message.
+#[cfg(feature = "socketio")]
+#[tokio::test]
+async fn socketio_against_a_plain_server_times_out_opening() {
+    let mock = Mock::start(MockConfig::builder()).await;
+    let metrics = run(socketio_load(&mock.url)
+        .connections(1)
+        .reconnect(false)
+        .message_timeout(Duration::from_millis(200))
+        .duration(Duration::from_millis(600)))
+    .await;
+    mock.stop().await;
+    assert_eq!(metrics.total_messages_sent, 0);
+    assert_eq!(
+        metrics.error_breakdown.get(&ErrorCategory::Timeout),
+        Some(&1),
+        "{metrics:?}"
+    );
+    assert_eq!(metrics.error_rate, 1.0);
+}
+
+/// A scenario's actions run over Socket.IO: a named login and a capture of
+/// a value from its ack, sent back in the next event.
+#[cfg(all(feature = "socketio", feature = "scenario"))]
+#[tokio::test]
+async fn socketio_runs_scenario_actions() {
+    let mock = Mock::start(MockConfig::builder().socketio()).await;
+    let yaml = r#"
+version: "1.0"
+metadata: { name: sio }
+phases:
+  - name: session
+    connections: 2
+    duration: 800ms
+    actions:
+      - type: Send
+        name: login
+        payload: '{"op":"login","user":"{{worker_id}}"}'
+        capture: { user: /0/user }
+        expect: { json: /0/op, equals: login }
+      - type: Send
+        name: say
+        payload: '{"op":"say","user":"{{user}}"}'
+        expect: { json: /0/user }
+      - type: Wait
+        duration: 100ms
+"#;
+    let scenario = wsblast::ScenarioConfig::from_yaml(yaml).unwrap();
+    let base = socketio_load(&mock.url).reconnect(false).build().unwrap();
+    let outcome = wsblast::ScenarioExecutor::new(&scenario, base, None, Some(&mock.url))
+        .unwrap()
+        .with_signal_handling(false)
+        .run()
+        .await
+        .unwrap();
+    mock.stop().await;
+    let metrics = outcome.metrics;
+    assert_eq!(metrics.error_rate, 0.0, "{:?}", metrics.error_breakdown);
+    let names: Vec<(&str, u64)> = metrics
+        .actions
+        .iter()
+        .map(|a| (a.name.as_str(), a.messages_sent))
+        .collect();
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert!(names.iter().all(|(_, sent)| *sent >= 4), "{names:?}");
+}
+
+#[cfg(feature = "socketio")]
+#[test]
+fn socketio_settings_are_validated() {
+    let message = |builder: LoadTestConfigBuilder| builder.build().unwrap_err().to_string();
+    let base = || LoadTestConfig::builder("ws://127.0.0.1:9001");
+    assert!(
+        message(base().socketio_event("chat")).contains("require --mode socketio"),
+        "outside the mode"
+    );
+    let sio = || base().mode(wsblast::TestMode::SocketIo);
+    assert!(message(sio().socketio_namespace("chat")).contains("must start with '/'"));
+    assert!(message(sio().socketio_event("disconnect")).contains("reserved"));
+    assert!(message(sio().socketio_auth("token")).contains("JSON object"));
+    assert!(message(sio().payload_binary(b"x".to_vec())).contains("binary payloads"));
+    let config = sio().build().unwrap();
+    assert_eq!(
+        config.target_url().as_str(),
+        "ws://127.0.0.1:9001/socket.io/?EIO=4&transport=websocket"
+    );
+}

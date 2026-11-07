@@ -152,7 +152,7 @@ The phase runs the normal session loop for `--mode` (echo by default) with the p
 
 | Mode | When `think_time` applies |
 | :--- | :--- |
-| `echo` | After each reply, before the next request. |
+| `echo`, `socketio` | After each reply (an ack in `socketio` mode), before the next request. |
 | `stream` | After each send. |
 | `listen`, `graphql-ws` | Never. |
 
