@@ -38,6 +38,7 @@ pub struct AgentConfig {
     listen: String,
     token: String,
     tls: Option<(PathBuf, PathBuf)>,
+    source_ips: Vec<std::net::IpAddr>,
     ready_delay: Duration,
 }
 
@@ -47,6 +48,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("listen", &self.listen)
             .field("token", &"<redacted>")
             .field("tls", &self.tls)
+            .field("source_ips", &self.source_ips)
             .finish()
     }
 }
@@ -61,6 +63,12 @@ impl AgentConfig {
     pub fn listen(&self) -> &str {
         &self.listen
     }
+
+    /// The local addresses the agent's connections bind in turn, checked
+    /// and without duplicates.
+    pub fn source_ips(&self) -> &[std::net::IpAddr] {
+        &self.source_ips
+    }
 }
 
 /// Builder for [`AgentConfig`].
@@ -70,6 +78,7 @@ pub struct AgentConfigBuilder {
     listen: Option<String>,
     token: Option<String>,
     tls: Option<(PathBuf, PathBuf)>,
+    source_ips: Vec<std::net::IpAddr>,
     ready_delay: Duration,
 }
 
@@ -104,6 +113,16 @@ impl AgentConfigBuilder {
         self
     }
 
+    /// Binds every connection of the tests this agent runs to one of these
+    /// local addresses in turn, as `--source-ip` does on one machine, so
+    /// each agent machine can open more connections to one target than one
+    /// address's ephemeral ports allow. Each must be an address of the
+    /// agent's machine; [`build`](Self::build) checks them.
+    pub fn source_ips(mut self, ips: Vec<std::net::IpAddr>) -> Self {
+        self.source_ips = ips;
+        self
+    }
+
     /// Delays the `ready` reply, to test the coordinator's start barrier.
     #[doc(hidden)]
     pub fn ready_delay(mut self, delay: Duration) -> Self {
@@ -116,8 +135,9 @@ impl AgentConfigBuilder {
     /// # Errors
     ///
     /// Returns [`ConfigError::InvalidOption`] when the listen address or the
-    /// token is missing, or the token is shorter than
-    /// [`MIN_TOKEN_LEN`](super::MIN_TOKEN_LEN) characters.
+    /// token is missing, the token is shorter than
+    /// [`MIN_TOKEN_LEN`](super::MIN_TOKEN_LEN) characters, or a source
+    /// address is unspecified or not an address of this machine.
     pub fn build(self) -> Result<AgentConfig> {
         let listen = self
             .listen
@@ -132,10 +152,18 @@ impl AgentConfigBuilder {
             ))
         })?;
         validate_token(&token)?;
+        let mut source_ips = Vec::with_capacity(self.source_ips.len());
+        for ip in self.source_ips {
+            if !source_ips.contains(&ip) {
+                crate::connect::check_source_ip(ip).map_err(ConfigError::InvalidOption)?;
+                source_ips.push(ip);
+            }
+        }
         Ok(AgentConfig {
             listen,
             token,
             tls: self.tls,
+            source_ips,
             ready_delay: self.ready_delay,
         })
     }
@@ -163,6 +191,8 @@ struct Shared {
     token: String,
     /// Set while a coordinator holds the agent.
     busy: AtomicBool,
+    /// `--source-ip` of this agent, applied to every test it runs.
+    source_ips: Vec<std::net::IpAddr>,
     ready_delay: Duration,
 }
 
@@ -204,6 +234,7 @@ impl AgentServer {
             shared: Arc::new(Shared {
                 token: config.token,
                 busy: AtomicBool::new(false),
+                source_ips: config.source_ips,
                 ready_delay: config.ready_delay,
             }),
         })
@@ -614,9 +645,11 @@ where
                 .to_string(),
         );
     }
-    let config = wire
+    let mut config = wire
         .into_config()
         .map_err(|e| format!("invalid configuration: {e}"))?;
+    // The coordinator never sends source addresses; they are this agent's.
+    config.source_ips.clone_from(&shared.source_ips);
     let connections = config.connections;
     let sizing = if config.stages.is_empty() {
         format!("{connections} connections for {:?}", config.duration)

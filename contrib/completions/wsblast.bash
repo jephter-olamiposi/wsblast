@@ -394,7 +394,7 @@ _wsblast() {
             return 0
             ;;
         wsblast__subcmd__agent)
-            opts="-h --listen --token --tls-cert --tls-key --help"
+            opts="-h --listen --token --tls-cert --tls-key --source-ip --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -413,6 +413,10 @@ _wsblast() {
                     return 0
                     ;;
                 --tls-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --source-ip)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

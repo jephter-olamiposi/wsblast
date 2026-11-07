@@ -4,7 +4,7 @@
 .SH NAME
 wsblast\-agent \- Run a load agent that generates load for a coordinator (`wsblast URL \-\-agents ...`), one test at a time
 .SH SYNOPSIS
-\fBwsblast agent\fR [\fB\-\-token\fR] [\fB\-\-tls\-cert\fR] [\fB\-\-tls\-key\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fB\-\-listen\fR> 
+\fBwsblast agent\fR [\fB\-\-token\fR] [\fB\-\-tls\-cert\fR] [\fB\-\-tls\-key\fR] [\fB\-\-source\-ip\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fB\-\-listen\fR> 
 .SH DESCRIPTION
 Run a load agent that generates load for a coordinator (`wsblast URL \-\-agents ...`), one test at a time
 .SH OPTIONS
@@ -20,6 +20,9 @@ PEM certificate chain to serve the control channel over TLS (wss://)
 .TP
 \fB\-\-tls\-key\fR \fI<PEM>\fR
 PEM private key for \-\-tls\-cert
+.TP
+\fB\-\-source\-ip\fR \fI<IP>\fR
+Local addresses of this machine the tests\*(Aq connections bind in turn, comma\-separated or repeated, as \-\-source\-ip on one machine
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

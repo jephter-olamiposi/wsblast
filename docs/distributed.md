@@ -56,6 +56,7 @@ An agent serves one test after another for as long as it runs; stop it with Ctrl
 | `--listen ADDR` | required | Address to accept coordinators on. Port 0 picks a free port; the startup line shows it. |
 | `--token TOKEN` | `$WSBLAST_AGENT_TOKEN` | Token a coordinator must present. Required, at least 16 characters, no whitespace. The agent refuses to start without one. |
 | `--tls-cert PEM`, `--tls-key PEM` | off | Serve the control channel over TLS (`wss://`) with this PEM certificate chain and private key (PKCS#8, PKCS#1 or SEC1). |
+| `--source-ip IP,...` | none | Bind the connections of every test this agent runs to these addresses of its machine in turn, as `--source-ip` does on one machine ([METHODOLOGY.md, section 7.2](../METHODOLOGY.md#72-source-addresses)). Each address is checked when the agent starts. |
 
 The coordinator is the normal command plus:
 
@@ -82,7 +83,11 @@ With N agents, in the order of `--agents`:
 | `--rate` | Unchanged. It is a rate per connection, so the total rate is the same as on one machine. |
 | Everything else | Unchanged. |
 
-`--source-ip` cannot be used with `--agents`: the addresses belong to one machine, and each agent connects from its own.
+`--source-ip` cannot be used with `--agents`: the addresses belong to one machine. Give each agent its own instead, when one address's ports are not enough for its share of the connections:
+
+```bash
+wsblast agent --listen 0.0.0.0:7700 --source-ip 10.0.1.5,10.0.1.6
+```
 
 When a share would be zero, the run is rejected before anything connects: more agents than connections (or than the highest stage target), than `-n`, than a non-zero `--ramp-rate`, or than `--max-connections`.
 

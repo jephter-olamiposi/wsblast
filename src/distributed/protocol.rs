@@ -488,7 +488,7 @@ pub(crate) fn plan(config: &LoadTestConfig, agents: usize) -> Result<Vec<WireCon
     }
     if !config.source_ips.is_empty() {
         return Err(ConfigError::UnsupportedOption(
-            "--source-ip binds addresses of this machine and cannot be used with --agents; every agent connects from its own addresses".to_string(),
+            "--source-ip binds addresses of this machine and cannot be used with --agents; start each agent with `wsblast agent --source-ip ...` to bind that machine's addresses".to_string(),
         )
         .into());
     }

@@ -147,6 +147,7 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--token', '--token', [CompletionResultType]::ParameterName, 'Token coordinators must present, at least 16 characters; required, here or in WSBLAST_AGENT_TOKEN')
             [CompletionResult]::new('--tls-cert', '--tls-cert', [CompletionResultType]::ParameterName, 'PEM certificate chain to serve the control channel over TLS (wss://)')
             [CompletionResult]::new('--tls-key', '--tls-key', [CompletionResultType]::ParameterName, 'PEM private key for --tls-cert')
+            [CompletionResult]::new('--source-ip', '--source-ip', [CompletionResultType]::ParameterName, 'Local addresses of this machine the tests'' connections bind in turn, comma-separated or repeated, as --source-ip on one machine')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

@@ -88,12 +88,23 @@ pub(crate) async fn run_agent_command(args: &crate::cli::AgentArgs) -> crate::Re
     if let (Some(cert), Some(key)) = (&args.tls_cert, &args.tls_key) {
         builder = builder.tls(cert, key);
     }
+    builder = builder.source_ips(args.source_ip.clone());
     let config = builder.build()?;
+    let sources = if config.source_ips().is_empty() {
+        String::new()
+    } else {
+        let list: Vec<String> = config
+            .source_ips()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        format!(", connecting from {}", list.join(", "))
+    };
     let cancel = tokio_util::sync::CancellationToken::new();
     let _signals = crate::runner::spawn_signal_listener(cancel.clone());
     let server = AgentServer::bind(config).await?;
     crate::output::outln!(
-        "wsblast agent listening on {} (protocol {PROTOCOL_VERSION}, one test at a time)",
+        "wsblast agent listening on {} (protocol {PROTOCOL_VERSION}, one test at a time{sources})",
         server.url()
     );
     server.run(cancel).await?;

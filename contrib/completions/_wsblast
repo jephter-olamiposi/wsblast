@@ -164,6 +164,7 @@ _arguments "${_arguments_options[@]}" : \
 '--token=[Token coordinators must present, at least 16 characters; required, here or in WSBLAST_AGENT_TOKEN]:TOKEN:_default' \
 '--tls-cert=[PEM certificate chain to serve the control channel over TLS (wss\://)]:PEM:_files' \
 '--tls-key=[PEM private key for --tls-cert]:PEM:_files' \
+'*--source-ip=[Local addresses of this machine the tests'\'' connections bind in turn, comma-separated or repeated, as --source-ip on one machine]:IP:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0

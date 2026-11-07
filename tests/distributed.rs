@@ -1636,3 +1636,73 @@ async fn cli_gates_on_the_worst_agents_generator_lag() {
         finished.stderr
     );
 }
+
+/// An agent's own `--source-ip` binds the connections of the tests it runs:
+/// two agents with an address each reach the target from those addresses
+/// only. 127.0.0.2 and 127.0.0.3 are local on Linux only.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn each_agent_connects_from_its_own_source_addresses() {
+    use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex};
+
+    let stop = CancellationToken::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = format!("ws://{}", listener.local_addr().unwrap());
+    let peers = Arc::new(Mutex::new(BTreeSet::new()));
+    let seen = Arc::clone(&peers);
+    tokio::spawn(async move {
+        while let Ok((tcp, peer)) = listener.accept().await {
+            seen.lock().unwrap().insert(peer.ip().to_string());
+            tokio::spawn(async move {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                    return;
+                };
+                while let Some(Ok(msg)) = ws.next().await {
+                    if msg.is_text() || msg.is_binary() {
+                        let _ = ws.send(msg).await;
+                    }
+                }
+            });
+        }
+    });
+    let mut agents = Vec::new();
+    for ip in ["127.0.0.2", "127.0.0.3"] {
+        let config = agent_config()
+            .source_ips(vec![ip.parse().unwrap()])
+            .build()
+            .unwrap();
+        assert_eq!(config.source_ips().len(), 1);
+        agents.push(spawn_agent(&stop, config).await);
+    }
+    let harness = Harness {
+        target,
+        agents,
+        stop,
+    };
+    let outcome = run(&harness, |b| {
+        b.connections(6).duration(Duration::from_millis(800))
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.metrics.total_connections_established, 6);
+    assert_eq!(outcome.metrics.error_rate, 0.0);
+    let peers: Vec<String> = peers.lock().unwrap().iter().cloned().collect();
+    assert_eq!(peers, ["127.0.0.2", "127.0.0.3"]);
+}
+
+#[test]
+fn an_agent_refuses_source_addresses_it_cannot_bind() {
+    for (ip, message) in [
+        ("0.0.0.0", "unspecified"),
+        ("192.0.2.77", "not usable on this machine"),
+    ] {
+        let err = agent_config()
+            .source_ips(vec![ip.parse().unwrap()])
+            .build()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(message), "{err}");
+    }
+}

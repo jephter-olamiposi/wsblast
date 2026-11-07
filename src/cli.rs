@@ -585,6 +585,10 @@ pub(crate) struct AgentArgs {
     /// PEM private key for --tls-cert
     #[arg(long = "tls-key", value_name = "PEM", requires = "tls_cert")]
     pub tls_key: Option<PathBuf>,
+
+    /// Local addresses of this machine the tests' connections bind in turn, comma-separated or repeated, as --source-ip on one machine
+    #[arg(long = "source-ip", value_name = "IP", value_delimiter = ',')]
+    pub source_ip: Vec<std::net::IpAddr>,
 }
 
 /// Flags of `wsblast render`.

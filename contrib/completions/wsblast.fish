@@ -149,6 +149,7 @@ complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -l listen -d 'Add
 complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -l token -d 'Token coordinators must present, at least 16 characters; required, here or in WSBLAST_AGENT_TOKEN' -r
 complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -l tls-cert -d 'PEM certificate chain to serve the control channel over TLS (wss://)' -r -F
 complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -l tls-key -d 'PEM private key for --tls-cert' -r -F
+complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -l source-ip -d 'Local addresses of this machine the tests\' connections bind in turn, comma-separated or repeated, as --source-ip on one machine' -r
 complete -c wsblast -n "__fish_wsblast_using_subcommand agent" -s h -l help -d 'Print help'
 complete -c wsblast -n "__fish_wsblast_using_subcommand render" -l format -d 'Format to render' -r -f -a "html\t'Self-contained HTML page with charts of the time series'
 markdown\t'GitHub Flavored Markdown'

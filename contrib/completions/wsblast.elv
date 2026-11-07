@@ -142,6 +142,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --token 'Token coordinators must present, at least 16 characters; required, here or in WSBLAST_AGENT_TOKEN'
             cand --tls-cert 'PEM certificate chain to serve the control channel over TLS (wss://)'
             cand --tls-key 'PEM private key for --tls-cert'
+            cand --source-ip 'Local addresses of this machine the tests'' connections bind in turn, comma-separated or repeated, as --source-ip on one machine'
             cand -h 'Print help'
             cand --help 'Print help'
         }
