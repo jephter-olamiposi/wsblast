@@ -175,6 +175,8 @@ check "distributed run over 2 agents" "[ $rc = 0 ] && j dist.json 'd[\"metrics\"
 check "distributed -n is exact across agents" "[ \"\$(j dist.json 'd[\"metrics\"][\"total_messages_sent\"]')\" = 300 ]" "$(j dist.json "d['metrics']['total_messages_sent']")"
 $W --scenario sc.yaml --no-progress --agents 127.0.0.1:17701,127.0.0.1:17702 --agent-token $TOK >dsc.txt 2>&1; rc=$?
 check "scenario across agents" "[ $rc = 0 ]" "rc=$rc $(tail -2 dsc.txt)"
+$W $T --arrival-rate 40 --session-duration 500ms -d 3s --no-progress --agents 127.0.0.1:17701,127.0.0.1:17702 --agent-token $TOK --format json -o darr.json >/dev/null 2>&1; rc=$?
+check "arrivals across agents: started add up, the peak by interval" "[ $rc = 0 ] && j darr.json '(a:=d[\"metrics\"][\"arrivals\"])[\"started\"] >= 110 and 15 <= a[\"peak_open\"] <= 30' | grep -q True" "rc=$rc $(j darr.json "d['metrics'].get('arrivals')" 2>&1)"
 $W $T -c 2 -d 1s --no-progress --agents 127.0.0.1:17701 --agent-token wrongwrongwrongwrong >dbad.txt 2>&1; rc=$?
 check "wrong agent token rejected" "[ $rc = 1 ]" "rc=$rc"
 $W agent --listen 127.0.0.1:17703 --token short >ashort.txt 2>&1; rc=$?

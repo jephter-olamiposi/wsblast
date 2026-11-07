@@ -203,7 +203,7 @@ pub struct WorkerMetrics {
 }
 
 /// What an arrival-rate run did with its arrivals.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "distributed", derive(Serialize, Deserialize))]
 pub(crate) struct ArrivalCounts {
     /// Sessions started.
@@ -212,16 +212,48 @@ pub(crate) struct ArrivalCounts {
     pub(crate) skipped: u64,
     /// The most sessions open at once.
     pub(crate) peak_open: u64,
+    /// The most sessions open in each time-series interval of the run, from
+    /// its start, so a coordinator can add its agents up interval by
+    /// interval instead of adding peaks that happened at different times.
+    #[cfg_attr(
+        feature = "distributed",
+        serde(default, skip_serializing_if = "Vec::is_empty")
+    )]
+    pub(crate) interval_peaks: Vec<u64>,
 }
 
 impl ArrivalCounts {
-    /// Adds the counts of another machine, so the peak is the sum of the
-    /// machines' peaks.
+    /// Records `open` sessions in interval `interval`. An interval the run
+    /// passed without an observation (a rate below one arrival per
+    /// interval) gets the first count of the next one: sessions only close
+    /// between arrivals, so that count was open through the gap.
+    pub(crate) fn observe(&mut self, interval: usize, open: u64) {
+        if self.interval_peaks.len() <= interval {
+            self.interval_peaks.resize(interval + 1, open);
+        }
+        let peak = &mut self.interval_peaks[interval];
+        *peak = (*peak).max(open);
+        self.peak_open = self.peak_open.max(open);
+    }
+
+    /// Adds the counts of another machine. The peak is the highest sum of
+    /// the machines' peaks in one interval, so two machines whose peaks
+    /// came at different times do not count both at once; without
+    /// intervals it is the sum of the peaks.
     #[cfg(feature = "distributed")]
     pub(crate) fn add(&mut self, other: &Self) {
         self.started += other.started;
         self.skipped += other.skipped;
+        if self.interval_peaks.len() < other.interval_peaks.len() {
+            self.interval_peaks.resize(other.interval_peaks.len(), 0);
+        }
+        for (all, peak) in self.interval_peaks.iter_mut().zip(&other.interval_peaks) {
+            *all += peak;
+        }
         self.peak_open += other.peak_open;
+        if let Some(highest) = self.interval_peaks.iter().max() {
+            self.peak_open = self.peak_open.min(*highest);
+        }
     }
 }
 
@@ -763,8 +795,9 @@ impl From<CompressionCounts> for CompressionSummary {
 /// equals `total_connections_attempted`. In a scenario's merged metrics,
 /// the counts of every arrival phase are added up, `peak_open` is the
 /// highest phase's, and the rate and session duration are the first arrival
-/// phase's. In a distributed run the counts of the agents are added up, so
-/// `peak_open` is the sum of each agent's peak.
+/// phase's. In a distributed run the counts of the agents are added up,
+/// and `peak_open` is the highest sum of the agents' peaks within one
+/// time-series interval.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ArrivalSummary {
@@ -1473,6 +1506,27 @@ mod aggregation_tests {
             hist.record_n(value, count).unwrap();
         }
         hist
+    }
+
+    #[cfg(feature = "distributed")]
+    #[test]
+    fn agents_peaks_add_up_interval_by_interval() {
+        let mut first = ArrivalCounts::default();
+        for (interval, open) in [(0, 3), (0, 5), (1, 2), (3, 1)] {
+            first.observe(interval, open);
+        }
+        // Interval 2 had no observation: it carries the next first count.
+        assert_eq!(first.interval_peaks, [5, 2, 1, 1]);
+        assert_eq!(first.peak_open, 5);
+        let mut second = ArrivalCounts::default();
+        second.observe(0, 1);
+        second.observe(1, 4);
+        let mut all = ArrivalCounts::default();
+        all.add(&first);
+        all.add(&second);
+        assert_eq!(all.interval_peaks, [6, 6, 1, 1]);
+        // Not 5 + 4: the agents peaked in different intervals.
+        assert_eq!(all.peak_open, 6);
     }
 
     #[test]

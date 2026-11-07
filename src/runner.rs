@@ -432,6 +432,10 @@ impl Runner {
         let end = start + self.config.duration;
         let mut arrived = 0u64;
         let mut next = start;
+        let interval = interval_store.interval().max(Duration::from_millis(1));
+        let interval_of = |at: tokio::time::Instant| {
+            (at.saturating_duration_since(start).as_nanos() / interval.as_nanos()) as usize
+        };
         loop {
             let wake = next.min(end);
             tokio::select! {
@@ -439,6 +443,9 @@ impl Runner {
                 _ = self.cancel_token.cancelled() => break,
                 () = tokio::time::sleep_until(wake) => {}
             }
+            // The sessions still open before the finished ones are
+            // collected: they were open since the last observation.
+            counts.observe(interval_of(tokio::time::Instant::now()), open.len() as u64);
             while let Some(done) = open.try_join_next() {
                 add_session(totals, done);
             }
@@ -487,7 +494,7 @@ impl Runner {
                         }
                     });
                     counts.started += 1;
-                    counts.peak_open = counts.peak_open.max(open.len() as u64);
+                    counts.observe(interval_of(now), open.len() as u64);
                 }
                 arrived += 1;
                 next = start + Duration::from_secs_f64(arrived as f64 / arrivals.rate);
@@ -733,8 +740,9 @@ impl Runner {
                 ),
                 self.wait_until_done(start_time)
             );
+            let started = counts.started;
             arrival_counts = Some(counts);
-            (Vec::new(), counts.started, 0)
+            (Vec::new(), started, 0)
         } else if self.config.stages.is_empty() {
             let mut handles = Vec::with_capacity(total_connections);
             for worker_id in 0..total_connections {

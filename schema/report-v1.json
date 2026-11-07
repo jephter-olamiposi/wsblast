@@ -422,7 +422,7 @@
             "max_connections": { "description": "The cap on sessions open at once (--max-connections). Absent without a cap.", "$ref": "#/$defs/count" },
             "started": { "description": "Sessions started; equal to total_connections_attempted.", "$ref": "#/$defs/count" },
             "skipped": { "description": "Arrivals skipped because max_connections sessions were open. When it is not 0, the run applied less load than its rate, and the reports add a note.", "$ref": "#/$defs/count" },
-            "peak_open": { "description": "The most sessions open at once; in a distributed run, the sum of each agent's peak.", "$ref": "#/$defs/count" }
+            "peak_open": { "description": "The most sessions open at once. In a distributed run, the highest sum of the agents' peaks within one time-series interval (before wsblast 0.2.4, the sum of each agent's peak).", "$ref": "#/$defs/count" }
           }
         },
         "actions": {

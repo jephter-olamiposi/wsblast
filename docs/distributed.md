@@ -79,7 +79,7 @@ With N agents, in the order of `--agents`:
 | `-n` | Divided the same way, so the agents together send exactly `-n` messages, up to the usual overshoot of about one message per connection ([METHODOLOGY.md, section 10](../METHODOLOGY.md#10-known-limitations)). |
 | `--ramp-rate` | Divided the same way, so every agent ramps its connections in about the same time as one machine would ramp all of them. |
 | `--stages` | Every agent follows the whole profile and opens its share of the target at every moment: agent `i` opens the part `i` of `target(t)` divided as above. The agents' counts add up to the requested target at every point of the profile, not only at the ends of the stages. |
-| `--arrival-rate` | Divided equally, as a number of sessions per second, so the agents together start sessions at the requested rate. `--session-duration` is unchanged, and `--max-connections` is divided like `-c`. The merged `metrics.arrivals` adds up the agents' counts, so its `peak_open` is the sum of each agent's peak. |
+| `--arrival-rate` | Divided equally, as a number of sessions per second, so the agents together start sessions at the requested rate. `--session-duration` is unchanged, and `--max-connections` is divided like `-c`. The merged `metrics.arrivals` adds up the agents' counts. Its `peak_open` adds the agents up interval by interval: each agent records the most sessions open in every time-series interval, and the merged peak is the highest sum in one interval, so agents whose peaks came at different times are not counted at their peaks together. |
 | `--rate` | Unchanged. It is a rate per connection, so the total rate is the same as on one machine. |
 | Everything else | Unchanged. |
 
