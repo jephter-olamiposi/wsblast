@@ -195,11 +195,12 @@ pub enum ErrorCategory {
     Timeout,
     /// The connection closed while a reply or subscription was pending.
     UnexpectedClose,
-    /// A reply arrived but failed its check (`--expect`, or `expect` in a
-    /// scenario), or had nothing where a scenario `capture` looked.
-    CheckFailed,
     /// Anything else.
     Other,
+    /// A reply arrived but failed its check (`--expect`, or `expect` in a
+    /// scenario), or had nothing where a scenario `capture` looked. Last, so
+    /// the variants of earlier versions keep their discriminants.
+    CheckFailed,
 }
 
 impl fmt::Display for ErrorCategory {

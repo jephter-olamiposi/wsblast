@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-07
+
+0.2.3 adds the test shapes that other tools need a script for: per-connection test data (`--data`), values kept from replies and checks on every reply, named actions with their own latency and SLOs, connection churn at an arrival rate, more connections than one source address allows (`--source-ip`), and Socket.IO (`--mode socketio`). Small messages take about a third less CPU, each connection about 10 KB instead of 16 KB, and the mock answers four times faster. The library API is a compatible superset of 0.2.2.
+
 ### Changed
 - Payload templates are parsed once before the run instead of searched for every placeholder on every frame, which takes about 9% less CPU per message with the default payload. Text in double braces that is not a placeholder, such as `{{name}}`, is still sent as written. A header value that holds a placeholder is now filled in per connection; before, it was sent as written, and `LoadTestConfig::headers` no longer lists it.
 - **Read buffers are 16 KiB at most, and small messages take about a third less CPU.** The WebSocket library fills a connection's whole read buffer with zeros before every read, so each read of a small frame first cleared up to 128 KiB, and every buffer stayed resident in full. Client connections now share 16 MiB of read buffers instead of 64 MiB, between 4 KiB and 16 KiB each (16 KiB up to 1,024 connections), and the mock server reads with 16 KiB instead of 128 KiB. Measured on one core with 50 connections and short text frames, wsblast handles about 104,000 replies per CPU second instead of 70,000, and the mock about 98,000 instead of 67,000. 2,000 connections use about 55 MB instead of 102 MB, and the mock serving them about 53 MB instead of 271 MB. Large messages are as fast as before: buffers grow to a message's size as it arrives.

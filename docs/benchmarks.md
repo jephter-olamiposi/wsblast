@@ -15,7 +15,7 @@ injustice, please open an issue or a pull request.
 
 ## Setup
 
-- wsblast 0.2.2, k6 v1.8.2, Artillery 2.0.34
+- wsblast 0.2.3, k6 v1.8.2, Artillery 2.0.34
 - Linux 6.18, Intel Xeon at 2.10 GHz, 2 cores, 8 GB of memory
 - The target is `wsblast mock`, an echo server, on core 1. Each tool runs on
   core 0 (`taskset`), so "one core" means one core.
@@ -31,16 +31,18 @@ reply arrives, for 30 seconds.
 
 | Tool | Replies per second | Tool CPU time | Replies per CPU second |
 | :--- | ---: | ---: | ---: |
-| wsblast | 30,720 | 12.9 s | 71,496 |
-| k6 | 26,997 | 25.9 s | 31,235 |
-| Artillery | 19,273 | 33.2 s | 17,400 |
+| wsblast | 155,323 | 28.6 s | 162,870 |
+| k6 | 28,136 | 29.7 s | 28,381 |
+| Artillery | 19,436 | 33.5 s | 17,406 |
 
-The echo server, on its own core, is the limit in the first column: wsblast
-used 43% of its core to reach it, k6 86%. The last column
-is the comparison between the tools: replies divided by the CPU time the
-tool used. It includes startup, which costs Artillery about 2.8 seconds of CPU
-and the others under 0.2 seconds. Without it, Artillery's figure would be
-about 19,000.
+Each tool uses its whole core, so the first column is what one core of each
+can drive against a server that keeps up. The last column is the comparison
+between the tools: replies divided by the CPU time the tool used. It
+includes startup, which costs Artillery about 2.8 seconds of CPU and the
+others under 0.2 seconds. Without it, Artillery's figure would be about
+19,000. wsblast 0.2.2 reached 71,496 replies per CPU second on this test; 0.2.3
+reads with smaller buffers and parses payload templates once
+([CHANGELOG.md](../CHANGELOG.md)).
 
 ## 2. Memory per connection
 
@@ -50,15 +52,15 @@ column is the slope between the two runs, so fixed costs cancel out.
 
 | Tool | Peak at 500 | Peak at 2,000 | Per additional connection |
 | :--- | ---: | ---: | ---: |
-| wsblast | 77 MB | 102 MB | 17 KB |
-| k6 | 164 MB | 537 MB | 254 KB |
-| Artillery | 326 MB | 342 MB | 11 KB |
+| wsblast | 20 MB | 39 MB | 13 KB |
+| k6 | 159 MB | 532 MB | 254 KB |
+| Artillery | 319 MB | 349 MB | 20 KB |
 
-In wsblast 0.2.2, the fixed cost includes 64 MiB of read buffers shared by
-all connections. Later versions use 16 MiB (see
-[METHODOLOGY.md](../METHODOLOGY.md), section 10). k6 runs a
-JavaScript runtime for each virtual user, which is most of its cost per
-connection. Artillery's Node.js process starts large and then grows slowly.
+wsblast's read buffers share a budget of 16 MiB that is not all used at
+these counts (see [METHODOLOGY.md](../METHODOLOGY.md), section 10); 0.2.2
+needed 102 MB for 2,000 connections. k6 runs a JavaScript runtime for each
+virtual user, which is most of its cost per connection. Artillery's Node.js
+process starts large and then grows slowly.
 
 ## 3. A server that stalls
 
@@ -68,10 +70,10 @@ while the server is stalled, so a correct p99 is close to a second.
 
 | Tool and metric | p50 | p99 | max |
 | :--- | ---: | ---: | ---: |
-| wsblast, response time (from schedule) | 2 ms | 888 ms | 991 ms |
-| wsblast, round-trip time | 2 ms | 5 ms | 991 ms |
-| k6, sends on a timer, timestamps in the payload | 2 ms | 877 ms | 987 ms |
-| k6, sends after each reply | 2 ms | 4 ms | 1002 ms |
+| wsblast, response time (from schedule) | 0 ms | 895 ms | 996 ms |
+| wsblast, round-trip time | 0 ms | 1 ms | 996 ms |
+| k6, sends on a timer, timestamps in the payload | 0 ms | 854 ms | 985 ms |
+| k6, sends after each reply | 0 ms | 1 ms | 1003 ms |
 | Artillery | not reported | not reported | not reported |
 
 A client that waits for each reply before sending the next one sends nothing
@@ -86,7 +88,9 @@ next to it so you can see the difference. Artillery's WebSocket engine
 counts messages but records no message latency.
 
 k6's numbers have millisecond resolution, because its scripts time messages
-with `Date.now()`.
+with `Date.now()`, so the table rounds every value to milliseconds. The mock
+answers in well under a millisecond outside its stalls, which puts every
+median at 0 ms.
 
 ## Reproducing
 
