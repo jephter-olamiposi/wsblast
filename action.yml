@@ -60,7 +60,16 @@ runs:
         fi
         bin="$RUNNER_TEMP/wsblast-bin"
         mkdir -p "$bin"
-        if [ "$RUNNER_OS" = "Windows" ]; then
+        # A second use of the action in the job keeps the binary an earlier
+        # one installed: Windows cannot replace an executable that is
+        # running, such as a `wsblast mock` started in the background.
+        have=""
+        if [ -x "$bin/wsblast" ] || [ -x "$bin/wsblast.exe" ]; then
+          have="$("$bin/wsblast" --version | awk '{print $2}')"
+        fi
+        if [ -n "$have" ] && { [ -z "$version" ] || [ "v$have" = "$version" ] || [ "$have" = "$version" ]; }; then
+          echo "wsblast $have is already installed"
+        elif [ "$RUNNER_OS" = "Windows" ]; then
           pwsh -NoProfile -File "$GITHUB_ACTION_PATH/scripts/action/install.ps1" -Version "$version" -Destination "$bin"
         else
           WSBLAST_VERSION="$version" WSBLAST_INSTALL_DIR="$bin" sh "$GITHUB_ACTION_PATH/install.sh"
