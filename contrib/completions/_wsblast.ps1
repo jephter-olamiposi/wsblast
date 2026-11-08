@@ -122,6 +122,7 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('mock', 'mock', [CompletionResultType]::ParameterValue, 'Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file')
             [CompletionResult]::new('agent', 'agent', [CompletionResultType]::ParameterValue, 'Run a load agent that generates load for a coordinator (`wsblast URL --agents ...`), one test at a time')
             [CompletionResult]::new('render', 'render', [CompletionResultType]::ParameterValue, 'Render a saved JSON report (from --format json) or comparison (from --compare --format json) as HTML, Markdown or text without running a test')
+            [CompletionResult]::new('import', 'import', [CompletionResultType]::ParameterValue, 'Write a scenario from a browser''s HAR file: the messages one recorded WebSocket connection sent, with its pauses')
             break
         }
         'wsblast;mock' {
@@ -158,6 +159,21 @@ Register-ArgumentCompleter -Native -CommandName 'wsblast' -ScriptBlock {
             [CompletionResult]::new('--output', '--output', [CompletionResultType]::ParameterName, 'Write the rendered report to FILE instead of stdout')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
+        'wsblast;import' {
+            [CompletionResult]::new('-o', '-o', [CompletionResultType]::ParameterName, 'Write the scenario to FILE instead of stdout')
+            [CompletionResult]::new('--output', '--output', [CompletionResultType]::ParameterName, 'Write the scenario to FILE instead of stdout')
+            [CompletionResult]::new('--url', '--url', [CompletionResultType]::ParameterName, 'Import the connection whose URL contains TEXT')
+            [CompletionResult]::new('--index', '--index', [CompletionResultType]::ParameterName, 'Import the Nth matching connection, from 1 [default: the one that sent the most messages]')
+            [CompletionResult]::new('-c', '-c', [CompletionResultType]::ParameterName, 'Connections of the generated phase')
+            [CompletionResult]::new('--connections', '--connections', [CompletionResultType]::ParameterName, 'Connections of the generated phase')
+            [CompletionResult]::new('-d', '-d', [CompletionResultType]::ParameterName, 'Duration of the generated phase')
+            [CompletionResult]::new('--duration', '--duration', [CompletionResultType]::ParameterName, 'Duration of the generated phase')
+            [CompletionResult]::new('--max-wait', '--max-wait', [CompletionResultType]::ParameterName, 'The longest pause kept between messages; longer ones are shortened to it')
+            [CompletionResult]::new('--no-waits', '--no-waits', [CompletionResultType]::ParameterName, 'Leave out the recorded pauses: send each message as soon as the last one is answered')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
     })

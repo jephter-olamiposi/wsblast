@@ -23,6 +23,7 @@ const ASSETS: &[(&[&str], &str)] = &[
     (&["man", "mock"], "contrib/man/wsblast-mock.1"),
     (&["man", "agent"], "contrib/man/wsblast-agent.1"),
     (&["man", "render"], "contrib/man/wsblast-render.1"),
+    (&["man", "import"], "contrib/man/wsblast-import.1"),
     (&["completions", "bash"], "contrib/completions/wsblast.bash"),
     (&["completions", "zsh"], "contrib/completions/_wsblast"),
     (&["completions", "fish"], "contrib/completions/wsblast.fish"),

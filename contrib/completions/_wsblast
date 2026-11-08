@@ -181,6 +181,23 @@ text\:"Terminal tables"))' \
 ':report -- JSON report written by `wsblast --format json` (schema 1.x), or comparison written by `wsblast --compare ... --format json` (schema 1.1 or 1.2):_files' \
 && ret=0
 ;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+'-o+[Write the scenario to FILE instead of stdout]:FILE:_files' \
+'--output=[Write the scenario to FILE instead of stdout]:FILE:_files' \
+'--url=[Import the connection whose URL contains TEXT]:TEXT:_default' \
+'--index=[Import the Nth matching connection, from 1 \[default\: the one that sent the most messages\]]:N:_default' \
+'-c+[Connections of the generated phase]:N:_default' \
+'--connections=[Connections of the generated phase]:N:_default' \
+'-d+[Duration of the generated phase]:DURATION:_default' \
+'--duration=[Duration of the generated phase]:DURATION:_default' \
+'--max-wait=[The longest pause kept between messages; longer ones are shortened to it]:DURATION:_default' \
+'--no-waits[Leave out the recorded pauses\: send each message as soon as the last one is answered]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':har -- HAR file exported from the browser'\''s network panel (Chrome and Edge record WebSocket messages in it):_files' \
+&& ret=0
+;;
         esac
     ;;
 esac
@@ -192,6 +209,7 @@ _wsblast_commands() {
 'mock:Run a local WebSocket test server\: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file' \
 'agent:Run a load agent that generates load for a coordinator (\`wsblast URL --agents ...\`), one test at a time' \
 'render:Render a saved JSON report (from --format json) or comparison (from --compare --format json) as HTML, Markdown or text without running a test' \
+'import:Write a scenario from a browser'\''s HAR file\: the messages one recorded WebSocket connection sent, with its pauses' \
     )
     _describe -t commands 'wsblast commands' commands "$@"
 }
@@ -199,6 +217,11 @@ _wsblast_commands() {
 _wsblast__subcmd__agent_commands() {
     local commands; commands=()
     _describe -t commands 'wsblast agent commands' commands "$@"
+}
+(( $+functions[_wsblast__subcmd__import_commands] )) ||
+_wsblast__subcmd__import_commands() {
+    local commands; commands=()
+    _describe -t commands 'wsblast import commands' commands "$@"
 }
 (( $+functions[_wsblast__subcmd__mock_commands] )) ||
 _wsblast__subcmd__mock_commands() {

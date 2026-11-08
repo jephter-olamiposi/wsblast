@@ -99,6 +99,7 @@ subcommand.
 | Option | Default | Description |
 | :--- | :--- | :--- |
 | `wsblast agent --listen ADDR [--token T] [--tls-cert PEM --tls-key PEM] [--source-ip IP,...]` | | Run a load agent for a coordinator, one test at a time, its connections bound to its own `--source-ip` addresses |
+| `wsblast import FILE.har [-o FILE] [--url TEXT] [--index N] [-c N] [-d D] [--max-wait D] [--no-waits]` | | Write a scenario from a browser's HAR file: the messages one recorded WebSocket connection sent, with its pauses ([docs/import.md](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/import.md)) |
 | `wsblast render REPORT.json [--format html\|markdown\|text] [-o FILE]` | `html` | Render a saved JSON report without running a test ([docs/ci.md](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/ci.md#8-html-report)) |
 | `wsblast mock [--listen ADDR]` | `127.0.0.1:9001` | Run the mock test server (`--delay`, `--jitter`, `--close-after`, `--reject-ratio`, `--stall-every`/`--stall-for`, `--replay` or `--rules`; `--tls-cert`/`--tls-key` for `wss://`) |
 

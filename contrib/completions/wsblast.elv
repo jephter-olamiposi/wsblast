@@ -119,6 +119,7 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand mock 'Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file'
             cand agent 'Run a load agent that generates load for a coordinator (`wsblast URL --agents ...`), one test at a time'
             cand render 'Render a saved JSON report (from --format json) or comparison (from --compare --format json) as HTML, Markdown or text without running a test'
+            cand import 'Write a scenario from a browser''s HAR file: the messages one recorded WebSocket connection sent, with its pauses'
         }
         &'wsblast;mock'= {
             cand --listen 'Address to listen on (host:port; port 0 picks a free port)'
@@ -152,6 +153,20 @@ set edit:completion:arg-completer[wsblast] = {|@words|
             cand --output 'Write the rendered report to FILE instead of stdout'
             cand -h 'Print help (see more with ''--help'')'
             cand --help 'Print help (see more with ''--help'')'
+        }
+        &'wsblast;import'= {
+            cand -o 'Write the scenario to FILE instead of stdout'
+            cand --output 'Write the scenario to FILE instead of stdout'
+            cand --url 'Import the connection whose URL contains TEXT'
+            cand --index 'Import the Nth matching connection, from 1 [default: the one that sent the most messages]'
+            cand -c 'Connections of the generated phase'
+            cand --connections 'Connections of the generated phase'
+            cand -d 'Duration of the generated phase'
+            cand --duration 'Duration of the generated phase'
+            cand --max-wait 'The longest pause kept between messages; longer ones are shortened to it'
+            cand --no-waits 'Leave out the recorded pauses: send each message as soon as the last one is answered'
+            cand -h 'Print help'
+            cand --help 'Print help'
         }
     ]
     $completions[$command]

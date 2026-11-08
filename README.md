@@ -214,6 +214,11 @@ enable only what they need.
   GitHub Actions, GitLab CI, baseline comparison and HTML reports.
 * [Scenarios](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/scenarios.md):
   multi-phase load with actions, think time and per-phase SLOs.
+* [Importing a browser session](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/import.md):
+  a scenario from the WebSocket messages a HAR file recorded.
+* [Socket.IO](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/socketio.md):
+  events timed to their acks, Socket.IO 2 to 4, binary events and logins
+  per connection.
 * [Distributed runs](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/distributed.md):
   running agents and a coordinator, securely.
 * [Live export](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/export.md):

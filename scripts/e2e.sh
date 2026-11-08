@@ -409,6 +409,33 @@ else
 skip "Socket.IO against socket.io 2 (needs node and npm)"
 fi
 
+# wsblast import: a scenario from a HAR file
+cat > mkhar.py <<'EOF'
+import json
+def f(t, time, d, op=1): return {"type": t, "time": time, "opcode": op, "data": d}
+ws = {"_resourceType": "websocket",
+      "request": {"method": "GET", "url": "ws://127.0.0.1:19001/chat", "headers": [{"name": "Cookie", "value": "sid=secret"}]},
+      "response": {"status": 101},
+      "_webSocketMessages": [f("send", 10.0, '{"op":"join"}'), f("receive", 10.01, '{"op":"join"}'),
+                             f("send", 10.21, '{"op":"say"}'), f("receive", 10.22, '{"op":"say"}'),
+                             f("send", 10.22, '{"op":"say"}'), f("receive", 10.23, '{"op":"say"}')]}
+sio = {"request": {"method": "GET", "url": "ws://127.0.0.1:19033/socket.io/?EIO=4&transport=websocket"},
+       "_webSocketMessages": [f("receive", 1.0, '0{"sid":"a","pingInterval":25000,"pingTimeout":20000}'),
+                              f("send", 1.0, '40/chat,'), f("receive", 1.01, '40/chat,{"sid":"b"}'),
+                              f("send", 1.1, '42/chat,0["say",{"n":1}]'), f("receive", 1.11, '43/chat,0[{"n":1}]')]}
+json.dump({"log": {"version": "1.2", "entries": [{"request": {"url": "https://x/"}}, ws]}}, open("rec.har", "w"))
+json.dump({"log": {"version": "1.2", "entries": [sio]}}, open("sio.har", "w"))
+EOF
+python3 mkhar.py
+$W import rec.har -o rec.yaml -c 3 -d 2s >imp.txt 2>&1; rc=$?
+check "import writes a scenario from a HAR" "[ $rc = 0 ] && grep -q 'count: 2' rec.yaml && grep -q 'duration: 200ms' rec.yaml && ! grep -q secret rec.yaml && grep -q 'Cookie' imp.txt" "rc=$rc $(tail -2 imp.txt)"
+$W --scenario rec.yaml --no-progress --format json -o rec.json >/dev/null 2>&1; rc=$?
+check "the imported scenario runs" "[ $rc = 0 ] && j rec.json 'd[\"metrics\"][\"error_rate\"] == 0 and d[\"metrics\"][\"total_messages_recv\"] > 10' | grep -q True" "rc=$rc"
+$W import sio.har -o sio.yaml -c 2 -d 2s >impsio.txt 2>&1; rc=$?
+check "import of a Socket.IO session gives its flags" "[ $rc = 0 ] && grep -q -- '--mode socketio --sio-event say --sio-namespace /chat' impsio.txt" "rc=$rc $(tail -2 impsio.txt)"
+$W --scenario sio.yaml --mode socketio --sio-event say --sio-namespace /chat --no-progress --format json -o siorec.json >/dev/null 2>&1; rc=$?
+check "the imported Socket.IO scenario runs" "[ $rc = 0 ] && j siorec.json 'd[\"metrics\"][\"error_rate\"] == 0 and d[\"metrics\"][\"total_messages_recv\"] > 5' | grep -q True" "rc=$rc"
+
 # TUI under a pseudo-terminal
 if [ $LINUX = 1 ] && command -v script >/dev/null; then
 script -qec "$W $T -c 5 -d 2s --tui" /dev/null >tui.txt 2>&1; rc=$?

@@ -559,6 +559,56 @@ pub(crate) enum Command {
     Agent(AgentArgs),
     /// Render a saved JSON report (from --format json) or comparison (from --compare --format json) as HTML, Markdown or text without running a test
     Render(RenderArgs),
+    /// Write a scenario from a browser's HAR file: the messages one recorded WebSocket connection sent, with its pauses
+    #[cfg(feature = "scenario")]
+    Import(ImportArgs),
+}
+
+/// Flags of `wsblast import`.
+#[cfg(feature = "scenario")]
+#[derive(Debug, Clone, clap::Args)]
+pub(crate) struct ImportArgs {
+    /// HAR file exported from the browser's network panel (Chrome and Edge record WebSocket messages in it)
+    #[arg(value_name = "FILE.har")]
+    pub har: PathBuf,
+
+    /// Write the scenario to FILE instead of stdout
+    #[arg(short = 'o', long = "output", value_name = "FILE")]
+    pub output: Option<PathBuf>,
+
+    /// Import the connection whose URL contains TEXT
+    #[arg(long = "url", value_name = "TEXT")]
+    pub url: Option<String>,
+
+    /// Import the Nth matching connection, from 1 [default: the one that sent the most messages]
+    #[arg(long = "index", value_name = "N")]
+    pub index: Option<usize>,
+
+    /// Connections of the generated phase
+    #[arg(
+        short = 'c',
+        long = "connections",
+        value_name = "N",
+        default_value_t = 10
+    )]
+    pub connections: u64,
+
+    /// Duration of the generated phase
+    #[arg(
+        short = 'd',
+        long = "duration",
+        value_name = "DURATION",
+        default_value = "1m"
+    )]
+    pub duration: String,
+
+    /// The longest pause kept between messages; longer ones are shortened to it
+    #[arg(long = "max-wait", value_name = "DURATION", default_value = "10s")]
+    pub max_wait: String,
+
+    /// Leave out the recorded pauses: send each message as soon as the last one is answered
+    #[arg(long = "no-waits")]
+    pub no_waits: bool,
 }
 
 /// Flags of `wsblast agent`.

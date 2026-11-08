@@ -29,6 +29,7 @@ include = [
     "contrib/man/wsblast-mock.1",
     "contrib/man/wsblast-agent.1",
     "contrib/man/wsblast-render.1",
+    "contrib/man/wsblast-import.1",
     "contrib/completions",
 ]
 # The shell and PowerShell installers place the binary in $CARGO_HOME/bin.

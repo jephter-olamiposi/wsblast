@@ -1,0 +1,39 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH wsblast-import 1  "wsblast-import 0.2.4" 
+.SH NAME
+wsblast\-import \- Write a scenario from a browser\*(Aqs HAR file: the messages one recorded WebSocket connection sent, with its pauses
+.SH SYNOPSIS
+\fBwsblast import\fR [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-url\fR] [\fB\-\-index\fR] [\fB\-c\fR|\fB\-\-connections\fR] [\fB\-d\fR|\fB\-\-duration\fR] [\fB\-\-max\-wait\fR] [\fB\-\-no\-waits\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIFILE.har\fR> 
+.SH DESCRIPTION
+Write a scenario from a browser\*(Aqs HAR file: the messages one recorded WebSocket connection sent, with its pauses
+.SH OPTIONS
+.TP
+\fB\-o\fR, \fB\-\-output\fR \fI<FILE>\fR
+Write the scenario to FILE instead of stdout
+.TP
+\fB\-\-url\fR \fI<TEXT>\fR
+Import the connection whose URL contains TEXT
+.TP
+\fB\-\-index\fR \fI<N>\fR
+Import the Nth matching connection, from 1 [default: the one that sent the most messages]
+.TP
+\fB\-c\fR, \fB\-\-connections\fR \fI<N>\fR [default: 10]
+Connections of the generated phase
+.TP
+\fB\-d\fR, \fB\-\-duration\fR \fI<DURATION>\fR [default: 1m]
+Duration of the generated phase
+.TP
+\fB\-\-max\-wait\fR \fI<DURATION>\fR [default: 10s]
+The longest pause kept between messages; longer ones are shortened to it
+.TP
+\fB\-\-no\-waits\fR
+Leave out the recorded pauses: send each message as soon as the last one is answered
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIFILE.har\fR>
+HAR file exported from the browser\*(Aqs network panel (Chrome and Edge record WebSocket messages in it)
+.SH VERSION
+v0.2.4

@@ -19,6 +19,9 @@ _wsblast() {
             wsblast,agent)
                 cmd="wsblast__subcmd__agent"
                 ;;
+            wsblast,import)
+                cmd="wsblast__subcmd__import"
+                ;;
             wsblast,mock)
                 cmd="wsblast__subcmd__mock"
                 ;;
@@ -32,7 +35,7 @@ _wsblast() {
 
     case "${cmd}" in
         wsblast)
-            opts="-u -c -d -n -r -p -H -o -h -V --url --connections --ramp-rate --duration --stages --arrival-rate --session-duration --max-connections --requests --rate --payload --payload-file --binary --data --header --subprotocol --source-ip --compression --mode --connect-timeout --message-timeout --match --expect --ping-interval --max-p50 --max-p95 --max-p99 --max-p999 --max-error-rate --min-throughput --max-generator-lag --auth-type --auth-token --auth-token-cmd --auth-token-cmd-timeout --auth-token-refresh --auth-header --auth-apikey --auth-apikey-header --auth-jwt-alg --auth-jwt-key --auth-jwt-claims --auth-jwt-ttl --auth-jwt-kid --auth-jwt-per-connection --auth-oauth2-token-url --auth-oauth2-client-id --auth-oauth2-client-secret-file --auth-oauth2-scope --auth-oauth2-audience --graphql-ws-operation-name --graphql-ws-operation --graphql-ws-variables --graphql-ws-extensions --sio-event --sio-namespace --sio-auth --sio-version --format --compare --compare-threshold --compare-window --fail-on-regression --capture --capture-limit --chaos-delay --chaos-drop --chaos-corrupt --chaos-close --chaos-close-mode --chaos-read-pause --chaos-seed --output --tui --no-progress --no-reconnect --prometheus-listen --otel-endpoint --otel-interval --otel-service-name --scenario --phase --agents --agent-token --agent-timeout --agent-ca --help --version mock agent render"
+            opts="-u -c -d -n -r -p -H -o -h -V --url --connections --ramp-rate --duration --stages --arrival-rate --session-duration --max-connections --requests --rate --payload --payload-file --binary --data --header --subprotocol --source-ip --compression --mode --connect-timeout --message-timeout --match --expect --ping-interval --max-p50 --max-p95 --max-p99 --max-p999 --max-error-rate --min-throughput --max-generator-lag --auth-type --auth-token --auth-token-cmd --auth-token-cmd-timeout --auth-token-refresh --auth-header --auth-apikey --auth-apikey-header --auth-jwt-alg --auth-jwt-key --auth-jwt-claims --auth-jwt-ttl --auth-jwt-kid --auth-jwt-per-connection --auth-oauth2-token-url --auth-oauth2-client-id --auth-oauth2-client-secret-file --auth-oauth2-scope --auth-oauth2-audience --graphql-ws-operation-name --graphql-ws-operation --graphql-ws-variables --graphql-ws-extensions --sio-event --sio-namespace --sio-auth --sio-version --format --compare --compare-threshold --compare-window --fail-on-regression --capture --capture-limit --chaos-delay --chaos-drop --chaos-corrupt --chaos-close --chaos-close-mode --chaos-read-pause --chaos-seed --output --tui --no-progress --no-reconnect --prometheus-listen --otel-endpoint --otel-interval --otel-service-name --scenario --phase --agents --agent-token --agent-timeout --agent-ca --help --version mock agent render import"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -417,6 +420,56 @@ _wsblast() {
                     return 0
                     ;;
                 --source-ip)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        wsblast__subcmd__import)
+            opts="-o -c -d -h --output --url --index --connections --duration --max-wait --no-waits --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --output)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -o)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --url)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --index)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --connections)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --duration)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -d)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --max-wait)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

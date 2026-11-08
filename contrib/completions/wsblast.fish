@@ -131,6 +131,7 @@ complete -c wsblast -n "__fish_wsblast_needs_command" -s V -l version -d 'Print 
 complete -c wsblast -n "__fish_wsblast_needs_command" -a "mock" -d 'Run a local WebSocket test server: echo with optional delay, jitter, stalls, rejections and closes, or replay of a capture file'
 complete -c wsblast -n "__fish_wsblast_needs_command" -a "agent" -d 'Run a load agent that generates load for a coordinator (`wsblast URL --agents ...`), one test at a time'
 complete -c wsblast -n "__fish_wsblast_needs_command" -a "render" -d 'Render a saved JSON report (from --format json) or comparison (from --compare --format json) as HTML, Markdown or text without running a test'
+complete -c wsblast -n "__fish_wsblast_needs_command" -a "import" -d 'Write a scenario from a browser\'s HAR file: the messages one recorded WebSocket connection sent, with its pauses'
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l listen -d 'Address to listen on (host:port; port 0 picks a free port)' -r
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l delay -d 'Hold every reply for this long after its request arrived (e.g. \'20ms\')' -r
 complete -c wsblast -n "__fish_wsblast_using_subcommand mock" -l jitter -d 'Add a uniformly distributed extra delay between 0 and this to every reply' -r
@@ -156,3 +157,11 @@ markdown\t'GitHub Flavored Markdown'
 text\t'Terminal tables'"
 complete -c wsblast -n "__fish_wsblast_using_subcommand render" -s o -l output -d 'Write the rendered report to FILE instead of stdout' -r -F
 complete -c wsblast -n "__fish_wsblast_using_subcommand render" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c wsblast -n "__fish_wsblast_using_subcommand import" -s o -l output -d 'Write the scenario to FILE instead of stdout' -r -F
+complete -c wsblast -n "__fish_wsblast_using_subcommand import" -l url -d 'Import the connection whose URL contains TEXT' -r
+complete -c wsblast -n "__fish_wsblast_using_subcommand import" -l index -d 'Import the Nth matching connection, from 1 [default: the one that sent the most messages]' -r
+complete -c wsblast -n "__fish_wsblast_using_subcommand import" -s c -l connections -d 'Connections of the generated phase' -r
+complete -c wsblast -n "__fish_wsblast_using_subcommand import" -s d -l duration -d 'Duration of the generated phase' -r
+complete -c wsblast -n "__fish_wsblast_using_subcommand import" -l max-wait -d 'The longest pause kept between messages; longer ones are shortened to it' -r
+complete -c wsblast -n "__fish_wsblast_using_subcommand import" -l no-waits -d 'Leave out the recorded pauses: send each message as soon as the last one is answered'
+complete -c wsblast -n "__fish_wsblast_using_subcommand import" -s h -l help -d 'Print help'

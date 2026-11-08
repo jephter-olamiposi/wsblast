@@ -1,6 +1,6 @@
 # Scenario reference
 
-A scenario is a YAML file that describes one or more load phases. wsblast runs the phases in order and prints one merged report at the end. SLOs can gate the whole scenario and each phase on its own.
+A scenario is a YAML file that describes one or more load phases. wsblast runs the phases in order and prints one merged report at the end. SLOs can gate the whole scenario and each phase on its own. To start from what a browser sent, `wsblast import` writes a scenario from a HAR file ([docs/import.md](import.md)).
 
 Scenario support is part of the default build (the `scenario` Cargo feature):
 

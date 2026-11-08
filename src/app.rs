@@ -104,6 +104,7 @@ impl AssetCommand {
                             "mock" => "wsblast-mock",
                             "agent" => "wsblast-agent",
                             "render" => "wsblast-render",
+                            "import" => "wsblast-import",
                             _ => "",
                         };
                         let sub = command
@@ -866,6 +867,11 @@ async fn run_app() -> Result<()> {
 
     if let Some(crate::cli::Command::Render(args)) = &cli.command {
         return run_render(args);
+    }
+
+    #[cfg(feature = "scenario")]
+    if let Some(crate::cli::Command::Import(args)) = &cli.command {
+        return crate::har::run_command(args);
     }
 
     // Handle compare command first (doesn't run load test)
