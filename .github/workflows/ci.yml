@@ -233,6 +233,62 @@ jobs:
           WSBLAST_E2E_INTEROP: require
         run: bash scripts/e2e.sh target/release/wsblast
 
+  action:
+    # The GitHub Action in action.yml, as a workflow uses it: install a
+    # release, gate on an SLO that passes and on one that fails.
+    name: GitHub Action (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install with the action
+        id: install
+        uses: ./
+        with:
+          args: --version
+          version: v0.2.4
+      - name: Start a mock server
+        shell: bash
+        run: |
+          wsblast mock --listen 127.0.0.1:19777 > mock.log 2>&1 &
+          sleep 2
+      - name: Gate that passes
+        id: pass
+        uses: ./
+        with:
+          args: >-
+            ws://127.0.0.1:19777 -c 5 -d 3s -p '{"text": "hello world"}'
+            --max-p99 2s --max-error-rate 0.01
+          version: v0.2.4
+      - name: Gate that fails
+        id: breach
+        continue-on-error: true
+        uses: ./
+        with:
+          args: ws://127.0.0.1:19777 -c 5 -d 2s --max-p50 1us
+          version: v0.2.4
+          report: breach.json
+      - name: Check the outputs
+        shell: bash
+        env:
+          VERSION: ${{ steps.install.outputs.version }}
+          PASS_CODE: ${{ steps.pass.outputs.exit-code }}
+          PASS_REPORT: ${{ steps.pass.outputs.report }}
+          BREACH_CODE: ${{ steps.breach.outputs.exit-code }}
+          BREACH_OUTCOME: ${{ steps.breach.outcome }}
+        run: |
+          set -x
+          test "$VERSION" = 0.2.4
+          test "$PASS_CODE" = 0
+          test "$PASS_REPORT" = wsblast-report.json
+          test -s wsblast-report.json
+          test "$BREACH_CODE" = 2
+          test "$BREACH_OUTCOME" = failure
+          test -s breach.json
+
   perf-budget:
     name: Performance budget
     runs-on: ubuntu-24.04

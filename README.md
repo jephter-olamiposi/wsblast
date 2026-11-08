@@ -97,19 +97,28 @@ stalls every 5 seconds. Add `--tui` to any run for the live dashboard.
 
 ### In CI
 
+The repository is a GitHub Action. It installs a checksum-verified release,
+runs the test, puts the report in the job summary, and fails the job when an
+SLO fails:
+
 ```yaml
 - name: WebSocket SLO gate
-  run: |
-    curl -fsSL https://raw.githubusercontent.com/jephter-olamiposi/wsblast/main/install.sh | sh
-    wsblast "$WS_URL" -c 50 -d 30s -r 20 \
-      --max-p99 50ms --max-error-rate 0.01 \
-      --no-progress --format markdown -o report.md
-- name: Job summary
-  if: always()
-  run: cat report.md >> "$GITHUB_STEP_SUMMARY"
+  uses: jephter-olamiposi/wsblast@v0.2.5
+  with:
+    args: ${{ vars.WS_URL }} -c 50 -d 30s -r 20 --max-p99 50ms --max-error-rate 0.01
 ```
 
-The report is written before wsblast exits, also when the gate fails.
+Elsewhere, install it with the script and gate on the exit code:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jephter-olamiposi/wsblast/main/install.sh | sh
+wsblast "$WS_URL" -c 50 -d 30s -r 20 --max-p99 50ms --max-error-rate 0.01 \
+  --no-progress --format markdown -o report.md
+```
+
+The report is written before wsblast exits, also when the gate fails. See
+[docs/ci.md](https://github.com/jephter-olamiposi/wsblast/blob/main/docs/ci.md)
+for the action's inputs, GitLab CI and baseline comparison.
 
 | Exit code | Meaning |
 | :--- | :--- |

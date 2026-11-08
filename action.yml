@@ -1,0 +1,80 @@
+name: wsblast
+description: Load-test a WebSocket server and gate the job on latency and error SLOs, with the report in the job summary.
+author: Jephter Olaifa
+branding:
+  icon: zap
+  color: blue
+
+inputs:
+  args:
+    description: >-
+      The wsblast command line after `wsblast`, such as
+      `wss://staging.example.com/ws -c 50 -d 30s --max-p99 50ms`. It is
+      parsed as a shell command line, so quote values with spaces; keep
+      untrusted text (pull request titles, branch names) out of it, and
+      pass secrets through environment variables.
+    required: true
+  version:
+    description: >-
+      The wsblast release to install, such as `v0.2.5`. Empty installs the
+      release the action is pinned to when its ref is a version tag, and
+      the latest release otherwise.
+    required: false
+    default: ""
+  report:
+    description: >-
+      Where the JSON report is written, unless `args` sets `--format` or
+      `-o` itself. It is the action's `report` output.
+    required: false
+    default: wsblast-report.json
+  summary:
+    description: Add the report to the job summary, as Markdown.
+    required: false
+    default: "true"
+
+outputs:
+  exit-code:
+    description: "wsblast's exit code: 0 passed, 1 error, 2 SLO breach or regression."
+    value: ${{ steps.run.outputs.exit-code }}
+  report:
+    description: The JSON report's path, when the action wrote one.
+    value: ${{ steps.run.outputs.report }}
+  version:
+    description: The installed wsblast version.
+    value: ${{ steps.install.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install wsblast
+      id: install
+      shell: bash
+      env:
+        WSBLAST_REQUESTED: ${{ inputs.version }}
+        WSBLAST_ACTION_REF: ${{ github.action_ref }}
+      run: |
+        set -euo pipefail
+        version="$WSBLAST_REQUESTED"
+        if [ -z "$version" ] && printf '%s' "$WSBLAST_ACTION_REF" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+          version="$WSBLAST_ACTION_REF"
+        fi
+        bin="$RUNNER_TEMP/wsblast-bin"
+        mkdir -p "$bin"
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          pwsh -NoProfile -File "$GITHUB_ACTION_PATH/scripts/action/install.ps1" -Version "$version" -Destination "$bin"
+        else
+          WSBLAST_VERSION="$version" WSBLAST_INSTALL_DIR="$bin" sh "$GITHUB_ACTION_PATH/install.sh"
+        fi
+        echo "$bin" >> "$GITHUB_PATH"
+        installed="$("$bin/wsblast" --version | awk '{print $2}')"
+        echo "version=$installed" >> "$GITHUB_OUTPUT"
+        echo "Installed wsblast $installed"
+
+    - name: Run wsblast
+      id: run
+      shell: bash
+      env:
+        WSBLAST_ARGS: ${{ inputs.args }}
+        WSBLAST_REPORT: ${{ inputs.report }}
+        WSBLAST_SUMMARY: ${{ inputs.summary }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action/run.sh"

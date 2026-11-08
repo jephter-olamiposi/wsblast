@@ -131,6 +131,61 @@ wsblast writes one format per run. To get both a machine-readable record and a r
 
 ## 4. GitHub Actions
 
+### 4.0 The wsblast action
+
+The repository is a GitHub Action: it installs a release binary (its
+SHA-256 checked against the release's), runs wsblast with your arguments,
+adds the report to the job summary, and fails the step with wsblast's exit
+code, so a failed SLO (exit code 2) fails the job. It runs on Linux and
+macOS runners (x86_64 and arm64) and Windows (x86_64).
+
+```yaml
+name: websocket-perf
+
+on:
+  pull_request:
+
+jobs:
+  slo-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Load test with SLO gate
+        uses: jephter-olamiposi/wsblast@v0.2.5
+        env:
+          WS_TOKEN: ${{ secrets.WS_TOKEN }}
+        with:
+          args: >-
+            ${{ vars.WSBLAST_TARGET_URL }} -c 50 -d 30s -r 20
+            -H "Authorization: Bearer $WS_TOKEN"
+            --max-p99 50ms --max-error-rate 0.01
+
+      - name: Archive the JSON report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wsblast-report
+          path: wsblast-report.json
+```
+
+| Input | Default | Description |
+| :--- | :--- | :--- |
+| `args` | | The command line after `wsblast`. It is parsed as a shell command line, so environment variables such as `$WS_TOKEN` expand and values with spaces need quotes. Keep untrusted text, such as pull request titles or branch names, out of it, and pass secrets through `env`. |
+| `version` | the action's tag | The release to install. Empty installs the release the action is pinned to when its ref is a version tag (`@v0.2.5`), and the latest release otherwise (`@main`). |
+| `report` | `wsblast-report.json` | Where the JSON report is written. When `args` sets `--format` or `-o` itself, the action leaves the output alone and writes no summary. |
+| `summary` | `true` | Add the report to the job summary, as Markdown. |
+
+| Output | Description |
+| :--- | :--- |
+| `exit-code` | wsblast's exit code ([section 1](#1-exit-codes)). |
+| `report` | The JSON report's path, when the action wrote one. |
+| `version` | The installed version. |
+
+The action adds `--no-progress`. For a subcommand (`mock`, `render`,
+`import`) or `--version`, it runs the arguments as they are. A
+comparison works the same way: `args: --compare baseline.json
+wsblast-report.json --fail-on-regression`. The sections below install
+wsblast themselves, for workflows that need more control.
+
 ### 4.1 SLO gate with a job summary and a JSON artifact
 
 ```yaml
