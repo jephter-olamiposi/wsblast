@@ -141,10 +141,7 @@ above; four things differ, as they do for a Socket.IO 2 client:
 
 - **Pings.** The client pings: wsblast sends `2` every `pingInterval` of
   the open packet, and the server answers `3`. A Socket.IO 2 server closes
-  a session that stops pinging; an Engine.IO 4 session (without
-  `--sio-version 2`) waits for the server's pings instead, so against a
-  Socket.IO 2 server it is closed after the server's `pingInterval` plus
-  `pingTimeout` and shows up as reconnects.
+  a session that stops pinging.
 - **The default namespace.** The server joins the client to `/` on its own
   and sends `40`; wsblast sends a connect only for another namespace.
 - **Authentication.** Socket.IO 2 has no connect payload: the fields of
@@ -159,6 +156,35 @@ above; four things differ, as they do for a Socket.IO 2 client:
 wsblast ws://legacy.example.com --mode socketio --sio-version 2 \
   --sio-namespace /chat --sio-auth '{"token":"abc"}' --sio-event chat -c 100 -d 1m -r 2
 ```
+
+### 4.1 The wrong version
+
+A run with the wrong `--sio-version` stops as soon as its first session
+shows it, and exits with code 1 and the flag to use, instead of counting
+an error on every connection:
+
+- **A Socket.IO 2 server, without `--sio-version 2`.** A Socket.IO 3 or
+  later server answers a connect with a session id (`40{"sid":...}`) and
+  never connects a client unasked; a Socket.IO 2 server connects every
+  client to `/` with a bare `40`. The first session that gets one ends the
+  run:
+
+  ```text
+  Error: Configuration error: Invalid option: ws://legacy.example.com/socket.io/?EIO=4&transport=websocket is a Socket.IO 2 server (Engine.IO 3): it connected the session to '/' without a session id. Add --sio-version 2
+  ```
+
+- **A Socket.IO 3 or later server, with `--sio-version 2`.** Unless it was
+  started with `allowEIO3: true`, the server refuses an Engine.IO 3
+  session after the WebSocket handshake. When a session does not open,
+  wsblast checks once with an Engine.IO 4 connection, outside the
+  measurements; if the server answers it as a Socket.IO 3 or later server,
+  the run ends with "drop --sio-version 2, or start the server with
+  allowEIO3: true".
+
+The checks add nothing to a run with the right version: no connection,
+no wait. A session that fails for any other reason, such as a refused
+namespace, is counted as before. In a distributed run the agent that sees
+it stops, and the coordinator reports its message.
 
 ## 5. Scenarios
 

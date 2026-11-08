@@ -1274,6 +1274,46 @@ async fn socketio_2_sessions_ping_the_server() {
     assert_eq!(binary.total_bytes_recv, binary.total_messages_recv * 500);
 }
 
+/// A server that answers like Socket.IO 2: the open packet, then `40` for
+/// the default namespace with no session id.
+#[cfg(feature = "socketio")]
+async fn spawn_socketio_2_lookalike() -> String {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                    return;
+                };
+                let open = r#"0{"sid":"x","upgrades":[],"pingInterval":25000,"pingTimeout":20000}"#;
+                let _ = ws.send(Message::Text(open.into())).await;
+                let _ = ws.send(Message::Text("40".into())).await;
+                while let Some(Ok(_)) = ws.next().await {}
+            });
+        }
+    });
+    url
+}
+
+/// A Socket.IO 2 server is named before the run, with the flag to use,
+/// instead of every session being closed at the server's ping timeout.
+#[cfg(feature = "socketio")]
+#[tokio::test]
+async fn socketio_names_a_socket_io_2_server_before_the_run() {
+    let url = spawn_socketio_2_lookalike().await;
+    let err = Runner::new(socketio_load(&url).build().unwrap())
+        .with_signal_handling(false)
+        .run()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Socket.IO 2 server"), "{err}");
+    assert!(err.contains("Add --sio-version 2"), "{err}");
+}
+
 /// The server pings far more often than the client sends: the pump answers
 /// every ping while the loop waits for its next send, so the server never
 /// drops the connection.

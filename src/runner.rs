@@ -548,25 +548,30 @@ impl Runner {
                 Arc::new(target)
             }
             _ = self.cancel_token.cancelled() => {
-                let total_connections = self.config.connections as u64;
-                let started_at = Instant::now();
-                return Ok(RunOutcome {
-                    totals: crate::metrics::MetricsTotals::new()?,
-                    arrivals: None,
-                    compression: None,
-                    elapsed: Duration::ZERO,
-                    connections: total_connections,
-                    not_started: total_connections,
-                    started_at,
-                    time_series: TimeSeries::default(),
-                    #[cfg(feature = "distributed")]
-                    interval_store: IntervalStore::new(started_at, interval_for(self.config.duration)),
-                    capture: None,
-                    lag: LagTotals::default(),
-                });
+                return self.cancelled_outcome();
             }
         };
         self.drive(target, capture_file).await
+    }
+
+    /// The outcome of a run cancelled before its first connection.
+    fn cancelled_outcome(&self) -> crate::error::Result<RunOutcome> {
+        let total_connections = self.config.connections as u64;
+        let started_at = Instant::now();
+        Ok(RunOutcome {
+            totals: crate::metrics::MetricsTotals::new()?,
+            arrivals: None,
+            compression: None,
+            elapsed: Duration::ZERO,
+            connections: total_connections,
+            not_started: total_connections,
+            started_at,
+            time_series: TimeSeries::default(),
+            #[cfg(feature = "distributed")]
+            interval_store: IntervalStore::new(started_at, interval_for(self.config.duration)),
+            capture: None,
+            lag: LagTotals::default(),
+        })
     }
 
     /// Prints the warnings about the ramp and the open-file limit that a run
@@ -646,8 +651,32 @@ impl Runner {
     }
 
     /// Starts the clock, runs the workers until the run is cancelled and
-    /// collects their metrics.
+    /// collects their metrics. A session that finds the run cannot work, such
+    /// as one talking to a Socket.IO server of the other version, stops the
+    /// run, which then fails with the reason and the fix.
     async fn drive(
+        &self,
+        target: Arc<ConnectTarget>,
+        capture_file: PendingCapture,
+    ) -> crate::error::Result<RunOutcome> {
+        let halted = target.halted();
+        let run = self.cancel_token.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = halted.cancelled() => run.cancel(),
+                () = run.cancelled() => {}
+            }
+        });
+        let outcome = self
+            .drive_workers(Arc::clone(&target), capture_file)
+            .await?;
+        if let Some(reason) = target.halt_reason() {
+            return Err(crate::error::ConfigError::InvalidOption(reason.to_string()).into());
+        }
+        Ok(outcome)
+    }
+
+    async fn drive_workers(
         &self,
         target: Arc<ConnectTarget>,
         capture_file: PendingCapture,

@@ -138,6 +138,21 @@ pub(crate) struct ConnectTarget {
     /// What `--compression` counted, when the run offers it.
     #[cfg(feature = "compression")]
     compression: Option<Arc<crate::deflate::CompressionCounters>>,
+    /// Set by a session that found the run cannot work as configured.
+    halt: Halt,
+}
+
+/// Why a run must stop, as one session found out, such as a Socket.IO
+/// server of another version than the run speaks. The run stops at once
+/// and fails with the reason, instead of reporting every connection's
+/// error.
+#[derive(Default)]
+pub(crate) struct Halt {
+    reason: std::sync::OnceLock<String>,
+    stopped: tokio_util::sync::CancellationToken,
+    /// Whether a session has claimed the one check a run makes, so that
+    /// many failing sessions do not all make it.
+    check_claimed: std::sync::atomic::AtomicBool,
 }
 
 /// The local addresses connections bind, by family, taken in turn.
@@ -228,7 +243,31 @@ impl ConnectTarget {
             sources,
             #[cfg(feature = "compression")]
             compression: compression.then(Arc::default),
+            halt: Halt::default(),
         }
+    }
+
+    /// Stops the run with `reason`; the first reason given is kept.
+    #[cfg_attr(not(feature = "socketio"), allow(dead_code))]
+    pub(crate) fn halt(&self, reason: String) {
+        let _ = self.halt.reason.set(reason);
+        self.halt.stopped.cancel();
+    }
+
+    /// Why a session stopped the run, if one did.
+    pub(crate) fn halt_reason(&self) -> Option<&str> {
+        self.halt.reason.get().map(String::as_str)
+    }
+
+    /// Cancelled when a session stops the run.
+    pub(crate) fn halted(&self) -> tokio_util::sync::CancellationToken {
+        self.halt.stopped.clone()
+    }
+
+    /// Claims the run's one check: true for the first caller only.
+    #[cfg_attr(not(feature = "socketio"), allow(dead_code))]
+    pub(crate) fn claim_check(&self) -> bool {
+        !self.halt.check_claimed.swap(true, Ordering::Relaxed)
     }
 
     /// What `--compression` counted so far, when the run offers it.
@@ -242,6 +281,18 @@ impl ConnectTarget {
     /// Opens the TCP connection and completes the TLS and WebSocket
     /// handshakes for `request`.
     pub(crate) async fn connect(&self, request: Request) -> Result<WsStream, ConnectError> {
+        self.connect_with(request, true).await
+    }
+
+    /// [`connect`](Self::connect), without the compression layer when
+    /// `compress` is false: a connection that is not part of the
+    /// measurements, such as the Socket.IO version probe, leaves the
+    /// compression counters alone.
+    pub(crate) async fn connect_with(
+        &self,
+        request: Request,
+        compress: bool,
+    ) -> Result<WsStream, ConnectError> {
         let addrs = self
             .addrs
             .as_ref()
@@ -291,7 +342,7 @@ impl ConnectTarget {
             }
         };
         #[cfg(feature = "compression")]
-        let transport = match &self.compression {
+        let transport = match self.compression.as_ref().filter(|_| compress) {
             Some(counters) => Transport::Deflate(Box::new(crate::deflate::DeflateStream::new(
                 stream,
                 crate::deflate::Role::Client,
@@ -300,7 +351,10 @@ impl ConnectTarget {
             None => Transport::Plain(stream),
         };
         #[cfg(not(feature = "compression"))]
-        let transport = Transport::Plain(stream);
+        let transport = {
+            let _ = compress;
+            Transport::Plain(stream)
+        };
         let (ws_stream, _) =
             tokio_tungstenite::client_async_with_config(request, transport, Some(self.ws_config))
                 .await
@@ -520,6 +574,7 @@ mod tests {
             sources: SourceIps::default(),
             #[cfg(feature = "compression")]
             compression: None,
+            halt: Halt::default(),
         };
         let request = "ws://127.0.0.1/".into_client_request().unwrap();
         // The server never upgrades, so only the TCP step can be observed.

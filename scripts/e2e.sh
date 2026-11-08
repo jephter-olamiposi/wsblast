@@ -324,9 +324,11 @@ $W ws://127.0.0.1:19502 --mode socketio --sio-event chat -c 3 -d 2s -p '{"n":{{s
 check "Socket.IO against a socket.io 4 server, compressed" "[ $rc = 0 ] && j siojs.json '(m:=d[\"metrics\"])[\"error_rate\"] == 0 and m[\"total_messages_recv\"] > 100 and m[\"total_unsolicited_frames\"] == 3 and m[\"compression\"][\"connections_negotiated\"] == 3' | grep -q True" "rc=$rc $(tail -2 sioserver.log)"
 $W ws://127.0.0.1:19502 --mode socketio --sio-event chat --sio-namespace /files -c 3 -d 2s --payload-file blob.bin --binary --no-progress --format json -o siojsbin.json >/dev/null 2>&1; rc=$?
 check "Socket.IO binary events against a socket.io 4 server" "[ $rc = 0 ] && j siojsbin.json '(m:=d[\"metrics\"])[\"error_rate\"] == 0 and m[\"total_messages_recv\"] > 100 and m[\"total_bytes_recv\"] == 3000 * m[\"total_messages_recv\"]' | grep -q True" "rc=$rc"
-$W ws://127.0.0.1:19502 --mode socketio --sio-event mixed -c 2 -d 1s --payload-file blob.bin --binary --expect 'json:/0/size=3000' --no-progress --format json -o siojsmix.json >/dev/null 2>&1; rc=$?
+$W ws://127.0.0.1:19502 --mode socketio --sio-version 2 -c 3 -d 5s --no-progress >sioeio3.txt 2>&1; rc=$?
+check "--sio-version 2 against socket.io 4 names the fix" "[ $rc = 1 ] && grep -q 'drop --sio-version 2' sioeio3.txt" "rc=$rc $(tail -1 sioeio3.txt)"
 $W ws://127.0.0.1:19502 --mode socketio --sio-event chat --sio-namespace /auth --data users.csv --sio-auth '{"user":"{{data.user}}","token":"{{data.token}}"}' -c 3 -d 1s --expect 'json:/0/user' --no-progress --format json -o sioauth.json >/dev/null 2>&1; rc=$?
 check "--sio-auth filled in per connection from --data" "[ $rc = 0 ] && j sioauth.json 'd[\"metrics\"][\"error_rate\"] == 0 and d[\"metrics\"][\"total_messages_recv\"] > 30' | grep -q True" "rc=$rc $(j sioauth.json "d['metrics']['error_breakdown']" 2>&1)"
+$W ws://127.0.0.1:19502 --mode socketio --sio-event mixed -c 2 -d 1s --payload-file blob.bin --binary --expect 'json:/0/size=3000' --no-progress --format json -o siojsmix.json >/dev/null 2>&1; rc=$?
 check "a socket.io binary ack with JSON arguments is checked" "[ $rc = 0 ] && j siojsmix.json 'd[\"metrics\"][\"error_rate\"] == 0 and d[\"metrics\"][\"total_messages_recv\"] > 50' | grep -q True" "rc=$rc"
 cat > sio-client.js <<'EOF'
 const { io } = require("socket.io-client");
@@ -378,9 +380,11 @@ $W ws://127.0.0.1:19503 --mode socketio --sio-version 2 --sio-event chat -c 3 -d
 check "--sio-version 2 against a socket.io 2 server, past its ping timeout" "[ $rc = 0 ] && j sio2js.json '(m:=d[\"metrics\"])[\"error_rate\"] == 0 and m[\"total_reconnects\"] == 0 and m[\"total_messages_recv\"] > 60' | grep -q True" "rc=$rc $(tail -2 sio2server.log)"
 $W ws://127.0.0.1:19503 --mode socketio --sio-version 2 --sio-namespace /chat --sio-auth '{"token":"t1"}' --sio-event chat -c 3 -d 2s --payload-file blob.bin --binary --no-progress --format json -o sio2bin.json >/dev/null 2>&1; rc=$?
 check "--sio-version 2 binary events in a namespace with auth" "[ $rc = 0 ] && j sio2bin.json '(m:=d[\"metrics\"])[\"error_rate\"] == 0 and m[\"total_bytes_recv\"] == 3000 * m[\"total_messages_recv\"] > 0 and \"t1\" not in d[\"target_url\"]' | grep -q True" "rc=$rc"
-$W ws://127.0.0.1:19503 --mode socketio --sio-version 2 --sio-namespace /chat --sio-auth '{"token":"no"}' -c 1 -d 1s --no-reconnect --no-progress --format json -o sio2deny.json >/dev/null 2>&1
+$W ws://127.0.0.1:19503 --mode socketio --sio-event chat -c 3 -d 5s --no-progress >sio2wrong.txt 2>&1; rc=$?
+check "a Socket.IO 2 server without --sio-version 2 names the fix" "[ $rc = 1 ] && grep -q 'Add --sio-version 2' sio2wrong.txt" "rc=$rc $(tail -1 sio2wrong.txt)"
 $W ws://127.0.0.1:19503 --mode socketio --sio-version 2 --sio-event chat --sio-namespace /users --data users.csv --sio-auth '{"user":"{{data.user}}","token":"{{data.token}}"}' -c 3 -d 1s --expect 'json:/0/user' --no-progress --format json -o sio2auth.json >/dev/null 2>&1; rc=$?
 check "--sio-version 2 auth query filled in per connection" "[ $rc = 0 ] && j sio2auth.json 'd[\"metrics\"][\"error_rate\"] == 0 and d[\"metrics\"][\"total_messages_recv\"] > 30' | grep -q True" "rc=$rc $(j sio2auth.json "d['metrics']['error_breakdown']" 2>&1)"
+$W ws://127.0.0.1:19503 --mode socketio --sio-version 2 --sio-namespace /chat --sio-auth '{"token":"no"}' -c 1 -d 1s --no-reconnect --no-progress --format json -o sio2deny.json >/dev/null 2>&1
 check "a refused Socket.IO 2 namespace is a protocol_error" "j sio2deny.json 'd[\"metrics\"][\"error_breakdown\"].get(\"protocol_error\") == 1' | grep -q True" "$(j sio2deny.json "d['metrics']['error_breakdown']" 2>&1)"
 cat > sio2/client.js <<'EOF'
 const io = require("socket.io-client");

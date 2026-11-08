@@ -26,6 +26,69 @@ use crate::config::{GraphQLWSMessage, GraphQLWSStartPayload};
 #[cfg(feature = "scenario")]
 use crate::config::{ScenarioAction, ScenarioPhase};
 
+/// The URL a connection whose templates `values` fill connects to: the
+/// target, with a Socket.IO 2 client's auth as query parameters, which stay
+/// out of the target URL the reports show.
+pub(crate) fn handshake_url<'a>(
+    config: &'a LoadTestConfig,
+    values: crate::template::Values<'_>,
+) -> std::borrow::Cow<'a, url::Url> {
+    #[cfg(feature = "socketio")]
+    if let Some(sio) = &config.socketio
+        && sio.engine == crate::socketio::EngineIo::V3
+        && let Some(auth) = sio.auth_for(values)
+    {
+        return std::borrow::Cow::Owned(crate::socketio::auth_query(&config.target_url, &auth));
+    }
+    let _ = values;
+    std::borrow::Cow::Borrowed(&config.target_url)
+}
+
+/// The handshake request to `url` with the run's headers, filled in with
+/// `values`, its subprotocol, and the compression offer when `compress` is
+/// set.
+pub(crate) fn handshake_request(
+    config: &LoadTestConfig,
+    url: &url::Url,
+    values: crate::template::Values<'_>,
+    compress: bool,
+) -> Result<Request, ErrorCategory> {
+    let mut req = url
+        .as_str()
+        .into_client_request()
+        .map_err(|_| ErrorCategory::Other)?;
+
+    req.headers_mut().extend(config.headers.clone());
+    // Checked with every row of the data file when the run was configured,
+    // so a value fails here only if it is not valid HTTP.
+    for (name, template) in &config.header_templates {
+        let value = http::HeaderValue::from_str(&template.render(values))
+            .map_err(|_| ErrorCategory::Other)?;
+        req.headers_mut().append(name.clone(), value);
+    }
+
+    #[cfg(feature = "compression")]
+    if compress {
+        req.headers_mut().insert(
+            http::header::SEC_WEBSOCKET_EXTENSIONS,
+            http::HeaderValue::from_static(crate::deflate::OFFER),
+        );
+    }
+    #[cfg(not(feature = "compression"))]
+    let _ = compress;
+
+    if let Some(subproto) = &config.subprotocol
+        && let Ok(val) = http::HeaderValue::from_str(subproto)
+    {
+        req.headers_mut().insert(
+            http::header::HeaderName::from_static("sec-websocket-protocol"),
+            val,
+        );
+    }
+
+    Ok(req)
+}
+
 /// Represents a single asynchronous WebSocket client worker session.
 pub(crate) struct WorkerSession {
     worker_id: usize,
@@ -293,16 +356,23 @@ impl WorkerSession {
             opened = tokio::time::timeout(
                 self.config.message_timeout,
                 crate::socketio::open(&mut ws_stream, &config, auth.as_deref()),
-            ) => Some(opened.unwrap_or(Err(ErrorCategory::Timeout))),
+            ) => Some(opened.unwrap_or(Err(crate::socketio::OpenFailure {
+                category: ErrorCategory::Timeout,
+                sign: None,
+            }))),
         };
         let ping_every = match opened {
             None => {
                 let _ = ws_stream.send(Message::Close(None)).await;
                 return SessionEnd::Finished;
             }
-            Some(Err(category)) => {
-                self.metrics.record_error(category, ErrorScope::Attempt);
+            Some(Err(failure)) => {
+                self.metrics
+                    .record_error(failure.category, ErrorScope::Attempt);
                 let _ = ws_stream.send(Message::Close(None)).await;
+                if let Some(sign) = failure.sign {
+                    self.check_socketio_version(&config, sign).await;
+                }
                 return self.session_end();
             }
             Some(Ok(every)) => every,
@@ -324,6 +394,51 @@ impl WorkerSession {
         end
     }
 
+    /// Stops the run when a failed open shows that the server speaks the
+    /// other Socket.IO version, with the flag that fixes it. A Socket.IO 2
+    /// server is known from the open itself. A session that did not open
+    /// with Engine.IO 3 may be talking to a Socket.IO 3 or later server
+    /// without `allowEIO3`; the first such session of the run checks with
+    /// one Engine.IO 4 connection, outside the measurements.
+    #[cfg(feature = "socketio")]
+    async fn check_socketio_version(
+        &self,
+        config: &crate::socketio::SocketIoConfig,
+        sign: crate::socketio::VersionSign,
+    ) {
+        use crate::socketio::{EngineIo, Probe, VersionSign};
+        let target_url = &self.config.target_url;
+        match sign {
+            VersionSign::SocketIo2Server => self.target.halt(format!(
+                "{target_url} is a Socket.IO 2 server (Engine.IO 3): it connected the session to '/' without a session id. Add --sio-version 2"
+            )),
+            VersionSign::NotOpened
+                if config.engine == EngineIo::V3 && self.target.claim_check() =>
+            {
+                let mut url = target_url.clone();
+                crate::socketio::socketio_url(&mut url, EngineIo::V4);
+                let Ok(request) =
+                    handshake_request(&self.config, &url, self.template_values(0), false)
+                else {
+                    return;
+                };
+                let probe = async {
+                    let mut ws = self.target.connect_with(request, false).await.ok()?;
+                    let probe = crate::socketio::probe(&mut ws, EngineIo::V4).await;
+                    let _ = ws.close(None).await;
+                    Some(probe)
+                };
+                let deadline = self.config.connect_timeout + self.config.message_timeout;
+                if let Ok(Some(Probe::SocketIo3)) = tokio::time::timeout(deadline, probe).await {
+                    self.target.halt(format!(
+                        "{target_url} did not open an Engine.IO 3 session, but answers Engine.IO 4 as a Socket.IO 3 or later server: drop --sio-version 2, or start the server with allowEIO3: true"
+                    ));
+                }
+            }
+            VersionSign::NotOpened => {}
+        }
+    }
+
     /// Classifies a session that ended on its own: cancellation (including the
     /// request cap, which cancels the run) means the work is done, anything
     /// else means the connection was lost.
@@ -336,51 +451,13 @@ impl WorkerSession {
     }
 
     fn build_handshake_request(&self) -> Result<Request, ErrorCategory> {
-        // A Socket.IO 2 client sends its auth as query parameters; they stay
-        // out of the target URL the reports show.
-        #[cfg(feature = "socketio")]
-        if let Some(sio) = &self.config.socketio
-            && sio.engine == crate::socketio::EngineIo::V3
-            && let Some(auth) = sio.auth_for(self.template_values(0))
-        {
-            let url = crate::socketio::auth_query(&self.config.target_url, &auth);
-            return self.finish_handshake_request(url.as_str());
-        }
-        self.finish_handshake_request(self.config.target_url.as_str())
-    }
-
-    fn finish_handshake_request(&self, url: &str) -> Result<Request, ErrorCategory> {
-        let mut req = url
-            .into_client_request()
-            .map_err(|_| ErrorCategory::Other)?;
-
-        req.headers_mut().extend(self.config.headers.clone());
-        // Checked with every row of the data file when the run was
-        // configured, so a value fails here only if it is not valid HTTP.
-        for (name, template) in &self.config.header_templates {
-            let value = http::HeaderValue::from_str(&template.render(self.template_values(0)))
-                .map_err(|_| ErrorCategory::Other)?;
-            req.headers_mut().append(name.clone(), value);
-        }
-
-        #[cfg(feature = "compression")]
-        if self.config.compression {
-            req.headers_mut().insert(
-                http::header::SEC_WEBSOCKET_EXTENSIONS,
-                http::HeaderValue::from_static(crate::deflate::OFFER),
-            );
-        }
-
-        if let Some(subproto) = &self.config.subprotocol
-            && let Ok(val) = http::HeaderValue::from_str(subproto)
-        {
-            req.headers_mut().insert(
-                http::header::HeaderName::from_static("sec-websocket-protocol"),
-                val,
-            );
-        }
-
-        Ok(req)
+        let url = handshake_url(&self.config, self.template_values(0));
+        handshake_request(
+            &self.config,
+            url.as_ref(),
+            self.template_values(0),
+            crate::runner::compression_offered(&self.config),
+        )
     }
 
     async fn run_echo_loop<S>(&mut self, ws_stream: S) -> SessionEnd

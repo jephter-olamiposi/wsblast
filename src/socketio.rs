@@ -410,6 +410,43 @@ struct Pending {
     attachments: Vec<Bytes>,
 }
 
+/// Why a Socket.IO session did not open: the error it counts, and what it
+/// says about the server's version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OpenFailure {
+    pub(crate) category: ErrorCategory,
+    pub(crate) sign: Option<VersionSign>,
+}
+
+/// What a failed open says about the server's Socket.IO version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VersionSign {
+    /// An Engine.IO 4 session got a connect to `/` without a session id:
+    /// only a Socket.IO 2 server sends one (Socket.IO 3 and later answer
+    /// a connect with `{"sid":...}`, and never connect a client to `/`
+    /// unasked).
+    SocketIo2Server,
+    /// No Engine.IO open packet arrived, as when a Socket.IO 3 or later
+    /// server without `allowEIO3` refuses an Engine.IO 3 session.
+    NotOpened,
+}
+
+impl OpenFailure {
+    fn new(category: ErrorCategory) -> Self {
+        Self {
+            category,
+            sign: None,
+        }
+    }
+
+    fn not_opened(category: ErrorCategory) -> Self {
+        Self {
+            category,
+            sign: Some(VersionSign::NotOpened),
+        }
+    }
+}
+
 /// Opens the Socket.IO session on a WebSocket: reads the Engine.IO open
 /// packet, connects to the namespace and waits for the server's connect
 /// packet, answering pings meanwhile. Returns how often an Engine.IO 3
@@ -417,14 +454,16 @@ struct Pending {
 ///
 /// # Errors
 ///
-/// `protocol_error` when the server does not speak Engine.IO 4 or refuses
-/// the namespace (a connect error packet), `unexpected_close` when it
-/// closes, and `read_error` or `write_error` when the connection fails.
+/// `protocol_error` when the server does not speak Engine.IO, refuses the
+/// namespace (a connect error packet) or is a Socket.IO server of the other
+/// version, `unexpected_close` when it closes, and `read_error` or
+/// `write_error` when the connection fails; with what the failure says
+/// about the server's version.
 pub(crate) async fn open<S>(
     ws: &mut S,
     config: &SocketIoConfig,
     auth: Option<&str>,
-) -> Result<Option<Duration>, ErrorCategory>
+) -> Result<Option<Duration>, OpenFailure>
 where
     S: Sink<Message, Error = TungsteniteError>
         + Stream<Item = Result<Message, TungsteniteError>>
@@ -432,6 +471,13 @@ where
 {
     let mut opened = false;
     let mut ping_every = None;
+    let fail = |opened: bool, category| {
+        if opened {
+            OpenFailure::new(category)
+        } else {
+            OpenFailure::not_opened(category)
+        }
+    };
     loop {
         let text = match ws.next().await {
             Some(Ok(Message::Text(text))) => text,
@@ -439,23 +485,25 @@ where
                 let _ = ws.send(Message::Pong(data)).await;
                 continue;
             }
-            Some(Ok(Message::Close(_))) | None => return Err(ErrorCategory::UnexpectedClose),
+            Some(Ok(Message::Close(_))) | None => {
+                return Err(fail(opened, ErrorCategory::UnexpectedClose));
+            }
             // Before the open packet, a binary frame is not Engine.IO.
-            Some(Ok(Message::Binary(_))) if !opened => return Err(ErrorCategory::ProtocolError),
+            Some(Ok(Message::Binary(_))) if !opened => {
+                return Err(fail(opened, ErrorCategory::ProtocolError));
+            }
             // After it, the attachment of an event the server emits on
             // another namespace, such as a Socket.IO 2 server's default one
             // before it answers the connect.
             Some(Ok(_)) => continue,
-            Some(Err(_)) => return Err(ErrorCategory::ReadError),
+            Some(Err(_)) => return Err(fail(opened, ErrorCategory::ReadError)),
         };
         if !opened {
             // The open packet: `0{"sid":...,"pingInterval":...}`.
-            let Some(open) = text.strip_prefix('0') else {
-                return Err(ErrorCategory::ProtocolError);
-            };
-            let Ok(open) = serde_json::from_str::<serde_json::Value>(open) else {
-                return Err(ErrorCategory::ProtocolError);
-            };
+            let open = text
+                .strip_prefix('0')
+                .and_then(|open| serde_json::from_str::<serde_json::Value>(open).ok())
+                .ok_or_else(|| fail(opened, ErrorCategory::ProtocolError))?;
             opened = true;
             if config.engine == EngineIo::V3 {
                 // An Engine.IO 3 client pings; without an interval it
@@ -464,7 +512,7 @@ where
                     .get("pingInterval")
                     .and_then(serde_json::Value::as_u64)
                     .filter(|ms| *ms > 0)
-                    .ok_or(ErrorCategory::ProtocolError)?;
+                    .ok_or_else(|| OpenFailure::new(ErrorCategory::ProtocolError))?;
                 ping_every = Some(Duration::from_millis(interval));
                 // The server joins the default namespace on its own.
                 if config.namespace == "/" {
@@ -484,27 +532,110 @@ where
             };
             ws.send(Message::Text(connect.encode().into()))
                 .await
-                .map_err(|_| ErrorCategory::WriteError)?;
+                .map_err(|_| OpenFailure::new(ErrorCategory::WriteError))?;
             continue;
         }
         match text.as_str() {
             "2" => {
                 ws.send(Message::Text("3".into()))
                     .await
-                    .map_err(|_| ErrorCategory::WriteError)?;
+                    .map_err(|_| OpenFailure::new(ErrorCategory::WriteError))?;
                 continue;
             }
-            "1" => return Err(ErrorCategory::UnexpectedClose),
+            "1" => return Err(OpenFailure::new(ErrorCategory::UnexpectedClose)),
             _ => {}
+        }
+        let Some(packet) = Packet::parse(&text) else {
+            continue;
+        };
+        if config.engine == EngineIo::V4
+            && packet.kind == b'0'
+            && packet.namespace == "/"
+            && !packet.data.contains("\"sid\"")
+        {
+            return Err(OpenFailure {
+                category: ErrorCategory::ProtocolError,
+                sign: Some(VersionSign::SocketIo2Server),
+            });
+        }
+        if packet.namespace == config.namespace {
+            match packet.kind {
+                b'0' => return Ok(ping_every),
+                b'4' | b'1' => return Err(OpenFailure::new(ErrorCategory::ProtocolError)),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// What one probe connection learned about the server's Socket.IO version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Probe {
+    /// The session did not open: no Engine.IO open packet.
+    NotOpened,
+    /// The server opened the session as the probe asked.
+    Opened,
+    /// Engine.IO 4: the server answered the connect to `/` with a session
+    /// id, as Socket.IO 3 and later servers do.
+    SocketIo3,
+    /// Engine.IO 4: the server answered the connect to `/` without a
+    /// session id, as Socket.IO 2 servers do.
+    SocketIo2,
+    /// Nothing to tell: the server refused `/`, closed, or said nothing.
+    Unknown,
+}
+
+/// Probes a fresh session for the server's Socket.IO version. With
+/// Engine.IO 4 it connects to `/`: a Socket.IO 3 or later server answers
+/// `40{"sid":...}` (Socket.IO protocol 5), while a Socket.IO 2 server,
+/// which joins every client to `/` on its own, answers `40` with no
+/// payload. With Engine.IO 3 it only checks that the session opens, which a
+/// Socket.IO 3 or later server without `allowEIO3` refuses.
+pub(crate) async fn probe<S>(ws: &mut S, engine: EngineIo) -> Probe
+where
+    S: Sink<Message, Error = TungsteniteError>
+        + Stream<Item = Result<Message, TungsteniteError>>
+        + Unpin,
+{
+    let mut opened = false;
+    while let Some(Ok(frame)) = ws.next().await {
+        let Message::Text(text) = frame else {
+            if !opened && frame.is_binary() {
+                return Probe::NotOpened;
+            }
+            continue;
+        };
+        if !opened {
+            if !text.starts_with("0{") {
+                return Probe::NotOpened;
+            }
+            opened = true;
+            if engine == EngineIo::V3 {
+                return Probe::Opened;
+            }
+            if ws.send(Message::Text("40".into())).await.is_err() {
+                return Probe::Unknown;
+            }
+            continue;
         }
         match Packet::parse(&text) {
-            Some(packet) if packet.namespace == config.namespace => match packet.kind {
-                b'0' => return Ok(ping_every),
-                b'4' | b'1' => return Err(ErrorCategory::ProtocolError),
-                _ => {}
-            },
+            Some(packet) if packet.namespace == "/" && packet.kind == b'0' => {
+                return if packet.data.contains("\"sid\"") {
+                    Probe::SocketIo3
+                } else {
+                    Probe::SocketIo2
+                };
+            }
+            Some(packet) if packet.namespace == "/" && packet.kind == b'4' => {
+                return Probe::Unknown;
+            }
             _ => {}
         }
+    }
+    if opened {
+        Probe::Unknown
+    } else {
+        Probe::NotOpened
     }
 }
 
