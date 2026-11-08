@@ -34,6 +34,25 @@ subcommand.
 | `--sio-version` | `4` | With `--mode socketio`: `2` for Socket.IO 2 servers (Engine.IO 3), `3` or `4` for later ones ([Socket.IO, section 4](socketio.md#4-socketio-2-servers)) |
 | `--match` | `first` | Reply matching in echo mode: `first`, `exact` or `json:/path` |
 | `--expect` | | Check every echo reply: `json:/pointer`, `json:/pointer=VALUE` or `contains:TEXT`; a reply that fails is a `check_failed` error ([templates](templates.md#3-values-from-replies-and-reply-checks)) |
+| `--graphql-ws-operation` | | With `--mode graphql-ws`: the subscription, query or mutation each session sends; required in that mode |
+| `--graphql-ws-operation-name`, `--graphql-ws-variables`, `--graphql-ws-extensions` | | With `--mode graphql-ws`: the operation's name, and its variables and extensions as JSON objects |
+
+## Connections
+
+| Option | Default | Description |
+| :--- | :--- | :--- |
+| `--connect-timeout` | `5s` | Time a connection gets for its TCP, TLS and WebSocket handshakes |
+| `--message-timeout` | `5s` | Time an echo reply (or Socket.IO ack) gets before it is a `timeout` error |
+| `--no-reconnect` | off | End a connection's worker after a timeout, an I/O error or a server close, instead of reconnecting with backoff ([METHODOLOGY.md, section 7.1](../METHODOLOGY.md#71-reconnect-policy)) |
+| `--ping-interval` | `0s` | Send a WebSocket ping this often (`0s` sends none) ([METHODOLOGY.md, section 2.4](../METHODOLOGY.md#24-keepalive-pings)) |
+| `--subprotocol` | | WebSocket subprotocol to request in the handshake (`Sec-WebSocket-Protocol`) |
+
+## Scenarios
+
+| Option | Default | Description |
+| :--- | :--- | :--- |
+| `--scenario` | | Run the phases of a scenario file instead of one load ([docs/scenarios.md](scenarios.md)). Cannot be combined with the load flags (`-c`, `-d`, `--stages`, and so on), which the file sets per phase |
+| `--phase` | | Run only the scenario phase with this name |
 
 ## SLO gates
 
