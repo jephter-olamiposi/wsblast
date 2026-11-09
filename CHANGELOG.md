@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-11-09
+
+0.2.5 brings recorded traffic and CI gating closer: `wsblast import` turns a browser session saved as a HAR file into a scenario, and a GitHub Action installs wsblast, runs a test, puts the report in the job summary and fails the job on a missed SLO. A Socket.IO server of the other protocol version is now named, with the flag to use, instead of showing up as reconnects; this was the one known gap 0.2.4 documented. Every flag of `wsblast --help` is now in docs/cli.md. The library API and the distributed protocol (version 4) are unchanged from 0.2.4, so 0.2.4 and 0.2.5 agents and coordinators work together.
+
 ### Added
 - **`wsblast import`: a scenario from a browser session.** `wsblast import session.har -o chat.yaml` reads the WebSocket messages Chrome and Edge record in an exported HAR file and writes a scenario that sends what one connection sent, in order: runs of the same message become one `Send` with a `count`, and the user's pauses become `Wait`s (from each reply when every message got one, which runs in echo mode, and otherwise from message to message in stream mode), capped at `--max-wait`. A Socket.IO connection becomes a Socket.IO scenario, with the command line that runs it. Cookies, authorization headers and Socket.IO auth objects are named, never copied, and binary messages are counted and left out. The file is validated as `--scenario` would before it is written. See docs/import.md.
 - **A GitHub Action.** `uses: jephter-olamiposi/wsblast@v0.2.5` with `args:` installs the release binary for the runner (Linux and macOS on x86_64 and arm64, Windows on x86_64, SHA-256 checked), runs the test, writes `wsblast-report.json`, adds the report to the job summary as Markdown, and fails the step with wsblast's exit code, so a failed SLO fails the job. Outputs: `exit-code`, `report` and `version`. CI runs the action on all three operating systems, with a gate that passes and one that fails. See docs/ci.md, section 4.0.
