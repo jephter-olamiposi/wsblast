@@ -14,7 +14,10 @@
 //! - a Socket.IO connection (an `EIO` query, or an Engine.IO open packet
 //!   first) becomes a Socket.IO scenario: Engine.IO and namespace packets
 //!   are left out, each event's argument is a `Send`, and the flags to run
-//!   it with name the event, the namespace and the version.
+//!   it with name the event, the namespace and the version. A session that
+//!   started on HTTP long-polling and upgraded, as browsers do by default,
+//!   is matched by its `sid` to the packets it posted before the upgrade,
+//!   where its namespace connect and auth object travel.
 //!
 //! The generated file is parsed and validated as `--scenario` would before
 //! it is written. Header values and Socket.IO auth objects, which often hold
@@ -63,6 +66,9 @@ struct Connection {
     /// Header names of the upgrade request, as recorded.
     headers: Vec<String>,
     frames: Vec<Frame>,
+    /// Engine.IO packets the browser posted over HTTP long-polling for the
+    /// same Socket.IO session before it upgraded to this connection.
+    polling: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +90,22 @@ fn connections(har: &Value) -> Result<Vec<Connection>> {
         .pointer("/log/entries")
         .and_then(Value::as_array)
         .ok_or_else(|| invalid("not a HAR file: it has no log.entries"))?;
+    let mut polled: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for entry in entries {
+        let url = entry.pointer("/request/url").and_then(Value::as_str);
+        let body = entry
+            .pointer("/request/postData/text")
+            .and_then(Value::as_str);
+        if let (Some(url), Some(body)) = (url, body)
+            && url.contains("transport=polling")
+            && let Some(sid) = session_id(url)
+        {
+            polled
+                .entry(sid)
+                .or_default()
+                .extend(polling_packets(body, url.contains("EIO=3")));
+        }
+    }
     let mut found = Vec::new();
     for entry in entries {
         let Some(messages) = entry.get("_webSocketMessages").and_then(Value::as_array) else {
@@ -122,13 +144,66 @@ fn connections(har: &Value) -> Result<Vec<Connection>> {
                 Some(Frame { sent, time, text })
             })
             .collect();
+        let polling = session_id(&url)
+            .and_then(|sid| polled.get(&sid).cloned())
+            .unwrap_or_default();
         found.push(Connection {
             url,
             headers,
             frames,
+            polling,
         });
     }
     Ok(found)
+}
+
+/// The Engine.IO session id in a Socket.IO URL's `sid` query.
+fn session_id(url: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()?
+        .query_pairs()
+        .find(|(name, _)| name == "sid")
+        .map(|(_, sid)| sid.into_owned())
+        .filter(|sid| !sid.is_empty())
+}
+
+/// The packets of a long-polling request body: separated by the record
+/// separator in Engine.IO 4, each prefixed with its length and a colon in
+/// Engine.IO 3. A body that is not in that shape gives no packets.
+fn polling_packets(body: &str, engine_io_3: bool) -> Vec<String> {
+    if !engine_io_3 {
+        return body
+            .split('\u{1e}')
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
+    let mut packets = Vec::new();
+    let mut rest = body;
+    while !rest.is_empty() {
+        let Some((len, tail)) = rest.split_once(':') else {
+            break;
+        };
+        // The length counts UTF-16 code units, as JavaScript strings do.
+        let Ok(len) = len.parse::<usize>() else {
+            break;
+        };
+        let mut units = 0;
+        let end = tail
+            .char_indices()
+            .find(|(_, c)| {
+                let at_end = units >= len;
+                units += c.len_utf16();
+                at_end
+            })
+            .map_or(tail.len(), |(i, _)| i);
+        if units < len {
+            break;
+        }
+        packets.push(tail[..end].to_string());
+        rest = &tail[end..];
+    }
+    packets
 }
 
 /// Picks the connection to import: the one `--index` names among those
@@ -423,7 +498,7 @@ fn plain_steps(connection: &Connection, notes: &mut Vec<String>) -> (Vec<Step>, 
             plural(sends, "message")
         ));
     }
-    (steps(frames, echo, |f| f.text.clone()), echo)
+    (steps(frames, echo, |_| true, |f| f.text.clone()), echo)
 }
 
 /// The steps of a Socket.IO connection: the arguments of the most frequent
@@ -431,8 +506,15 @@ fn plain_steps(connection: &Connection, notes: &mut Vec<String>) -> (Vec<Step>, 
 fn socketio_steps(connection: &Connection, notes: &mut Vec<String>) -> (Vec<Step>, SocketIo) {
     let mut counts: BTreeMap<(String, String), usize> = BTreeMap::new();
     let mut auth_keys = None;
-    for frame in connection.frames.iter().filter(|f| f.sent) {
-        let Some((kind, namespace, data)) = frame.text.as_deref().and_then(socketio_packet) else {
+    let mut polled_events = 0;
+    let sent = connection
+        .frames
+        .iter()
+        .filter(|f| f.sent)
+        .filter_map(|f| f.text.as_deref());
+    let polled = connection.polling.iter().map(String::as_str);
+    for (over_polling, text) in polled.map(|t| (true, t)).chain(sent.map(|t| (false, t))) {
+        let Some((kind, namespace, data)) = socketio_packet(text) else {
             continue;
         };
         match kind {
@@ -441,12 +523,12 @@ fn socketio_steps(connection: &Connection, notes: &mut Vec<String>) -> (Vec<Step
                     auth_keys = Some(auth.keys().cloned().collect::<Vec<_>>().join(", "));
                 }
             }
+            b'2' | b'5' if over_polling => polled_events += 1,
             b'2' => {
                 if let Some(name) = event_name(data) {
                     *counts.entry((name, namespace.to_string())).or_default() += 1;
                 }
             }
-            b'5' => {}
             _ => {}
         }
     }
@@ -475,6 +557,13 @@ fn socketio_steps(connection: &Connection, notes: &mut Vec<String>) -> (Vec<Step
     if let Some(keys) = auth_keys {
         notes.push(format!(
             "the recorded namespace connect carried an auth object ({keys}); it is not copied: pass it with --sio-auth '{{...}}'"
+        ));
+    }
+    if polled_events > 0 {
+        notes.push(format!(
+            "{} sent over HTTP long-polling before the WebSocket upgrade {} left out",
+            plural(polled_events, "event"),
+            if polled_events == 1 { "is" } else { "are" }
         ));
     }
     let binary_events = connection
@@ -513,7 +602,13 @@ fn socketio_steps(connection: &Connection, notes: &mut Vec<String>) -> (Vec<Step
     };
     let engine_io_3 = connection.url.contains("EIO=3");
     (
-        steps(&connection.frames, true, payload),
+        // Socket.IO packets are replies; Engine.IO pings are not.
+        steps(
+            &connection.frames,
+            true,
+            |f| f.text.as_deref().is_some_and(|t| t.starts_with('4')) || f.text.is_none(),
+            payload,
+        ),
         SocketIo {
             event,
             namespace,
@@ -531,24 +626,30 @@ fn event_name(data: &str) -> Option<String> {
 }
 
 /// The messages `payload` keeps, each with the pause before it: since the
-/// last reply after the previous message when `from_reply`, since the
-/// previous message otherwise. The first message has no pause.
+/// last reply (a received frame `is_reply` accepts) after the previous
+/// message when `from_reply`, since the previous message otherwise. The
+/// first message has no pause. Once a reply has come, a message that is
+/// left out and its own replies do not move the start of the pause: the
+/// user's time before and after it is all pause in the scenario.
 fn steps(
     frames: &[Frame],
     from_reply: bool,
+    is_reply: impl Fn(&Frame) -> bool,
     payload: impl Fn(&Frame) -> Option<String>,
 ) -> Vec<Step> {
     let mut steps = Vec::new();
     let mut last_send: Option<f64> = None;
     let mut last_reply: Option<f64> = None;
+    let mut settled = false;
     for frame in frames {
         if !frame.sent {
-            if last_send.is_some() {
+            if last_send.is_some() && !settled && is_reply(frame) {
                 last_reply = Some(frame.time);
             }
             continue;
         }
         let Some(text) = payload(frame) else {
+            settled |= last_reply.is_some();
             continue;
         };
         let pause = match (last_send, last_reply) {
@@ -562,6 +663,7 @@ fn steps(
         });
         last_send = Some(frame.time);
         last_reply = None;
+        settled = false;
     }
     steps
 }
@@ -790,6 +892,124 @@ mod tests {
             imported.notes
         );
         assert_eq!(scenario.phase_names().collect::<Vec<_>>(), ["recorded"]);
+    }
+
+    #[test]
+    fn a_message_left_out_keeps_the_pause_around_it() {
+        // As Chrome recorded it: the binary message is left out, so the
+        // pause before "leave" is the user's whole time since the reply to
+        // the last kept message, 250 ms before the binary one and 300 ms
+        // after its reply.
+        let binary = |sent: bool, time: f64| {
+            serde_json::json!({
+                "type": if sent { "send" } else { "receive" },
+                "time": time, "opcode": 2, "data": "AQID",
+            })
+        };
+        let file = har(vec![ws_entry(
+            "ws://app.example.com/ws",
+            vec![
+                frame(true, 10.000, "say"),
+                frame(false, 10.002, "said"),
+                binary(true, 10.252),
+                binary(false, 10.253),
+                frame(true, 10.553, "leave"),
+                frame(false, 10.555, "bye"),
+            ],
+        )]);
+        let imported = import(&file.0, &options()).unwrap();
+        assert!(
+            imported.yaml.contains("duration: 551ms"),
+            "{}",
+            imported.yaml
+        );
+    }
+
+    #[test]
+    fn a_socketio_ping_does_not_shorten_the_pause() {
+        let file = har(vec![ws_entry(
+            "wss://rt.example.com/socket.io/?EIO=4&transport=websocket",
+            vec![
+                frame(false, 1.000, r#"0{"sid":"abc","pingInterval":25000}"#),
+                frame(true, 1.001, "40"),
+                frame(false, 1.002, r#"40{"sid":"def"}"#),
+                frame(true, 2.000, r#"420["say","a"]"#),
+                frame(false, 2.010, r#"430["ok"]"#),
+                frame(false, 3.000, "2"),
+                frame(true, 3.001, "3"),
+                frame(true, 4.010, r#"421["say","b"]"#),
+            ],
+        )]);
+        let imported = import(&file.0, &options()).unwrap();
+        // From the ack at 2.010 to the next event at 4.010; the server's
+        // ping at 3.000 and the pong are Engine.IO, not replies.
+        assert!(
+            imported.yaml.contains("duration: 2000ms"),
+            "{}",
+            imported.yaml
+        );
+    }
+
+    #[test]
+    fn an_upgraded_socketio_session_reads_what_it_posted_before_the_upgrade() {
+        // Browsers start on long-polling and upgrade: the namespace connect
+        // with its auth object, and an early emit, go in a POST body.
+        let poll = |url: &str, body: &str| {
+            serde_json::json!({
+                "_resourceType": "xhr",
+                "request": { "method": "POST", "url": url, "headers": [],
+                             "postData": { "mimeType": "text/plain;charset=UTF-8", "text": body } },
+                "response": { "status": 200 }
+            })
+        };
+        let file = har(vec![
+            poll(
+                "https://rt.example.com/socket.io/?EIO=4&transport=polling&t=x&sid=s1",
+                "40/chat,{\"token\":\"secret\"}\u{1e}42/chat,[\"early\",1]",
+            ),
+            poll(
+                "https://rt.example.com/socket.io/?EIO=4&transport=polling&t=y&sid=other",
+                "40,{\"user\":\"someone-else\"}",
+            ),
+            ws_entry(
+                "wss://rt.example.com/socket.io/?EIO=4&transport=websocket&sid=s1",
+                vec![
+                    frame(true, 1.0, "2probe"),
+                    frame(false, 1.001, "3probe"),
+                    frame(true, 1.002, "5"),
+                    frame(true, 2.0, r#"42/chat,0["say","hi"]"#),
+                    frame(false, 2.001, r#"43/chat,0["ok"]"#),
+                ],
+            ),
+        ]);
+        let imported = import(&file.0, &options()).unwrap();
+        let notes = imported.notes.join("\n");
+        assert!(notes.contains("auth object (token)"), "{notes}");
+        assert!(!notes.contains("user"), "{notes}");
+        assert!(
+            notes.contains("1 event sent over HTTP long-polling"),
+            "{notes}"
+        );
+        assert!(!imported.yaml.contains("secret"), "{}", imported.yaml);
+        assert_eq!(imported.sends, 1);
+        assert!(
+            imported
+                .run_flags
+                .windows(2)
+                .any(|w| w == ["--sio-namespace", "/chat"]),
+            "{:?}",
+            imported.run_flags
+        );
+    }
+
+    #[test]
+    fn engine_io_3_polling_bodies_are_length_prefixed() {
+        assert_eq!(
+            polling_packets("7:40/a,{}12:42/a,[\"é\",1]", true),
+            ["40/a,{}", "42/a,[\"é\",1]"]
+        );
+        assert_eq!(polling_packets("2:40", false), ["2:40"]);
+        assert_eq!(polling_packets("9:short", true), Vec::<String>::new());
     }
 
     #[test]

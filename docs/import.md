@@ -49,7 +49,8 @@ add phases, stages, SLOs, `expect` checks or `{{data.COLUMN}}` templates.
 
 Every text message the browser sent becomes a `Send` action, and a run of
 the same message is one `Send` with a `count`. A pause of a millisecond or
-more before a message becomes a `Wait`:
+more before a message becomes a `Wait`; when a message is left out, the
+time before and after it is all in the next `Wait`:
 
 - When every message got a reply before the next one, the scenario runs in
   echo mode, where each `Send` waits for its reply; the pause is the
@@ -91,6 +92,11 @@ frame is an Engine.IO open packet) becomes a Socket.IO scenario:
 
 - Engine.IO packets (pings, the open packet) and namespace connects are
   left out; `--mode socketio` sends its own.
+- A session that started on HTTP long-polling and upgraded, as the
+  Socket.IO client does by default, is matched by its session id to what
+  it posted before the upgrade: its namespace connect and auth object
+  usually travel there. Events sent before the upgrade are counted and
+  left out.
 - The argument of each event the browser emitted is a `Send`. A Socket.IO
   scenario emits one event name, so the import keeps the most frequent
   event and names the ones it left out.

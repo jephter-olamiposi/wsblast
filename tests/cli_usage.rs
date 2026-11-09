@@ -25,6 +25,9 @@ fn subcommands() -> Vec<&'static str> {
     if cfg!(feature = "distributed") {
         names.push("agent");
     }
+    if cfg!(feature = "scenario") {
+        names.push("import");
+    }
     names
 }
 

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`wsblast import` of a Socket.IO session that upgraded from long-polling**, as the Socket.IO client connects by default. Its namespace connect and auth object travel over long-polling before the upgrade, so the import did not say the recorded session logged in with an auth object. The import now matches the WebSocket to the packets the same session posted before the upgrade, names the auth object's keys, and counts events sent before the upgrade.
+- **`wsblast import` keeps the user's whole pause around a message it leaves out**, such as a binary message: the replies to that message no longer start the pause to the next one, and neither do Engine.IO pings in a Socket.IO session. Both fixes were found on HAR files exported by Chrome's DevTools, which `tests/fixtures/har` now holds as test cases.
+
 ## [0.2.5] - 2026-11-09
 
 0.2.5 brings recorded traffic and CI gating closer: `wsblast import` turns a browser session saved as a HAR file into a scenario, and a GitHub Action installs wsblast, runs a test, puts the report in the job summary and fails the job on a missed SLO. A Socket.IO server of the other protocol version is now named, with the flag to use, instead of showing up as reconnects; this was the one known gap 0.2.4 documented. Every flag of `wsblast --help` is now in docs/cli.md. The library API and the distributed protocol (version 4) are unchanged from 0.2.4, so 0.2.4 and 0.2.5 agents and coordinators work together.
