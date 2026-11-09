@@ -249,7 +249,7 @@ jobs:
         uses: ./
         with:
           args: --version
-          version: v0.2.5
+          version: v0.2.6
       - name: Start a mock server
         shell: bash
         run: |
@@ -262,14 +262,14 @@ jobs:
           args: >-
             ws://127.0.0.1:19777 -c 5 -d 3s -p '{"text": "hello world"}'
             --max-p99 2s --max-error-rate 0.01
-          version: v0.2.5
+          version: v0.2.6
       - name: Gate that fails
         id: breach
         continue-on-error: true
         uses: ./
         with:
           args: ws://127.0.0.1:19777 -c 5 -d 2s --max-p50 1us
-          version: v0.2.5
+          version: v0.2.6
           report: breach.json
       - name: Check the outputs
         shell: bash
@@ -281,7 +281,7 @@ jobs:
           BREACH_OUTCOME: ${{ steps.breach.outcome }}
         run: |
           set -x
-          test "$VERSION" = 0.2.5
+          test "$VERSION" = 0.2.6
           test "$PASS_CODE" = 0
           test "$PASS_REPORT" = wsblast-report.json
           test -s wsblast-report.json
