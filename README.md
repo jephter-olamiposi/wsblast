@@ -45,6 +45,11 @@ whether the server met its SLOs. At a high level, it provides:
   shows up where it happened instead of in the run's averages.
 * **Distributed load**: `wsblast agent` on several machines generates one run's
   load, with histograms merged exactly on the coordinator.
+* **Beyond plain WebSocket**: Socket.IO 2 to 4 with events timed to their
+  acks, and permessage-deflate compression, both checked in CI against the
+  real servers and clients, plus GraphQL subscriptions.
+* **Recorded traffic**: `wsblast import` turns a session recorded in Chrome or
+  Edge (a HAR file) into a scenario that replays its messages and pauses.
 * **Test tooling**: a mock server that can misbehave on purpose or answer
   from a rules file,
   multi-phase YAML scenarios, client-side fault injection, frame capture,
@@ -89,6 +94,14 @@ and leaving.
 wsblast ws://127.0.0.1:9001 --arrival-rate 50 --session-duration 20s -d 2m -r 1
 ```
 
+Or replay what a browser sent: record the app in Chrome DevTools, export the
+HAR file, and turn its WebSocket messages into a scenario.
+
+```bash
+wsblast import session.har -o session.yaml
+wsblast --scenario session.yaml
+```
+
 `wsblast mock` starts a local echo server on `127.0.0.1:9001` to test against.
 With `--delay 20ms --stall-every 5s --stall-for 300ms` it answers slowly and
 stalls every 5 seconds. Add `--tui` to any run for the live dashboard.
@@ -97,13 +110,14 @@ stalls every 5 seconds. Add `--tui` to any run for the live dashboard.
 
 ### In CI
 
-The repository is a GitHub Action. It installs a checksum-verified release,
-runs the test, puts the report in the job summary, and fails the job when an
-SLO fails:
+The repository is a GitHub Action, also listed on the
+[GitHub Marketplace](https://github.com/marketplace/actions/wsblast). It
+installs a checksum-verified release, runs the test, puts the report in the
+job summary, and fails the job when an SLO fails:
 
 ```yaml
 - name: WebSocket SLO gate
-  uses: jephter-olamiposi/wsblast@v0.2.5
+  uses: jephter-olamiposi/wsblast@v0.2.6
   with:
     args: ${{ vars.WS_URL }} -c 50 -d 30s -r 20 --max-p99 50ms --max-error-rate 0.01
 ```

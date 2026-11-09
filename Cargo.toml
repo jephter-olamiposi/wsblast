@@ -99,8 +99,8 @@ default = ["scenario", "compare", "auth", "graphql-ws", "socketio", "compression
 scenario = ["dep:serde_norway"]
 auth = []
 graphql-ws = []
-# `--mode socketio`: Socket.IO (Engine.IO 4) events and acks over WebSocket,
-# and `wsblast mock --socketio`.
+# `--mode socketio`: Socket.IO events and acks over WebSocket (Engine.IO 4,
+# and Engine.IO 3 with `--sio-version 2`), and `wsblast mock --socketio`.
 socketio = []
 # `--compression`: permessage-deflate (RFC 7692) on client connections, and
 # `wsblast mock --compression`.

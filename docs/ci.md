@@ -150,7 +150,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Load test with SLO gate
-        uses: jephter-olamiposi/wsblast@v0.2.5
+        uses: jephter-olamiposi/wsblast@v0.2.6
         env:
           WS_TOKEN: ${{ secrets.WS_TOKEN }}
         with:
@@ -170,7 +170,7 @@ jobs:
 | Input | Default | Description |
 | :--- | :--- | :--- |
 | `args` | | The command line after `wsblast`. It is parsed as a shell command line, so environment variables such as `$WS_TOKEN` expand and values with spaces need quotes. Keep untrusted text, such as pull request titles or branch names, out of it, and pass secrets through `env`. |
-| `version` | the action's tag | The release to install. Empty installs the release the action is pinned to when its ref is a version tag (`@v0.2.5`), and the latest release otherwise (`@main`). |
+| `version` | the action's tag | The release to install. Empty installs the release the action is pinned to when its ref is a version tag (`@v0.2.6`), and the latest release otherwise (`@main`). |
 | `report` | `wsblast-report.json` | Where the JSON report is written. When `args` sets `--format` or `-o` itself, the action leaves the output alone and writes no summary. |
 | `summary` | `true` | Add the report to the job summary, as Markdown. |
 
