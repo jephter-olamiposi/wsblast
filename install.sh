@@ -2,7 +2,7 @@
 # wsblast installer
 # Installs the pre-compiled wsblast binary for macOS or Linux.
 # Usage: curl -fsSL https://raw.githubusercontent.com/jephter-olamiposi/wsblast/main/install.sh | sh
-# Set WSBLAST_VERSION (e.g. v0.2.5) to install a specific release without querying the GitHub API.
+# Set WSBLAST_VERSION (e.g. v0.2.6) to install a specific release without querying the GitHub API.
 # Set WSBLAST_INSTALL_DIR to install somewhere other than /usr/local/bin.
 #
 # Release archives are built by dist (see dist-workspace.toml). Each release
@@ -67,7 +67,7 @@ else
     if [ -z "$LATEST_TAG" ]; then
         echo "Error: could not find the latest wsblast release on GitHub."
         echo "Check your network connection, or pin a version with:"
-        echo "  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | WSBLAST_VERSION=v0.2.5 sh"
+        echo "  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | WSBLAST_VERSION=v0.2.6 sh"
         exit 1
     fi
 fi

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-11-09
+
+0.2.6 fixes two things `wsblast import` got wrong on HAR files Chrome's DevTools exported: a Socket.IO session that started on long-polling, as the Socket.IO client does by default, no longer hides that it logged in with an auth object, and the user's whole pause is kept around a message the import leaves out. The library API, the report format and the distributed protocol are unchanged from 0.2.5.
+
 ### Fixed
 - **`wsblast import` of a Socket.IO session that upgraded from long-polling**, as the Socket.IO client connects by default. Its namespace connect and auth object travel over long-polling before the upgrade, so the import did not say the recorded session logged in with an auth object. The import now matches the WebSocket to the packets the same session posted before the upgrade, names the auth object's keys, and counts events sent before the upgrade.
 - **`wsblast import` keeps the user's whole pause around a message it leaves out**, such as a binary message: the replies to that message no longer start the pause to the next one, and neither do Engine.IO pings in a Socket.IO session. Both fixes were found on HAR files exported by Chrome's DevTools, which `tests/fixtures/har` now holds as test cases.
