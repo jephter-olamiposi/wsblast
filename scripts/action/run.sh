@@ -18,7 +18,7 @@ case "${1:-}" in
 esac
 own_output=0
 no_progress=0
-for arg in "$@"; do
+for arg in ${1+"$@"}; do
   case "$arg" in
     --format | --format=* | -o | -o* | --output | --output=*) own_output=1 ;;
     --no-progress) no_progress=1 ;;
@@ -36,7 +36,9 @@ if [ "$load_test" = 1 ]; then
   fi
 fi
 
-wsblast "$@" "${extra[@]}"
+# ${x+"..."} keeps an empty list from tripping set -u in bash before 4.4,
+# such as the bash 3.2 of the macOS runners.
+wsblast ${1+"$@"} ${extra[0]+"${extra[@]}"}
 code=$?
 
 if [ -n "$report" ] && [ -f "$report" ]; then
